@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>目标</h1>
+  <div class="muted">本地部署版本（SQLite）。</div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap: 12px;">
+      <div>
+        <strong>创建模式</strong>
+        <div class="muted">手动模式：你自己维护 goal 与 tasks；Plan 模式：由 agent 引导澄清并拆解。</div>
+      </div>
+      <div>
+        <a href="/goals/plan">进入 Plan 模式</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <form method="post" action="/goals">
+      <div style="margin-bottom: 10px;">
+        <label>目标内容</label>
+        <textarea name="content" rows="3" placeholder="例如：完成 OpenFocus MVP（目标+进度上报+事件落库）" required></textarea>
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label>描述（可选）</label>
+        <textarea name="description" rows="2" placeholder="补充：为什么重要/成功标准/范围边界"></textarea>
+      </div>
+      <div class="row">
+        <div>
+          <label>完成时间</label>
+          <input type="date" name="due_date" value="{{ default_due }}" required />
+        </div>
+        <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
+          <button type="submit">创建目标</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  {% if goals|length == 0 %}
+    <div class="card">
+      还没有目标。用上面的输入框创建第一个目标。
+    </div>
+  {% endif %}
+
+  {% for g in goals %}
+    <div class="card">
+      <div><strong>{{ g.content }}</strong></div>
+      <div class="muted">完成时间：{{ g.due_date }} · 创建于：{{ g.created_at }}</div>
+      <div style="margin-top: 10px; display:flex; gap: 10px;">
+        <a href="/goals/{{ g.id }}">查看</a>
+        <a href="/goals/{{ g.id }}/edit">编辑</a>
+        <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
+          <button type="submit" style="background:#b91c1c;">删除</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+{% endblock %}

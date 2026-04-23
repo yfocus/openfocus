@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Plan 对话</h1>
+  <div class="muted">session_id={{ session.id }} · turns={{ session.turns }} · status={{ session.status }}</div>
+
+  <div class="card">
+    <div><strong>草稿目标：</strong>{{ session.draft_content }}</div>
+    <div class="muted">完成时间：{{ session.due_date }}</div>
+  </div>
+
+  {% for m in messages %}
+    <div class="card">
+      <div class="muted">{{ m.role }}</div>
+      <div style="white-space: pre-wrap;">{{ m.content }}</div>
+    </div>
+  {% endfor %}
+
+  {% if session.status == 'in_progress' %}
+    <div class="card">
+      <form method="post" action="/goals/plan/{{ session.id }}/reply">
+        <div style="margin-bottom: 10px;">
+          <label>你的回答</label>
+          <textarea name="answer" rows="4" placeholder="请尽量具体" required></textarea>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap: 10px;">
+          <a href="/goals" class="muted" style="align-self:center;">退出</a>
+          <button type="submit">继续</button>
+        </div>
+      </form>
+    </div>
+  {% endif %}
+
+  {% if session.status == 'completed' and created_goal_id %}
+    <div class="card">
+      已创建目标：<a href="/goals/{{ created_goal_id }}">查看</a>
+    </div>
+  {% endif %}
+{% endblock %}
+

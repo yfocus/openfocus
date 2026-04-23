@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>编辑目标</h1>
+
+  <div class="card">
+    <form method="post" action="/goals/{{ goal.id }}/edit">
+      <div style="margin-bottom: 10px;">
+        <label>目标内容</label>
+        <textarea name="content" rows="4" required>{{ goal.content }}</textarea>
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label>描述</label>
+        <textarea name="description" rows="3">{{ goal.description }}</textarea>
+      </div>
+      <div class="row">
+        <div>
+          <label>完成时间</label>
+          <input type="date" name="due_date" value="{{ goal.due_date }}" required />
+        </div>
+        <div>
+          <label>状态</label>
+          <input name="status" value="{{ goal.status }}" placeholder="active/done/paused" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <div>
+          <label>优先级</label>
+          <input name="priority" value="{{ goal.priority }}" placeholder="urgent/normal" />
+        </div>
+        <div>
+          <label>重要程度</label>
+          <input name="importance" value="{{ goal.importance }}" placeholder="very_important/normal" />
+        </div>
+      </div>
+      <div style="margin-top: 10px; display:flex; justify-content:flex-end; gap: 10px;">
+        <a href="/goals/{{ goal.id }}" class="muted" style="align-self:center;">返回</a>
+        <button type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}

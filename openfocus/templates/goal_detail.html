@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>目标详情</h1>
+
+  <div class="card">
+    <div><strong>{{ goal.content }}</strong></div>
+    {% if goal.description %}
+      <div class="muted" style="margin-top: 6px; white-space: pre-wrap;">{{ goal.description }}</div>
+    {% endif %}
+    <div class="muted" style="margin-top: 8px;">
+      状态：{{ goal.status }} · 优先级：{{ goal.priority }} · 重要程度：{{ goal.importance }}
+      · 完成时间：{{ goal.due_date }} · 创建于：{{ goal.created_at }}
+    </div>
+    <div style="margin-top: 10px; display:flex; gap: 10px;">
+      <a href="/goals">返回列表</a>
+      <a href="/goals/{{ goal.id }}/edit">编辑目标</a>
+    </div>
+  </div>
+
+  <h2>Tasks（手动模式可维护）</h2>
+  <div class="card">
+    <form method="post" action="/goals/{{ goal.id }}/tasks">
+      <div class="row">
+        <div>
+          <label>Task 标题</label>
+          <input name="title" placeholder="例如：把 focus_report 接入 coco" required />
+        </div>
+        <div style="display:flex; align-items:end; justify-content:flex-end;">
+          <button type="submit">添加 Task</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  {% if tasks|length == 0 %}
+    <div class="card">还没有 tasks。</div>
+  {% endif %}
+
+  {% for t in tasks %}
+    <div class="card">
+      <div><strong>{{ t.title }}</strong></div>
+      <div class="muted">status={{ t.status }} · public_id={{ t.public_id }}</div>
+      <div style="margin-top: 10px; display:flex; gap: 10px;">
+        {% if t.status != 'done' %}
+          <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;">
+            <button type="submit">标记完成</button>
+          </form>
+        {% endif %}
+        <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该 task？')">
+          <button type="submit" style="background:#b91c1c;">删除</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+{% endblock %}
+
