@@ -23,10 +23,17 @@ class OpenAICompatConfig:
 class OpenAICompatibleProvider:
     """最小 OpenAI-compatible Provider（参考 honcho 的调用结构与 token usage 解析）。
 
-    约定环境变量：
-    - `OPENFOCUS_OPENAI_BASE_URL`（例如 `https://api.openai.com/v1` 或本地网关 `/v1`）
+    环境变量（按优先级选择一套配置；只要命中其中一套就可用）：
+
+    1) OpenAI-compatible（默认）
+    - `OPENFOCUS_OPENAI_BASE_URL`（例如 `https://api.openai.com/v1` 或自建网关 `/v1`）
     - `OPENFOCUS_OPENAI_API_KEY`
     - `OPENFOCUS_OPENAI_MODEL`
+
+    2) 火山方舟 Ark（OpenAI-compatible；提供别名以兼容其他项目的 .env）
+    - `OPENFOCUS_ARK_BASE_URL` / `ARK_BASE_URL`（例如 `https://ark.cn-beijing.volces.com/api/v3`）
+    - `OPENFOCUS_ARK_API_KEY` / `ARK_API_KEY`
+    - `OPENFOCUS_ARK_MODEL` / `ARK_MODEL`
     """
 
     def __init__(self, cfg: OpenAICompatConfig):
@@ -34,12 +41,32 @@ class OpenAICompatibleProvider:
 
     @classmethod
     def from_env(cls) -> "OpenAICompatibleProvider":
-        base_url = os.environ.get("OPENFOCUS_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        api_key = os.environ.get("OPENFOCUS_OPENAI_API_KEY", "")
-        model = os.environ.get("OPENFOCUS_OPENAI_MODEL", "gpt-4.1-mini")
-        if not api_key:
-            raise RuntimeError("缺少环境变量 OPENFOCUS_OPENAI_API_KEY")
-        return cls(OpenAICompatConfig(base_url=base_url, api_key=api_key, model=model))
+        def _first_env(*names: str) -> str:
+            for n in names:
+                v = os.environ.get(n, "")
+                if v:
+                    return v
+            return ""
+
+        # 1) OpenAI-compatible（优先）
+        openai_api_key = _first_env("OPENFOCUS_OPENAI_API_KEY")
+        if openai_api_key:
+            base_url = _first_env("OPENFOCUS_OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            model = _first_env("OPENFOCUS_OPENAI_MODEL") or "gpt-4.1-mini"
+            return cls(OpenAICompatConfig(base_url=base_url.rstrip("/"), api_key=openai_api_key, model=model))
+
+        # 2) Ark（OpenAI-compatible 兼容层）
+        ark_api_key = _first_env("OPENFOCUS_ARK_API_KEY", "ARK_API_KEY")
+        if ark_api_key:
+            base_url = (
+                _first_env("OPENFOCUS_ARK_BASE_URL", "ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3"
+            )
+            model = _first_env("OPENFOCUS_ARK_MODEL", "ARK_MODEL", "OPENFOCUS_OPENAI_MODEL") or "doubao-seed-1-6"
+            return cls(OpenAICompatConfig(base_url=base_url.rstrip("/"), api_key=ark_api_key, model=model))
+
+        raise RuntimeError(
+            "缺少 LLM 配置环境变量：请设置 OPENFOCUS_OPENAI_API_KEY，或设置 OPENFOCUS_ARK_API_KEY/ARK_API_KEY（Ark）。"
+        )
 
     def chat_completions(
         self,
@@ -126,4 +153,3 @@ class OpenAICompatibleProvider:
                 break
 
         raise RuntimeError(f"LLM 调用失败（attempts={self.cfg.retry_attempts}）：{last_err}")
-

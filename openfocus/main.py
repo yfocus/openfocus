@@ -13,6 +13,7 @@ from .models import Base, Event, Goal, GoalPlanMessage, GoalPlanSession, Task
 from .schemas import AgentEventIn, FocusReportIn
 
 from .agent.llm.openai_compat import OpenAICompatibleProvider
+from .agent.agents.task_prompt_recommender import TaskPromptRecommenderAgent
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -45,7 +46,9 @@ def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str |
     except Exception as e:
         return None, (
             "缺少 LLM 配置，Plan 模式不可用。\n"
-            "请设置环境变量：OPENFOCUS_OPENAI_API_KEY（以及可选的 OPENFOCUS_OPENAI_BASE_URL/OPENFOCUS_OPENAI_MODEL）。\n"
+            "请设置环境变量（任选其一）：\n"
+            "- OpenAI-compatible：OPENFOCUS_OPENAI_API_KEY（以及可选的 OPENFOCUS_OPENAI_BASE_URL/OPENFOCUS_OPENAI_MODEL）\n"
+            "- Ark：OPENFOCUS_ARK_API_KEY（或 ARK_API_KEY），以及 OPENFOCUS_ARK_BASE_URL/OPENFOCUS_ARK_MODEL（或 ARK_BASE_URL/ARK_MODEL）\n"
             f"错误：{e}"
         )
 
@@ -440,3 +443,28 @@ def focus_report(report: FocusReportIn) -> dict:
 
         s.flush()
     return {"ok": True, "task_updated": updated_task}
+
+
+class _NoopEventSink:
+    def emit(self, kind: str, agent: str, payload: dict | None = None, task_id: str | None = None) -> None:
+        return None
+
+
+@app.get("/api/tasks/{task_public_id}/recommended_prompt")
+def task_recommended_prompt(task_public_id: str) -> dict:
+    """按需生成任务推荐提示词（不落库）。"""
+
+    provider, err = _get_llm_provider_or_error()
+    if provider is None:
+        raise HTTPException(status_code=400, detail=err or "LLM provider not configured")
+
+    agent = TaskPromptRecommenderAgent(task_public_id=task_public_id, provider=provider)
+    try:
+        out = agent.run(sink=_NoopEventSink())
+    except ValueError as e:
+        msg = str(e)
+        if "Task not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=500, detail=msg)
+
+    return {"task_public_id": task_public_id, "prompt": out["prompt"]}

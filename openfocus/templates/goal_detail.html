@@ -50,7 +50,19 @@
           <button type="submit" style="background:#b91c1c;">删除</button>
         </form>
       </div>
+
+      <details style="margin-top: 12px;">
+        <summary>推荐提示词（复制给 Agent 执行）</summary>
+        <div style="margin-top: 8px;">
+          <textarea id="prompt-{{ t.id }}" rows="14" readonly style="width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;" placeholder="点击下方按钮生成推荐提示词（会调用 LLM）。"></textarea>
+          <div style="display:flex; gap:10px; margin-top:8px;">
+            <button type="button" id="gen-{{ t.id }}" onclick="(async()=>{const btn=document.getElementById('gen-{{ t.id }}'); const out=document.getElementById('prompt-{{ t.id }}'); const err=document.getElementById('prompt-err-{{ t.id }}'); if(!btn||!out||!err) return; err.textContent=''; btn.disabled=true; const old=btn.textContent; btn.textContent='生成中...'; try{const r=await fetch('/api/tasks/{{ t.public_id }}/recommended_prompt'); if(!r.ok){const txt=await r.text(); throw new Error(txt||('HTTP '+r.status));} const data=await r.json(); out.value=(data && data.prompt) ? String(data.prompt) : ''; if(!out.value){throw new Error('返回为空');}}catch(e){err.textContent=String(e&&e.message?e.message:e); }finally{btn.disabled=false; btn.textContent=old;}})();">生成提示词</button>
+            <button type="button" onclick="(async()=>{const el=document.getElementById('prompt-{{ t.id }}'); const err=document.getElementById('prompt-err-{{ t.id }}'); if(!el||!err) return; const v=el.value||el.textContent||''; if(!v.trim()){err.textContent='请先生成提示词。'; return;} try{await navigator.clipboard.writeText(v); err.textContent='已复制'; setTimeout(()=>{if(err.textContent==='已复制') err.textContent='';}, 1000);}catch(e){el.focus(); el.select(); err.textContent='复制失败（已选中文本，可手动复制）。';}})();">复制提示词</button>
+          </div>
+          <div id="prompt-err-{{ t.id }}" class="muted" style="margin-top: 6px; color:#b91c1c;"></div>
+          <div class="muted" style="margin-top: 6px;">提示：如 OpenFocus 不是运行在 127.0.0.1:8001，请把生成的提示词里的 server URL 替换为实际地址。</div>
+        </div>
+      </details>
     </div>
   {% endfor %}
 {% endblock %}
-
