@@ -84,6 +84,8 @@ class OpenAICompatibleProvider:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # 注意：部分 OpenAI-compatible 网关可能不支持 tools/response_format。
+        # 我们仍然先按 OpenAI 语义发送；若返回 400，再做兼容性降级重试。
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -97,6 +99,7 @@ class OpenAICompatibleProvider:
         }
 
         last_err: Exception | None = None
+        last_err_body: str | None = None
         for attempt in range(1, self.cfg.retry_attempts + 1):
             try:
                 req = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
@@ -137,7 +140,43 @@ class OpenAICompatibleProvider:
                     },
                 )
 
-            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            except urllib.error.HTTPError as e:
+                last_err = e
+                try:
+                    last_err_body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    last_err_body = None
+
+                # 兼容性降级：如果网关返回 400，尝试去掉 response_format / tools 后重试。
+                if e.code == 400:
+                    changed = False
+                    if "response_format" in payload:
+                        payload.pop("response_format", None)
+                        response_format = None
+                        changed = True
+                    if "tools" in payload:
+                        payload.pop("tools", None)
+                        payload.pop("tool_choice", None)
+                        tools = None
+                        changed = True
+                    if changed:
+                        data = json.dumps(payload).encode("utf-8")
+                        if attempt < self.cfg.retry_attempts:
+                            continue
+
+                # honcho 风格：temperature 为 0 时，重试第 2 次开始略微升温
+                if temperature == 0.0 and attempt > 1:
+                    temperature = 0.2
+                    payload["temperature"] = temperature
+                    data = json.dumps(payload).encode("utf-8")
+
+                if attempt < self.cfg.retry_attempts:
+                    sleep_s = min(10.0, max(4.0, 2 ** attempt))
+                    time.sleep(sleep_s)
+                    continue
+                break
+
+            except (urllib.error.URLError, TimeoutError) as e:
                 last_err = e
                 # honcho 风格：temperature 为 0 时，重试第 2 次开始略微升温
                 if temperature == 0.0 and attempt > 1:
@@ -152,4 +191,9 @@ class OpenAICompatibleProvider:
                     continue
                 break
 
-        raise RuntimeError(f"LLM 调用失败（attempts={self.cfg.retry_attempts}）：{last_err}")
+        detail = f"{last_err}"
+        if last_err_body:
+            detail += f"\nresponse_body={last_err_body}"
+        raise RuntimeError(
+            f"LLM 调用失败（attempts={self.cfg.retry_attempts} base_url={self.cfg.base_url} model={self.cfg.model}）：{detail}"
+        )

@@ -466,5 +466,8 @@ def task_recommended_prompt(task_public_id: str) -> dict:
         if "Task not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=500, detail=msg)
+    except Exception as e:
+        # LLM 调用失败/网关错误等：向前端返回可读错误信息（不包含密钥）。
+        raise HTTPException(status_code=502, detail=str(e))
 
     return {"task_public_id": task_public_id, "prompt": out["prompt"]}

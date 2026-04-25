@@ -53,3 +53,59 @@ def test_llm_provider_env_openai_takes_precedence(monkeypatch):
     assert p.cfg.api_key == "test-openai-key"
     assert p.cfg.base_url == "https://openai.example.com/v1"
     assert p.cfg.model == "gpt-test"
+
+
+def test_openai_compat_fallback_on_400_removes_tools_and_response_format(monkeypatch):
+    import io
+    import json
+    import urllib.error
+    import urllib.request
+
+    from openfocus.agent.llm.openai_compat import OpenAICompatConfig, OpenAICompatibleProvider
+
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self, raw: str):
+            self._raw = raw.encode("utf-8")
+
+        def read(self):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req: urllib.request.Request, timeout: float):
+        payload = json.loads((req.data or b"{}").decode("utf-8"))
+        calls.append(payload)
+        if len(calls) == 1:
+            assert "response_format" in payload
+            assert "tools" in payload
+            fp = io.BytesIO(b"{\"error\":\"unsupported response_format/tools\"}")
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=fp)
+        assert "response_format" not in payload
+        assert "tools" not in payload
+        return _Resp(
+            json.dumps(
+                {
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            )
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    p = OpenAICompatibleProvider(OpenAICompatConfig(base_url="https://x/v1", api_key="k", model="m", retry_attempts=3))
+    res = p.chat_completions(
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.0,
+        max_tokens=10,
+        tools=[{"type": "function", "function": {"name": "t", "parameters": {"type": "object"}}}],
+        response_format={"type": "json_object"},
+    )
+    assert res.content == "ok"
+    assert len(calls) == 2
