@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+  <div style="margin-top: 14px;" class="panel pad">
+    <div class="k">Memory</div>
+    <div class="muted" style="margin-top: 8px;">仿照 memory-core：用 Markdown 持久化用户画像（User Card）与长期记忆（User Memory）。</div>
+
+    <div class="divider"></div>
+
+    <div style="display:flex; gap: 8px; flex-wrap:wrap;">
+      <button type="button" class="btn-ghost" id="tab-card">User Card</button>
+      <button type="button" class="btn-ghost" id="tab-memory">User Memory</button>
+      <span class="pill">markdown</span>
+      <span class="pill">editable</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <form method="post" action="/memory/save" id="memory-form">
+      <div id="pane-card" style="display:block;">
+        <div class="muted">User Card（偏好/工作方式/禁忌/沟通风格）</div>
+        <div style="height: 10px;"></div>
+        <textarea name="user_card" rows="18" placeholder="# User Card\n\n- ...">{{ user_card }}</textarea>
+      </div>
+
+      <div id="pane-memory" style="display:none;">
+        <div class="muted">User Memory（事实/上下文/长期结论）</div>
+        <div style="height: 10px;"></div>
+        <textarea name="user_memory" rows="18" placeholder="# User Memory\n\n- ...">{{ user_memory }}</textarea>
+      </div>
+
+      <div style="margin-top: 12px; display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
+        <a href="/goals" class="btn-ghost" role="button" style="align-self:center;">返回 Dashboard</a>
+        <button type="submit" id="save-btn">保存</button>
+      </div>
+      <div id="save-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 保存中…</div>
+    </form>
+  </div>
+
+  <script>
+    (function(){
+      const tabCard = document.getElementById('tab-card');
+      const tabMem = document.getElementById('tab-memory');
+      const paneCard = document.getElementById('pane-card');
+      const paneMem = document.getElementById('pane-memory');
+      const form = document.getElementById('memory-form');
+      const btn = document.getElementById('save-btn');
+      const hint = document.getElementById('save-hint');
+
+      function setTab(t){
+        const isCard = (t === 'card');
+        paneCard.style.display = isCard ? 'block' : 'none';
+        paneMem.style.display = isCard ? 'none' : 'block';
+        tabCard.style.borderColor = isCard ? 'rgba(0,229,255,0.65)' : 'rgba(0,229,255,0.16)';
+        tabMem.style.borderColor = isCard ? 'rgba(0,229,255,0.16)' : 'rgba(0,229,255,0.65)';
+        try{ localStorage.setItem('openfocus:memory_tab', t); }catch(_){ }
+      }
+
+      tabCard?.addEventListener('click', ()=> setTab('card'));
+      tabMem?.addEventListener('click', ()=> setTab('memory'));
+
+      try{
+        const t = localStorage.getItem('openfocus:memory_tab') || 'card';
+        setTab(t);
+      }catch(_){ setTab('card'); }
+
+      if(form && btn && hint){
+        form.addEventListener('submit', ()=>{ btn.disabled = true; hint.style.display='block'; });
+      }
+    })();
+  </script>
+{% endblock %}

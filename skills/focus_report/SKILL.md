@@ -16,7 +16,6 @@ metadata:
 OpenFocus 服务端接收后会：
 
 - 把每次上报持久化为一条 `events` 记录（`kind=skill.focus_report`）
-- 尝试结合 `goal/tasks` 与上报内容推断任务是否已完成，若完成则把对应 `tasks.status` 标记为 `done`
 
 ## 服务端依赖
 

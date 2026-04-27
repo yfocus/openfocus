@@ -1,39 +1,173 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>Plan 对话</h1>
-  <div class="muted">session_id={{ session.id }} · turns={{ session.turns }} · status={{ session.status }}</div>
-
-  <div class="card">
-    <div><strong>草稿目标：</strong>{{ session.draft_content }}</div>
-    <div class="muted">完成时间：{{ session.due_date }}</div>
+  <div style="margin-top: 14px;" class="panel pad">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap:wrap;">
+      <div>
+        <div class="k">Plan Mode Session</div>
+        <div class="muted" style="margin-top: 6px;">session={{ session.id }} · turns={{ session.turns }} · {{ session.status }}</div>
+        <div class="muted" style="margin-top: 8px;">draft={{ session.draft_content }}</div>
+        <div class="muted" style="margin-top: 4px;">DDL={{ session.due_date }}</div>
+        {% if session.source_goal_id %}
+        <div class="muted" style="margin-top: 6px;">source_goal_id={{ session.source_goal_id }}</div>
+        {% endif %}
+      </div>
+      <div style="display:flex; gap: 10px; align-items:center;">
+        {% if session.source_goal_id %}
+          <a href="/goals?goal={{ session.source_goal_id }}" class="btn-ghost" role="button">返回目标</a>
+        {% else %}
+          <a href="/goals" class="btn-ghost" role="button">返回 Dashboard</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 
-  {% for m in messages %}
-    <div class="card">
-      <div class="muted">{{ m.role }}</div>
-      <div style="white-space: pre-wrap;">{{ m.content }}</div>
-    </div>
-  {% endfor %}
+  <div style="margin-top: 14px;" class="panel pad" id="chat" aria-live="polite">
+    <div class="k">CHAT</div>
+    <div class="muted" style="margin-top: 8px;">输入后会立即锁定发送按钮并显示“思考中”，避免重复点击与误操作。</div>
+    <div class="divider"></div>
 
-  {% if session.status == 'in_progress' %}
-    <div class="card">
-      <form method="post" action="/goals/plan/{{ session.id }}/reply">
-        <div style="margin-bottom: 10px;">
-          <label>你的回答</label>
-          <textarea name="answer" rows="4" placeholder="请尽量具体" required></textarea>
+    <div id="chat-messages" style="display:flex; flex-direction:column; gap: 10px;">
+      {% for m in messages %}
+        {% set is_user = (m.role == 'user') %}
+        <div style="display:flex; justify-content: {{ 'flex-end' if is_user else 'flex-start' }};">
+          <div class="panel" style="max-width: 860px; background: {{ 'rgba(0,229,255,0.07)' if is_user else 'rgba(0,0,0,0.18)' }}; border-color: {{ 'rgba(0,229,255,0.28)' if is_user else 'rgba(0,229,255,0.16)' }};">
+            <div class="pad" style="padding: 10px 12px;">
+              <div class="muted" style="font-size: 12px;">{{ 'you' if is_user else 'agent' }} · {{ m.created_at }}</div>
+              <div style="white-space: pre-wrap; margin-top: 6px;">{{ m.content }}</div>
+            </div>
+          </div>
         </div>
-        <div style="display:flex; justify-content:flex-end; gap: 10px;">
-          <a href="/goals" class="muted" style="align-self:center;">退出</a>
-          <button type="submit">继续</button>
+      {% endfor %}
+      <div id="thinking" style="display:none;">
+        <div style="display:flex; justify-content:flex-start;">
+          <div class="panel" style="max-width: 860px; background: rgba(0,0,0,0.18);">
+            <div class="pad" style="padding: 10px 12px;">
+              <div class="muted" style="font-size: 12px;">agent</div>
+              <div style="margin-top: 6px;"><span class="spin"></span> 正在思考…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% if session.status == 'in_progress' %}
+      <div class="divider"></div>
+      <form method="post" action="/goals/plan/{{ session.id }}/reply" id="reply-form">
+        <label class="muted">你的回答</label>
+        <textarea name="answer" id="reply-text" rows="4" placeholder="请尽量具体。建议：目标约束/范围/验收标准/你不想做的事" required></textarea>
+        <div style="margin-top: 10px; display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
+          <a href="/goals" class="btn-ghost" role="button" style="align-self:center;">退出</a>
+          <button type="submit" id="reply-btn">发送</button>
         </div>
       </form>
+    {% endif %}
+  </div>
+
+  {% if session.status == 'awaiting_confirm' %}
+    {% set draft = session.result_json or {} %}
+    {% set d_goal = draft.get('goal') or {} %}
+    {% set d_tasks = draft.get('tasks') or [] %}
+
+    <div style="margin-top: 14px;" class="panel pad">
+      <div class="k">DRAFT READY</div>
+      <div class="muted" style="margin-top: 8px;">Plan Agent 已生成拆解草案。这里做最终确认：确认后才会写入数据库。</div>
+      <div class="divider"></div>
+
+      {% if session.source_goal_id %}
+        <div class="pill warn">将把选中的 tasks 应用到 goal={{ session.source_goal_id }}</div>
+      {% else %}
+        <div class="pill">将创建新目标（并写入选中的 tasks）</div>
+      {% endif %}
+
+      <div style="margin-top: 10px; display:flex; gap: 8px; flex-wrap:wrap;">
+        {% if d_goal.get('content') %}<span class="pill">content {{ d_goal.get('content') }}</span>{% endif %}
+        {% if d_goal.get('status') %}<span class="pill">status {{ d_goal.get('status') }}</span>{% endif %}
+        {% if d_goal.get('priority') %}<span class="pill">priority {{ d_goal.get('priority') }}</span>{% endif %}
+        {% if d_goal.get('importance') %}<span class="pill">importance {{ d_goal.get('importance') }}</span>{% endif %}
+      </div>
+      {% if d_goal.get('description') %}
+        <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ d_goal.get('description') }}</div>
+      {% endif %}
+
+      <div class="divider"></div>
+
+      <form method="post" action="/goals/plan/{{ session.id }}/confirm" id="confirm-form">
+        <div class="muted">Tasks（默认全选，可取消）</div>
+        <div style="margin-top: 10px; display:flex; flex-direction:column; gap: 8px;">
+          {% if d_tasks|length == 0 %}
+            <div class="muted">草案里没有 tasks。</div>
+          {% endif %}
+          {% for t in d_tasks %}
+            {% if t is mapping %}
+              <label class="panel" style="background: rgba(0,0,0,0.18);">
+                <div class="pad" style="padding: 10px 12px; display:flex; gap: 10px; align-items:flex-start;">
+                  <input type="checkbox" name="selected_task" value="{{ loop.index0 }}" checked style="width: 18px; height: 18px; margin-top: 2px;" />
+                  <div style="min-width:0; flex:1;">
+                    <div>{{ t.get('title') }}</div>
+                    {% if t.get('desc') %}<div class="muted" style="margin-top: 6px;">{{ t.get('desc') }}</div>{% endif %}
+                  </div>
+                </div>
+              </label>
+            {% endif %}
+          {% endfor %}
+        </div>
+
+        <div style="margin-top: 12px; display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
+          <button type="button" class="btn-ghost" id="select-none">全不选</button>
+          <button type="button" class="btn-ghost" id="select-all">全选</button>
+          <button type="submit" id="confirm-btn">确认并写入</button>
+        </div>
+        <div id="confirm-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 正在写入…</div>
+      </form>
+
+      <div class="divider"></div>
+      <details>
+        <summary style="cursor:pointer; user-select:none;"><span class="k">RAW JSON</span> <span class="muted">（调试用）</span></summary>
+        <div style="height: 10px;"></div>
+        <div class="code">{{ draft }}</div>
+      </details>
     </div>
   {% endif %}
 
   {% if session.status == 'completed' and created_goal_id %}
-    <div class="card">
-      已创建目标：<a href="/goals/{{ created_goal_id }}">查看</a>
+    <div style="margin-top: 14px;" class="panel pad">
+      <div class="k">DONE</div>
+      <div class="muted" style="margin-top: 8px;">已应用。</div>
+      <div style="margin-top: 10px;">
+        <a href="/goals?goal={{ created_goal_id }}" class="btn-ghost" role="button">打开目标</a>
+      </div>
     </div>
   {% endif %}
-{% endblock %}
 
+  <script>
+    (function(){
+      // Chat submit UX: lock input + show thinking
+      const f = document.getElementById('reply-form');
+      const btn = document.getElementById('reply-btn');
+      const txt = document.getElementById('reply-text');
+      const thinking = document.getElementById('thinking');
+      if(f && btn && txt && thinking){
+        f.addEventListener('submit', ()=>{
+          btn.disabled = true;
+          txt.readOnly = true;
+          thinking.style.display = 'block';
+          try{ document.getElementById('chat').scrollIntoView({behavior:'smooth', block:'end'}); }catch(_){ }
+        });
+      }
+
+      // Draft confirm helpers
+      const c = document.getElementById('confirm-form');
+      const cbtn = document.getElementById('confirm-btn');
+      const hint = document.getElementById('confirm-hint');
+      const all = document.getElementById('select-all');
+      const none = document.getElementById('select-none');
+      if(c && all && none){
+        all.addEventListener('click', ()=>{ c.querySelectorAll('input[type="checkbox"]').forEach(x=> x.checked=true); });
+        none.addEventListener('click', ()=>{ c.querySelectorAll('input[type="checkbox"]').forEach(x=> x.checked=false); });
+      }
+      if(c && cbtn && hint){
+        c.addEventListener('submit', ()=>{ cbtn.disabled = true; hint.style.display='block'; });
+      }
+    })();
+  </script>
+{% endblock %}

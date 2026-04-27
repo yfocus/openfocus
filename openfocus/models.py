@@ -18,6 +18,7 @@ class Goal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     content: Mapped[str] = mapped_column(String(2000), nullable=False)
+    summary: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     description: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
 
     # 可先用枚举字符串（后续再做 Enum/字典表）
@@ -61,6 +62,8 @@ class Task(Base):
 
     goal_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
+    summary: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    description: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo")
 
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -77,6 +80,10 @@ class GoalPlanSession(Base):
 
     draft_content: Mapped[str] = mapped_column(String(2000), nullable=False)
     due_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+
+    # 若从已有 Goal 进入 Plan（用于“拆解/再规划”），则关联该 goal。
+    # 为空表示“创建新 goal 的 plan”。
+    source_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

@@ -1,35 +1,48 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>Plan 模式创建目标</h1>
-  <div class="muted">由 agent 引导澄清真实目的、识别冲突/关系，并拆解为 tasks。</div>
+  <div style="margin-top: 14px;" class="panel pad">
+    <div class="k">Plan Mode</div>
+    <div class="muted" style="margin-top: 8px;">像 ChatGPT 一样的对话式澄清：先问清楚再拆解，最终结果必须由你确认后才会写入。</div>
 
-  {% if error %}
-    <div class="card" style="border-color:#ef4444;">
-      <strong>无法启动 Plan 模式：</strong>
-      <div class="muted" style="margin-top:6px; white-space: pre-wrap;">{{ error }}</div>
-    </div>
-  {% endif %}
+    {% if error %}
+      <div class="divider"></div>
+      <div class="panel pad" style="border-color: rgba(255,59,92,0.45); background: rgba(255,59,92,0.06);">
+        <div class="k" style="color: rgba(255,59,92,0.95);">无法启动 Plan Mode</div>
+        <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ error }}</div>
+      </div>
+    {% endif %}
 
-  <div class="card">
-    <form method="post" action="/goals/plan/start">
+    <div class="divider"></div>
+
+    <form method="post" action="/goals/plan/start" id="plan-start-form">
       <div style="margin-bottom: 10px;">
-        <label>初始目标（草稿）</label>
+        <label class="muted">初始目标（草稿）</label>
         <textarea name="draft_content" rows="4" placeholder="例如：做一个本地部署的注意力 OS，先把 goal/task/事件跑通" required></textarea>
       </div>
       <div class="row">
         <div>
-          <label>完成时间</label>
+          <label class="muted">完成时间（DDL）</label>
           <input type="date" name="due_date" value="{{ default_due }}" required />
         </div>
-        <div style="display:flex; align-items:end; justify-content:flex-end;">
-          <button type="submit">开始澄清</button>
+        <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
+          <a href="/goals" class="btn-ghost" role="button" style="align-self:center;">返回 Dashboard</a>
+          <button type="submit" id="plan-start-btn">开始澄清</button>
         </div>
       </div>
+      <div id="plan-start-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 正在启动 Plan Agent…</div>
     </form>
   </div>
 
-  <div class="card">
-    <a href="/goals">返回目标列表（手动模式）</a>
-  </div>
+  <script>
+    (function(){
+      const f = document.getElementById('plan-start-form');
+      const b = document.getElementById('plan-start-btn');
+      const h = document.getElementById('plan-start-hint');
+      if(!f || !b || !h) return;
+      f.addEventListener('submit', ()=>{
+        b.disabled = true;
+        h.style.display = 'block';
+      });
+    })();
+  </script>
 {% endblock %}
-

@@ -21,7 +21,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
             "/goals",
             data={
                 "content": "目标-单测",
-                "description": "desc",
+                "description": "desc-必填",
                 "due_date": (dt.date.today() + dt.timedelta(days=3)).isoformat(),
             },
             follow_redirects=False,
@@ -46,7 +46,11 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         assert "目标详情" in r.text
 
         # add task
-        r = await client.post(f"/goals/{goal_id}/tasks", data={"title": "task-1"}, follow_redirects=False)
+        r = await client.post(
+            f"/goals/{goal_id}/tasks",
+            data={"title": "task-1", "description": "task desc"},
+            follow_redirects=False,
+        )
         assert r.status_code == 303
 
         from openfocus.models import Task
@@ -54,9 +58,17 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         with session_scope() as s:
             t = s.query(Task).filter(Task.goal_id == goal_id).order_by(Task.id.desc()).first()
             assert t.title == "task-1"
+            assert t.description == "task desc"
             assert hasattr(t, "recommended_prompt") is False
             task_id = t.id
             task_public_id = t.public_id
+
+        # recommendations should include task
+        r = await client.get("/api/recommendations/next?limit=5")
+        assert r.status_code == 200
+        data = r.json()
+        items = data.get("items") or []
+        assert any((it.get("title") == "task-1") for it in items)
 
         # on-demand generate recommended prompt (must call agent loop via provider)
         import re
@@ -100,6 +112,23 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         assert "/api/skills/focus_report" in body["prompt"]
         assert len(fake.calls) >= 1
 
+        # prompt history should contain the generated prompt with timestamp
+        r = await client.get(f"/api/tasks/{task_public_id}/recommended_prompt_history?limit=5")
+        assert r.status_code == 200
+        hist = r.json()
+        assert hist["task_public_id"] == task_public_id
+        items = hist.get("items") or []
+        assert len(items) >= 1
+        assert isinstance(items[0].get("created_at"), str)
+        assert task_public_id in (items[0].get("prompt") or "")
+
+        # recent events should include something
+        r = await client.get("/api/events/recent?limit=10")
+        assert r.status_code == 200
+        ev = r.json()
+        assert isinstance(ev.get("items"), list)
+        assert len(ev["items"]) >= 1
+
         # mark done
         r = await client.post(f"/tasks/{task_id}/done", follow_redirects=False)
         assert r.status_code == 303
@@ -107,6 +136,14 @@ async def test_goals_crud_and_task_flow(monkeypatch):
             t = s.get(Task, task_id)
             assert t.status == "done"
             assert t.completed_at is not None
+
+        # reopen
+        r = await client.post(f"/tasks/{task_id}/reopen", follow_redirects=False)
+        assert r.status_code == 303
+        with session_scope() as s:
+            t = s.get(Task, task_id)
+            assert t.status == "todo"
+            assert t.completed_at is None
 
         # delete task
         r = await client.post(f"/tasks/{task_id}/delete", follow_redirects=False)
@@ -117,3 +154,32 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         # delete goal (should also delete tasks)
         r = await client.post(f"/goals/{goal_id}/delete", follow_redirects=False)
         assert r.status_code == 303
+
+
+@pytest.mark.anyio
+async def test_memory_page_and_save(monkeypatch, tmp_path):
+    from openfocus.main import app
+
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/memory")
+        assert r.status_code == 200
+
+        r = await client.post(
+            "/memory/save",
+            data={
+                "user_card": "# User Card\n- likes: terminal ui\n",
+                "user_memory": "# User Memory\n- prefers: fast feedback\n",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        r = await client.get("/memory")
+        assert r.status_code == 200
+        assert "User Card" in r.text
+        assert "terminal ui" in r.text
+        assert "User Memory" in r.text
+        assert "fast feedback" in r.text

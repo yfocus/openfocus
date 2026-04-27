@@ -5,24 +5,425 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "OpenFocus" }}</title>
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial; margin: 24px; }
-      a { color: #2563eb; text-decoration: none; }
+      :root {
+        --bg: #060b10;
+        --panel: rgba(9, 17, 26, 0.92);
+        --panel2: rgba(7, 14, 21, 0.75);
+        --text: #d7ffe9;
+        --muted: rgba(215, 255, 233, 0.62);
+        --border: rgba(0, 229, 255, 0.16);
+        --border2: rgba(0, 229, 255, 0.28);
+        --accent: #00e5ff;
+        --accent2: #7c4dff;
+        --danger: #ff3b5c;
+        --ok: #2bffb7;
+        --warn: #ffd166;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      }
+
+      html, body { height: 100%; }
+      *, *::before, *::after { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: var(--text);
+        font-family: var(--mono);
+        background:
+          radial-gradient(1200px 800px at 20% 20%, rgba(0,229,255,0.06), transparent 55%),
+          radial-gradient(900px 600px at 80% 10%, rgba(124,77,255,0.05), transparent 55%),
+          linear-gradient(180deg, rgba(0,229,255,0.06) 0%, transparent 18%),
+          var(--bg);
+      }
+
+      body.fullscreen { overflow: hidden; }
+
+      a { color: var(--accent); text-decoration: none; }
       a:hover { text-decoration: underline; }
-      .nav { margin-bottom: 16px; }
-      .card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin: 12px 0; }
-      .muted { color: #6b7280; }
-      input, textarea { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; }
-      button { padding: 10px 14px; border: 0; border-radius: 8px; background: #111827; color: white; cursor: pointer; }
-      button:hover { background: #0b1220; }
+
+      .app {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 18px 16px 24px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      body.fullscreen .app { height: 100vh; }
+
+      .page {
+        flex: 1;
+        overflow: auto;
+        min-height: 0;
+      }
+      body.fullscreen .page {
+        overflow: hidden;
+        height: 100%;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(0,229,255,0.06), rgba(0,0,0,0));
+        box-shadow: 0 0 0 1px rgba(0,229,255,0.06) inset;
+        position: sticky;
+        top: 10px;
+        backdrop-filter: blur(10px);
+        z-index: 10;
+      }
+
+      .brand {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .brand .name { letter-spacing: 0.6px; }
+      .brand .tag { color: var(--muted); font-size: 12px; }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .nav a {
+        padding: 6px 10px;
+        border: 1px solid rgba(0,229,255,0.16);
+        border-radius: 999px;
+        background: rgba(0,229,255,0.04);
+      }
+
+      .nav .btn-ghost {
+        padding: 6px 10px;
+        border-radius: 999px;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow:
+          0 0 0 1px rgba(0,229,255,0.05) inset,
+          0 12px 30px rgba(0,0,0,0.35);
+      }
+
+      .panel.hint {
+        background: var(--panel2);
+      }
+
+      .pad { padding: 14px; }
+      .muted { color: var(--muted); }
+      .k { color: rgba(0,229,255,0.9); }
+
+      input, textarea, select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(0,229,255,0.18);
+        border-radius: 12px;
+        color: var(--text);
+        background: rgba(0,0,0,0.35);
+        outline: none;
+        font-family: var(--mono);
+      }
+      textarea { resize: vertical; }
+      input:focus, textarea:focus, select:focus { border-color: rgba(0,229,255,0.5); box-shadow: 0 0 0 3px rgba(0,229,255,0.12); }
+
+      button {
+        padding: 10px 12px;
+        border: 1px solid rgba(0,229,255,0.28);
+        border-radius: 12px;
+        background: rgba(0,229,255,0.08);
+        color: var(--text);
+        cursor: pointer;
+        font-family: var(--mono);
+      }
+      button:hover { border-color: rgba(0,229,255,0.5); background: rgba(0,229,255,0.12); }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+      .btn-danger { border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); }
+      .btn-danger:hover { border-color: rgba(255,59,92,0.65); background: rgba(255,59,92,0.16); }
+      .btn-ghost { border-color: rgba(0,229,255,0.16); background: rgba(0,0,0,0.0); }
+
+      a.btn-ghost, a.btn-danger {
+        display: inline-block;
+        text-decoration: none;
+        border: 1px solid rgba(0,229,255,0.16);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(0,0,0,0.0);
+        color: var(--text);
+      }
+      a.btn-ghost:hover { border-color: rgba(0,229,255,0.5); background: rgba(0,229,255,0.12); }
+      a.btn-danger { border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); }
+      a.btn-danger:hover { border-color: rgba(255,59,92,0.65); background: rgba(255,59,92,0.16); }
+
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
+      @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+
+      .layout-2 {
+        display: grid;
+        grid-template-columns: 440px 1fr;
+        gap: 14px;
+        margin-top: 14px;
+      }
+      @media (max-width: 980px) { .layout-2 { grid-template-columns: 1fr; } }
+
+      .layout-3 {
+        display: grid;
+        grid-template-columns: 420px 1fr 360px;
+        gap: 14px;
+        margin-top: 14px;
+        height: calc(100% - 14px);
+        min-height: 0;
+      }
+      .layout-3 > * { min-height: 0; }
+      @media (max-width: 1100px) {
+        .layout-3 { grid-template-columns: 1fr; height: auto; }
+      }
+
+      .col-scroll {
+        height: 100%;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 2px;
+        min-height: 0;
+      }
+
+      /* Scrollbar: match terminal/neon style */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(0,229,255,0.28) rgba(0,0,0,0.20);
+      }
+      *::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      *::-webkit-scrollbar-track {
+        background: rgba(0,0,0,0.20);
+        border-radius: 999px;
+      }
+      *::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(0,229,255,0.28), rgba(124,77,255,0.22));
+        border-radius: 999px;
+        border: 2px solid rgba(0,0,0,0.35);
+        background-clip: padding-box;
+      }
+      *::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(180deg, rgba(0,229,255,0.45), rgba(124,77,255,0.36));
+      }
+      @media (max-width: 1100px) {
+        .col-scroll { height: auto; overflow: visible; }
+      }
+
+      .nav-item.selected {
+        border-color: rgba(0,229,255,0.75) !important;
+        box-shadow: 0 0 0 3px rgba(0,229,255,0.10);
+        background: rgba(0,229,255,0.10) !important;
+      }
+
+      .selected-card {
+        border-color: rgba(0,229,255,0.85) !important;
+        box-shadow:
+          0 0 0 1px rgba(0,229,255,0.18) inset,
+          0 0 0 4px rgba(0,229,255,0.10),
+          0 18px 50px rgba(0,0,0,0.45);
+        background: rgba(0,229,255,0.06) !important;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        display: inline-block;
+        border: 1px solid rgba(0,229,255,0.25);
+        background: rgba(0,229,255,0.08);
+      }
+      .dot.todo { border-color: rgba(0,229,255,0.22); background: rgba(0,229,255,0.06); }
+      .dot.in_progress { border-color: rgba(255,209,102,0.45); background: rgba(255,209,102,0.12); }
+      .dot.done { border-color: rgba(43,255,183,0.45); background: rgba(43,255,183,0.12); }
+
+      .unread-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        display: inline-block;
+        margin-left: 6px;
+        border: 1px solid rgba(0,229,255,0.35);
+        background: rgba(0,229,255,0.92);
+        box-shadow:
+          0 0 0 2px rgba(0,229,255,0.10),
+          0 0 12px rgba(0,229,255,0.55);
+      }
+
+      .divider { height: 1px; background: rgba(0,229,255,0.12); margin: 12px 0; }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(0,229,255,0.22);
+        background: rgba(0,229,255,0.06);
+        font-size: 12px;
+        color: rgba(215, 255, 233, 0.86);
+      }
+      .pill.ok { border-color: rgba(43,255,183,0.35); background: rgba(43,255,183,0.10); }
+      .pill.warn { border-color: rgba(255,209,102,0.35); background: rgba(255,209,102,0.10); }
+      .pill.danger { border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); }
+
+      .progress {
+        height: 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(0,229,255,0.16);
+        background: rgba(0,0,0,0.25);
+        overflow: hidden;
+      }
+      .progress > i {
+        display: block;
+        height: 100%;
+        width: var(--w, 0%);
+        background: linear-gradient(90deg, rgba(0,229,255,0.8), rgba(124,77,255,0.75));
+      }
+
+      .code {
+        font-family: var(--mono);
+        white-space: pre-wrap;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(0,229,255,0.16);
+        background: rgba(0,0,0,0.28);
+      }
+
+      .spin {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border-radius: 999px;
+        border: 2px solid rgba(0,229,255,0.25);
+        border-top-color: rgba(0,229,255,0.95);
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 18px;
+        transform: translateX(-50%);
+        padding: 10px 12px;
+        border: 1px solid rgba(0,229,255,0.28);
+        border-radius: 999px;
+        background: rgba(0,0,0,0.6);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+        display: none;
+        z-index: 999;
+      }
     </style>
   </head>
-  <body>
-    <div class="nav">
-      <a href="/goals">目标</a>
+  {% set _path = (request.url.path if request and request.url else '') %}
+  <body class="{{ 'fullscreen' if _path == '/goals' else '' }}">
+    <div class="app">
+      <div class="topbar">
+        <div class="brand">
+          <div class="name">OpenFocus</div>
+        </div>
+        <div class="nav">
+          <a href="/goals">Dashboard</a>
+          <a href="/goals?new=1" id="nav-new-goal">New Goal</a>
+          <a href="/goals/plan">Plan Mode</a>
+          <a href="/memory">Memory</a>
+        </div>
+      </div>
+
+      <div class="page">
+        {% block content %}{% endblock %}
+      </div>
     </div>
 
-    {% block content %}{% endblock %}
+    <div id="toast" class="toast"></div>
+
+    <script>
+      const $ = (sel, root=document) => root.querySelector(sel);
+      const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+
+      function toast(msg, ms=1200){
+        const el = $('#toast');
+        if(!el) return;
+        el.textContent = String(msg || '');
+        el.style.display = 'block';
+        clearTimeout(el.__t);
+        el.__t = setTimeout(()=>{ el.style.display='none'; }, ms);
+      }
+
+      async function postForm(form){
+        const fd = new FormData(form);
+        const r = await fetch(form.action, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'fetch' } });
+        if(!r.ok){
+          const t = await r.text().catch(()=> '');
+          throw new Error(t || ('HTTP ' + r.status));
+        }
+        return r;
+      }
+
+      async function generateRecommendedPrompt(taskPublicId, outEl, errEl, btnEl){
+        if(!taskPublicId || !outEl) return;
+        if(errEl) errEl.textContent = '';
+        const btn = btnEl;
+        const old = btn ? btn.textContent : '';
+        if(btn){ btn.disabled = true; btn.textContent = '生成中…'; }
+        try{
+          const r = await fetch('/api/tasks/' + encodeURIComponent(taskPublicId) + '/recommended_prompt');
+          if(!r.ok){
+            const txt = await r.text().catch(()=> '');
+            throw new Error(txt || ('HTTP ' + r.status));
+          }
+          const data = await r.json();
+          const v = (data && data.prompt) ? String(data.prompt) : '';
+          if(!v.trim()) throw new Error('返回为空');
+          outEl.value = v;
+          toast('已生成');
+          return { ok: true, prompt: v };
+        }catch(e){
+          if(errEl) errEl.textContent = String(e && e.message ? e.message : e);
+          return { ok: false, error: String(e && e.message ? e.message : e) };
+        }finally{
+          if(btn){ btn.disabled = false; btn.textContent = old || '生成提示词'; }
+        }
+      }
+
+      async function copyTextFrom(el, errEl){
+        const v = (el && (el.value || el.textContent) || '').trim();
+        if(!v){ if(errEl) errEl.textContent = '请先生成提示词。'; return; }
+        try{
+          await navigator.clipboard.writeText(v);
+          if(errEl){ errEl.textContent = '已复制'; setTimeout(()=>{ if(errEl.textContent==='已复制') errEl.textContent=''; }, 900); }
+          toast('已复制');
+        }catch(e){
+          try{ el.focus(); el.select(); }catch(_){ }
+          if(errEl) errEl.textContent = '复制失败（已选中文本，可手动复制）。';
+        }
+      }
+
+      function openNewGoal(e){
+        if(e) e.preventDefault();
+        if(location.pathname === '/goals'){
+          const dlg = document.getElementById('new-goal-dialog');
+          if(dlg && typeof dlg.showModal === 'function'){
+            dlg.showModal();
+            return;
+          }
+        }
+        location.href = '/goals?new=1';
+      }
+
+      document.getElementById('nav-new-goal')?.addEventListener('click', openNewGoal);
+    </script>
   </body>
 </html>

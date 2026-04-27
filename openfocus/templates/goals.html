@@ -1,59 +1,1263 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>目标</h1>
-  <div class="muted">本地部署版本（SQLite）。</div>
+  <div class="layout-3" id="dashboard">
+    <!-- Left: goals/tasks tree -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div class="col-scroll pad" id="left-col">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div class="k">GOALS</div>
+          <div class="pill">{{ goals|length }}</div>
+        </div>
+        <div class="divider"></div>
 
-  <div class="card">
-    <div style="display:flex; justify-content:space-between; align-items:center; gap: 12px;">
-      <div>
-        <strong>创建模式</strong>
-        <div class="muted">手动模式：你自己维护 goal 与 tasks；Plan 模式：由 agent 引导澄清并拆解。</div>
+        {% if goals|length == 0 %}
+          <div class="muted">还没有目标。</div>
+        {% endif %}
+
+        <div id="goal-list" role="tree" aria-label="Goals">
+          {% for g in goals %}
+            {% set tasks = tasks_by_goal.get(g.id, []) %}
+            {% set done_tasks = tasks|selectattr('status','equalto','done')|list %}
+            {% set done_n = done_tasks|length %}
+            {% set total_n = tasks|length %}
+            {% set pct = ( (done_n * 100) // total_n ) if total_n > 0 else 0 %}
+            {% set goal_status = '已完成' if g.status == 'done' else ('暂停' if g.status == 'paused' else '进行中') %}
+
+            <div class="panel hint js-goal-card" style="margin: 10px 0;" data-goal-id="{{ g.id }}" role="treeitem" aria-expanded="false">
+              <div class="pad" style="padding: 10px 12px;">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <button type="button" class="btn-ghost js-toggle" data-goal="{{ g.id }}" style="padding: 6px 10px;">▸</button>
+                  <button
+                    type="button"
+                    class="btn-ghost js-select nav-item"
+                    data-target="goal"
+                    data-goal="{{ g.id }}"
+                    data-type="goal"
+                    data-id="{{ g.id }}"
+                    tabindex="-1"
+                    style="text-align:left; padding: 6px 10px; flex:1; min-width: 0;"
+                  >
+                    {{ goal_display.get(g.id, g.content) }}
+                  </button>
+                </div>
+
+                <div style="margin-top: 10px;">
+                  <div class="progress" title="{{ done_n }}/{{ total_n }}">
+                    <i style="--w: {{ pct }}%"></i>
+                  </div>
+                  <div style="margin-top: 8px; display:flex; gap: 8px; flex-wrap:wrap;">
+                    <span class="pill">{{ goal_status }}</span>
+                    <span class="pill">{{ pct }}%</span>
+                    <span class="pill">DDL {{ g.due_date }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pad" style="display:none; padding-top: 0;" id="goal-expand-{{ g.id }}" role="group">
+                <div style="display:flex; gap: 8px; flex-wrap:wrap;">
+                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="all">全部</button>
+                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="in_progress">进行中</button>
+                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="todo">待启动</button>
+                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="done">已完成</button>
+                </div>
+                <div class="divider"></div>
+
+                <div style="display:flex; flex-direction:column; gap: 8px;" data-task-list-for="{{ g.id }}">
+                  {% for t in tasks %}
+                    {% set m = task_meta.get(t.public_id, {}) %}
+                    {% set ui = m.get('ui_status','todo') %}
+                    {% set task_status = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
+                    <div class="panel js-task-card" style="background: rgba(0,0,0,0.18);" data-task-item data-goal="{{ g.id }}" data-task="{{ t.public_id }}" data-status="{{ ui }}">
+                      <div class="pad" style="padding: 10px 12px; display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+                        <button
+                          type="button"
+                          class="btn-ghost js-select nav-item"
+                          data-target="task"
+                          data-task="{{ t.public_id }}"
+                          data-goal="{{ g.id }}"
+                          data-type="task"
+                          data-id="{{ t.public_id }}"
+                          tabindex="-1"
+                          style="text-align:left; padding: 6px 10px; flex:1; min-width: 0;"
+                        >
+                          {{ task_display.get(t.public_id, t.title) }}
+                        </button>
+                        <div style="display:flex; gap: 8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                          <span class="dot {{ ui }}" title="{{ task_status }}"></span>
+                        </div>
+                      </div>
+                    </div>
+                  {% endfor %}
+                </div>
+
+                <div class="divider"></div>
+              </div>
+            </div>
+
+            <!-- Detail templates (for center pane) -->
+            <template id="detail-goal-{{ g.id }}">
+              <div class="panel pad">
+                <div class="k">目标</div>
+                <div style="font-size: 16px; margin-top: 6px;">{{ g.content }}</div>
+                {% if g.description %}
+                  <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ g.description }}</div>
+                {% endif %}
+
+                <div class="divider"></div>
+                <div style="display:flex; gap: 8px; flex-wrap:wrap;">
+                  <span class="pill">{{ goal_status }}</span>
+                  <span class="pill">DDL {{ g.due_date }}</span>
+                  <span class="pill">已进行 {{ g.created_at|human_since(now=now) }}</span>
+                </div>
+                <div style="margin-top: 12px;" class="progress" title="{{ done_n }}/{{ total_n }}">
+                  <i style="--w: {{ pct }}%"></i>
+                </div>
+                <div class="muted" style="margin-top: 8px;">{{ done_n }}/{{ total_n }}</div>
+
+                <div class="divider"></div>
+                <div style="display:flex; gap: 10px; flex-wrap:wrap;">
+                  <button type="button" class="btn-ghost js-open-new-task" data-goal="{{ g.id }}">新建 Task</button>
+                  <button type="button" class="btn-ghost js-open-goal-edit"
+                    data-goal="{{ g.id }}"
+                    data-content="{{ g.content }}"
+                    data-description="{{ g.description }}"
+                    data-due="{{ g.due_date }}"
+                  >编辑目标</button>
+                  <form method="post" action="/goals/{{ g.id }}/plan/start" style="margin:0;">
+                    <button type="submit" class="btn-ghost">Plan</button>
+                  </form>
+                  <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
+                    <button type="submit" class="btn-danger">删除</button>
+                  </form>
+                </div>
+              </div>
+            </template>
+
+            {% for t in tasks %}
+              {% set m = task_meta.get(t.public_id, {}) %}
+              {% set ui = m.get('ui_status','todo') %}
+              {% set task_status = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
+              <template id="detail-task-{{ t.public_id }}">
+                <div class="panel pad">
+                  <div class="k">任务</div>
+                  <div style="font-size: 16px; margin-top: 6px;">{{ t.title }}</div>
+                  {% if t.description %}
+                    <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ t.description }}</div>
+                  {% endif %}
+
+                  <div style="margin-top: 10px; display:flex; gap: 8px; flex-wrap:wrap;">
+                    <span class="pill">{{ task_status }}</span>
+                    <span class="pill">DDL {{ g.due_date }}</span>
+                    <span class="pill">已进行 {{ m.get('elapsed','-') }}</span>
+                    <span class="pill">taskId {{ t.public_id }}</span>
+                  </div>
+
+                  <div style="margin-top: 12px;" class="progress">
+                    <i style="--w: {{ (m.get('percent', 0) if m.get('percent') is not none else (100 if ui=='done' else 0)) }}%"></i>
+                  </div>
+
+                  <div class="divider"></div>
+                  <div style="display:flex; gap: 10px; flex-wrap:wrap;">
+                    {% if t.status != 'done' %}
+                      <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;" class="js-action" data-action="done" data-task="{{ t.public_id }}">
+                        <button type="submit">标记完成</button>
+                      </form>
+                    {% else %}
+                      <form method="post" action="/tasks/{{ t.id }}/reopen" style="margin:0;" class="js-action" data-action="reopen" data-task="{{ t.public_id }}">
+                        <button type="submit" class="btn-ghost">重新打开</button>
+                      </form>
+                    {% endif %}
+                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('确认删除该任务？')">
+                      <button type="submit" class="btn-danger">删除</button>
+                    </form>
+                    <button type="button" class="btn-ghost js-jump-goal" data-goal="{{ g.id }}">查看目标</button>
+                  </div>
+
+                  <div class="divider"></div>
+                  <div class="k">相关事件</div>
+                  {% set evs = (task_events.get(t.public_id, []) if task_events else []) %}
+                  {% if evs|length == 0 %}
+                    <div class="muted" style="margin-top: 8px;">暂无事件上报。</div>
+                  {% else %}
+                    <div style="margin-top: 8px; display:flex; flex-direction:column; gap: 8px;">
+                      {% for ev in evs %}
+                        <div class="panel" style="background: rgba(0,0,0,0.18);">
+                          <div class="pad" style="padding: 10px 12px;">
+                            <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
+                              <div class="k" style="font-size: 12px;">{{ ev.kind_label or ev.kind }}</div>
+                              <div class="muted" style="font-size: 12px;">{{ ev.created_at|human_since(now=now) }}</div>
+                            </div>
+                            <div class="muted" style="margin-top: 6px;">{{ ev.summary }}</div>
+                            <div class="muted" style="margin-top: 6px; font-size: 12px;">{{ ev.source_label or '' }}</div>
+                          </div>
+                        </div>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
+
+                  {% if ui != 'done' %}
+                    <div class="divider"></div>
+                    <details open>
+                      <summary style="cursor:pointer; user-select:none;"><span class="k">RECOMMENDED PROMPT</span></summary>
+                      <div style="height: 10px;"></div>
+                      <textarea id="prompt-{{ t.public_id }}" rows="12" readonly placeholder="点击下方按钮生成推荐提示词。"></textarea>
+                      <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
+                        <button type="button" id="gen-{{ t.public_id }}" class="btn-ghost">生成</button>
+                        <button type="button" class="btn-ghost" id="copy-{{ t.public_id }}">复制</button>
+                      </div>
+                      <div id="prompt-err-{{ t.public_id }}" class="muted" style="margin-top: 6px; color: var(--danger);"></div>
+
+                      <div class="divider"></div>
+                      <div class="k">HISTORY</div>
+                      <div id="prompt-history-{{ t.public_id }}" class="muted" style="margin-top: 8px;">—</div>
+                    </details>
+                  {% endif %}
+                </div>
+              </template>
+            {% endfor %}
+          {% endfor %}
+        </div>
       </div>
-      <div>
-        <a href="/goals/plan">进入 Plan 模式</a>
+    </div>
+
+    <!-- Middle: detail -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div class="col-scroll pad" id="detail-col">
+        <div id="detail">
+          <div class="panel pad">
+            <div class="k">DETAIL</div>
+            <div class="muted" style="margin-top: 8px;">从左侧选择一个目标或任务。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: what's next + recent events -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div style="height:100%; min-height:0; display:flex; flex-direction:column; gap: 12px; padding: 14px;">
+        <div class="panel hint" style="flex: 0 0 42%; overflow:auto; min-height:0;">
+          <div class="pad" style="padding: 12px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+              <div class="k">WHAT'S NEXT</div>
+              <button type="button" id="next-refresh" class="btn-ghost">刷新</button>
+            </div>
+            <div class="divider"></div>
+            <div id="next-list" class="muted">加载中…</div>
+          </div>
+        </div>
+
+        <div class="panel hint" style="flex: 1 1 auto; overflow:auto; min-height:0;">
+          <div class="pad" style="padding: 12px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+              <div class="k">RECENT EVENTS</div>
+              <div style="display:flex; gap: 8px; flex-wrap:wrap; justify-content:flex-end;">
+                <button type="button" id="notify-toggle" class="btn-ghost" title="系统通知（浏览器授权后会出现在右上角）">启用系统通知</button>
+                <button type="button" id="ev-refresh" class="btn-ghost">刷新</button>
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div id="ev-list" class="muted">加载中…</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <form method="post" action="/goals">
-      <div style="margin-bottom: 10px;">
-        <label>目标内容</label>
-        <textarea name="content" rows="3" placeholder="例如：完成 OpenFocus MVP（目标+进度上报+事件落库）" required></textarea>
-      </div>
-      <div style="margin-bottom: 10px;">
-        <label>描述（可选）</label>
-        <textarea name="description" rows="2" placeholder="补充：为什么重要/成功标准/范围边界"></textarea>
-      </div>
-      <div class="row">
-        <div>
-          <label>完成时间</label>
-          <input type="date" name="due_date" value="{{ default_due }}" required />
-        </div>
-        <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
-          <button type="submit">创建目标</button>
+  <!-- New Goal dialog (opened from topbar) -->
+  <dialog id="new-goal-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="pad" style="padding: 14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div class="k">NEW GOAL</div>
+          <button type="submit" class="btn-ghost">关闭</button>
         </div>
       </div>
     </form>
-  </div>
-
-  {% if goals|length == 0 %}
-    <div class="card">
-      还没有目标。用上面的输入框创建第一个目标。
+    <div class="divider"></div>
+    <div class="pad" style="padding: 14px;">
+      <form method="post" action="/goals" id="new-goal-form">
+        <div style="margin-bottom: 10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+            <label class="muted">目标内容（必填）</label>
+            <button type="button" class="btn-ghost" id="goal-gen" title="从详细描述提炼目标">从详细描述生成</button>
+          </div>
+          <textarea name="content" rows="3" required maxlength="2000" id="goal-content"></textarea>
+        </div>
+        <div style="margin-bottom: 10px;">
+          <label class="muted">详细描述（必填）</label>
+          <textarea name="description" rows="4" required maxlength="4000" id="goal-description"></textarea>
+          <div id="goal-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
+        </div>
+        <div class="row">
+          <div>
+            <label class="muted">DDL</label>
+            <input type="date" name="due_date" value="{{ default_due }}" required />
+          </div>
+          <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
+            <a href="/goals/plan" class="btn-ghost" role="button" style="align-self:center;">用 Plan Mode</a>
+            <button type="submit" id="new-goal-submit">创建</button>
+          </div>
+        </div>
+        <div id="new-goal-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 创建中…</div>
+      </form>
     </div>
-  {% endif %}
+  </dialog>
 
-  {% for g in goals %}
-    <div class="card">
-      <div><strong>{{ g.content }}</strong></div>
-      <div class="muted">完成时间：{{ g.due_date }} · 创建于：{{ g.created_at }}</div>
-      <div style="margin-top: 10px; display:flex; gap: 10px;">
-        <a href="/goals/{{ g.id }}">查看</a>
-        <a href="/goals/{{ g.id }}/edit">编辑</a>
-        <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
-          <button type="submit" style="background:#b91c1c;">删除</button>
-        </form>
+  <!-- New Task dialog (opened from goal detail) -->
+  <dialog id="new-task-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="pad" style="padding: 14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div>
+            <div class="k">NEW TASK</div>
+            <div class="muted" style="margin-top: 4px;" id="task-goal-hint">请选择一个目标</div>
+          </div>
+          <button type="submit" class="btn-ghost">关闭</button>
+        </div>
       </div>
+    </form>
+    <div class="divider"></div>
+    <div class="pad" style="padding: 14px;">
+      <form method="post" action="" id="new-task-form">
+        <div style="margin-bottom: 10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+            <label class="muted">任务标题（必填）</label>
+            <button type="button" class="btn-ghost" id="task-gen" title="从详细描述提炼任务标题">从详细描述生成</button>
+          </div>
+          <textarea name="title" rows="2" required maxlength="512" id="task-title"></textarea>
+        </div>
+        <div style="margin-bottom: 10px;">
+          <label class="muted">详细描述（必填）</label>
+          <textarea name="description" rows="5" required maxlength="4000" id="task-description"></textarea>
+          <div id="task-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
+          <button type="submit" id="new-task-submit">保存</button>
+        </div>
+        <div id="new-task-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 保存中…</div>
+      </form>
     </div>
-  {% endfor %}
+  </dialog>
+
+  <!-- Edit Goal dialog -->
+  <dialog id="edit-goal-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="pad" style="padding: 14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div class="k">编辑目标</div>
+          <button type="submit" class="btn-ghost">关闭</button>
+        </div>
+      </div>
+    </form>
+    <div class="divider"></div>
+    <div class="pad" style="padding: 14px;">
+      <form method="post" action="" id="edit-goal-form">
+        <div style="margin-bottom: 10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+            <label class="muted">目标内容（必填）</label>
+            <button type="button" class="btn-ghost" id="goal-edit-gen" title="从详细描述提炼目标">从详细描述生成</button>
+          </div>
+          <textarea name="content" rows="3" required maxlength="2000" id="goal-edit-content"></textarea>
+        </div>
+        <div style="margin-bottom: 10px;">
+          <label class="muted">详细描述（必填）</label>
+          <textarea name="description" rows="4" required maxlength="4000" id="goal-edit-description"></textarea>
+          <div id="goal-edit-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
+        </div>
+        <div class="row">
+          <div>
+            <label class="muted">DDL</label>
+            <input type="date" name="due_date" required id="goal-edit-due" />
+          </div>
+          <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
+            <button type="submit">保存</button>
+          </div>
+        </div>
+        <input type="hidden" name="status" value="active" id="goal-edit-status" />
+        <input type="hidden" name="priority" value="normal" id="goal-edit-priority" />
+        <input type="hidden" name="importance" value="normal" id="goal-edit-importance" />
+      </form>
+    </div>
+  </dialog>
+
+  <script>
+    const STATE = {
+      selected: { type: null, goalId: null, taskPid: null },
+    };
+
+    function escapeHtml(s){
+      const x = String(s ?? '');
+      return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
+    }
+
+    // Recommended Prompt generation state (per task) should survive switching tasks.
+    const PROMPT_STATE = {
+      byTask: {},
+    };
+
+    function _getPromptState(pid){
+      const key = String(pid || '');
+      if(!key) return null;
+      if(!PROMPT_STATE.byTask[key]){
+        PROMPT_STATE.byTask[key] = { status: 'idle', prompt: '', lastError: '' }; // status: idle/loading/done/error
+      }
+      return PROMPT_STATE.byTask[key];
+    }
+
+    function _applyPromptUi(pid){
+      const key = String(pid || '');
+      const st = _getPromptState(key);
+      if(!st) return;
+      const btn = document.getElementById('gen-' + key);
+      const out = document.getElementById('prompt-' + key);
+      if(out && st.prompt && !String(out.value || '').trim()){
+        out.value = String(st.prompt);
+      }
+      if(btn){
+        if(st.status === 'loading'){
+          btn.disabled = true;
+          btn.textContent = '生成中…';
+        }else{
+          btn.disabled = false;
+          btn.textContent = (st.prompt ? '重新生成' : '生成');
+        }
+      }
+      const err = document.getElementById('prompt-err-' + key);
+      if(err){
+        err.textContent = (st.status === 'error' ? (st.lastError || '生成失败') : '');
+      }
+    }
+
+    async function _generatePromptForTask(pid){
+      const key = String(pid || '');
+      const st = _getPromptState(key);
+      if(!st) return;
+      if(st.status === 'loading') return;
+      st.status = 'loading';
+      st.lastError = '';
+      _applyPromptUi(key);
+
+      try{
+        const r = await fetch('/api/tasks/' + encodeURIComponent(key) + '/recommended_prompt');
+        if(!r.ok){
+          const txt = await r.text().catch(()=> '');
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        const data = await r.json();
+        const v = (data && data.prompt) ? String(data.prompt) : '';
+        if(!v.trim()) throw new Error('返回为空');
+        st.prompt = v;
+        st.status = 'done';
+        _applyPromptUi(key);
+        toast('已生成');
+        refreshPromptHistory(key, { preferSetCurrent: false });
+      }catch(e){
+        st.status = 'error';
+        st.lastError = String(e && e.message ? e.message : e);
+        _applyPromptUi(key);
+        toast('生成失败');
+      }
+    }
+
+    function _setTraceBox(box, lines){
+      if(!box) return;
+      box.style.display = 'block';
+      box.textContent = (Array.isArray(lines) ? lines.join('\n') : String(lines || ''));
+    }
+
+    async function _extractGoalFromDescriptionGeneric({ descEl, outEl, btnEl, traceEl } = {}){
+      const d = String(descEl?.value || '').trim();
+      if(!d){ toast('请先填写详细描述'); return; }
+
+      if(btnEl) btnEl.disabled = true;
+      _setTraceBox(traceEl, ['[1/3] 读取详细描述…', '[2/3] 提炼目标内容…', '[3/3] 校验长度与格式…']);
+
+      try{
+        const r = await fetch('/api/goals/extract_content_from_description', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: d }),
+        });
+        if(!r.ok){
+          const txt = await r.text().catch(()=> '');
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        const data = await r.json();
+        const content = (data && data.content) ? String(data.content) : '';
+        const trace = (data && Array.isArray(data.trace)) ? data.trace : [];
+        if(trace.length) _setTraceBox(traceEl, trace);
+        if(outEl) outEl.value = content;
+        toast('已生成目标');
+      }catch(e){
+        _setTraceBox(traceEl, '生成失败：' + String(e && e.message ? e.message : e));
+        toast('生成失败');
+      }finally{
+        if(btnEl) btnEl.disabled = false;
+      }
+    }
+
+    async function _extractGoalFromDescription(){
+      await _extractGoalFromDescriptionGeneric({
+        descEl: document.getElementById('goal-description'),
+        outEl: document.getElementById('goal-content'),
+        btnEl: document.getElementById('goal-gen'),
+        traceEl: document.getElementById('goal-gen-trace'),
+      });
+    }
+
+    async function _extractTaskTitleFromDescription(){
+      const desc = document.getElementById('task-description');
+      const out = document.getElementById('task-title');
+      const btn = document.getElementById('task-gen');
+      const box = document.getElementById('task-gen-trace');
+      const d = String(desc?.value || '').trim();
+      if(!d){ toast('请先填写详细描述'); return; }
+
+      if(btn) btn.disabled = true;
+      _setTraceBox(box, ['[1/3] 读取详细描述…', '[2/3] 提炼任务标题…', '[3/3] 校验长度与格式…']);
+      try{
+        const r = await fetch('/api/tasks/extract_title_from_description', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: d }),
+        });
+        if(!r.ok){
+          const txt = await r.text().catch(()=> '');
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        const data = await r.json();
+        const title = (data && data.title) ? String(data.title) : '';
+        const trace = (data && Array.isArray(data.trace)) ? data.trace : [];
+        if(trace.length) _setTraceBox(box, trace);
+        if(out) out.value = title;
+        toast('已生成标题');
+      }catch(e){
+        _setTraceBox(box, '生成失败：' + String(e && e.message ? e.message : e));
+        toast('生成失败');
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    function _openNewTaskDialog(goalId){
+      const gid = String(goalId || '').trim();
+      if(!gid){ toast('请先选择一个目标'); return; }
+      const dlg = document.getElementById('new-task-dialog');
+      const form = document.getElementById('new-task-form');
+      const hint = document.getElementById('task-goal-hint');
+      if(form) form.action = '/goals/' + encodeURIComponent(gid) + '/tasks';
+      if(hint) hint.textContent = 'goalId=' + gid;
+      try{ dlg?.showModal(); }catch(_){ }
+      const t1 = document.getElementById('task-title');
+      const t2 = document.getElementById('task-description');
+      if(t1) t1.value = '';
+      if(t2) t2.value = '';
+      const trace = document.getElementById('task-gen-trace');
+      if(trace){ trace.textContent=''; trace.style.display='none'; }
+      setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
+    }
+
+    function _openEditGoalDialog(fromEl){
+      const dlg = document.getElementById('edit-goal-dialog');
+      const form = document.getElementById('edit-goal-form');
+      const gid = String(fromEl?.getAttribute('data-goal') || '').trim();
+      if(!gid){ toast('goalId 缺失'); return; }
+      if(form) form.action = '/goals/' + encodeURIComponent(gid) + '/edit';
+
+      const content = String(fromEl?.getAttribute('data-content') || '');
+      const desc = String(fromEl?.getAttribute('data-description') || '');
+      const due = String(fromEl?.getAttribute('data-due') || '');
+
+      const c = document.getElementById('goal-edit-content');
+      const d = document.getElementById('goal-edit-description');
+      const du = document.getElementById('goal-edit-due');
+      if(c) c.value = content;
+      if(d) d.value = desc;
+      if(du) du.value = due;
+
+      const trace = document.getElementById('goal-edit-gen-trace');
+      if(trace){ trace.textContent=''; trace.style.display='none'; }
+
+      try{ dlg?.showModal(); }catch(_){ }
+      setTimeout(()=>{ try{ d?.focus(); }catch(_){ } }, 30);
+    }
+
+    function setDetail(html){
+      const el = document.getElementById('detail');
+      if(!el) return;
+      el.innerHTML = html;
+    }
+
+    function renderFromTemplate(tid){
+      const tpl = document.getElementById(tid);
+      if(!tpl) return false;
+      setDetail(tpl.innerHTML);
+      return true;
+    }
+
+    function updateUrl(params){
+      const url = new URL(window.location.href);
+      Object.entries(params).forEach(([k,v])=>{
+        if(v===null || v===undefined || v==='') url.searchParams.delete(k);
+        else url.searchParams.set(k, String(v));
+      });
+      history.replaceState({}, '', url.toString());
+    }
+
+    function setSelectedInList(type, id){
+      $$('.nav-item').forEach(x=> x.classList.remove('selected'));
+      $$('.selected-card').forEach(x=> x.classList.remove('selected-card'));
+      const el = document.querySelector('.nav-item[data-type="' + type + '"][data-id="' + id + '"]');
+      if(el){
+        el.classList.add('selected');
+        $$('.nav-item').forEach(x=> x.setAttribute('tabindex','-1'));
+        el.setAttribute('tabindex','0');
+        try{ el.focus({preventScroll:true}); }catch(_){ }
+        try{ el.scrollIntoView({block:'nearest'}); }catch(_){ }
+
+        // highlight the whole card
+        if(type === 'goal'){
+          const card = document.querySelector('.js-goal-card[data-goal-id="' + id + '"]');
+          if(card) card.classList.add('selected-card');
+        }else if(type === 'task'){
+          const card = document.querySelector('[data-task-item][data-task="' + id + '"]');
+          if(card) card.classList.add('selected-card');
+          const gid = el.getAttribute('data-goal');
+          if(gid){
+            const gcard = document.querySelector('.js-goal-card[data-goal-id="' + gid + '"]');
+            if(gcard) gcard.classList.add('selected-card');
+          }
+        }
+      }
+    }
+
+    function selectGoal(goalId){
+      if(renderFromTemplate('detail-goal-' + goalId)){
+        STATE.selected = { type:'goal', goalId: String(goalId), taskPid: null };
+        setSelectedInList('goal', String(goalId));
+        updateUrl({goal: goalId, task: ''});
+        try{ localStorage.setItem('openfocus:last_goal', String(goalId)); }catch(_){ }
+      }
+    }
+
+    function selectTask(taskPid, goalId){
+      if(renderFromTemplate('detail-task-' + taskPid)){
+        STATE.selected = { type:'task', goalId: String(goalId || ''), taskPid: String(taskPid) };
+        setSelectedInList('task', String(taskPid));
+        updateUrl({goal: goalId || '', task: taskPid});
+        try{ localStorage.setItem('openfocus:last_task', String(taskPid)); }catch(_){ }
+        _applyPromptUi(String(taskPid));
+        refreshPromptHistory(String(taskPid), { preferSetCurrent: true });
+      }
+    }
+
+    function toggleGoal(goalId){
+      const box = document.getElementById('goal-expand-' + goalId);
+      const btn = document.querySelector('.js-toggle[data-goal="' + goalId + '"]');
+      if(!box || !btn) return;
+      const open = box.style.display !== 'none';
+      box.style.display = open ? 'none' : 'block';
+      btn.textContent = open ? '▸' : '▾';
+      const root = btn.closest('[data-goal-id]');
+      if(root){ root.setAttribute('aria-expanded', open ? 'false' : 'true'); }
+
+      const list = document.querySelector('[data-task-list-for="' + goalId + '"]');
+      if(list){
+        const items = Array.from(list.querySelectorAll('[data-task-item]'));
+        items.sort((a,b)=>{
+          const sa = a.getAttribute('data-status')||'';
+          const sb = b.getAttribute('data-status')||'';
+          const rank = (s)=> s==='in_progress'?0:(s==='todo'?1:(s==='done'?2:3));
+          return rank(sa)-rank(sb);
+        });
+        items.forEach(x=> list.appendChild(x));
+      }
+    }
+
+    function applyFilter(goalId, filter){
+      const items = document.querySelectorAll('[data-task-item][data-goal="' + goalId + '"]');
+      items.forEach(it=>{
+        const st = it.getAttribute('data-status');
+        it.style.display = (filter==='all' || st===filter) ? 'block' : 'none';
+      });
+      $$('.js-filter[data-goal="' + goalId + '"]').forEach(b=>{
+        b.style.borderColor = (b.getAttribute('data-filter')===filter) ? 'rgba(0,229,255,0.65)' : 'rgba(0,229,255,0.16)';
+      });
+    }
+
+    function isTypingTarget(el){
+      if(!el) return false;
+      const tag = (el.tagName || '').toLowerCase();
+      if(tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+      if(el.isContentEditable) return true;
+      return false;
+    }
+
+    function visibleNavItems(){
+      return $$('.nav-item').filter(el => {
+        if(!(el instanceof HTMLElement)) return false;
+        const rect = el.getClientRects();
+        return rect && rect.length > 0;
+      });
+    }
+
+    function currentNavIndex(items){
+      if(STATE.selected.type === 'task' && STATE.selected.taskPid){
+        return items.findIndex(x => x.getAttribute('data-type')==='task' && x.getAttribute('data-id')===STATE.selected.taskPid);
+      }
+      if(STATE.selected.type === 'goal' && STATE.selected.goalId){
+        return items.findIndex(x => x.getAttribute('data-type')==='goal' && x.getAttribute('data-id')===STATE.selected.goalId);
+      }
+      return -1;
+    }
+
+    function selectFromElement(el){
+      const type = el.getAttribute('data-type');
+      if(type === 'goal'){
+        selectGoal(el.getAttribute('data-id'));
+      }else if(type === 'task'){
+        selectTask(el.getAttribute('data-id'), el.getAttribute('data-goal'));
+      }
+    }
+
+    document.addEventListener('keydown', (e)=>{
+      if(isTypingTarget(e.target)) return;
+      if(e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const items = visibleNavItems();
+      if(!items.length) return;
+      const idx = currentNavIndex(items);
+
+      if(e.key === 'ArrowDown'){
+        e.preventDefault();
+        const n = (idx >= 0 ? Math.min(items.length - 1, idx + 1) : 0);
+        selectFromElement(items[n]);
+        return;
+      }
+      if(e.key === 'ArrowUp'){
+        e.preventDefault();
+        const n = (idx >= 0 ? Math.max(0, idx - 1) : 0);
+        selectFromElement(items[n]);
+        return;
+      }
+      if(e.key === 'ArrowRight'){
+        e.preventDefault();
+        const gid = (STATE.selected.type === 'goal' ? STATE.selected.goalId : STATE.selected.goalId);
+        if(gid){
+          const box = document.getElementById('goal-expand-' + gid);
+          if(box && box.style.display === 'none') toggleGoal(gid);
+        }
+        return;
+      }
+      if(e.key === 'ArrowLeft'){
+        e.preventDefault();
+        if(STATE.selected.type === 'goal' && STATE.selected.goalId){
+          const gid = STATE.selected.goalId;
+          const box = document.getElementById('goal-expand-' + gid);
+          if(box && box.style.display !== 'none') toggleGoal(gid);
+          return;
+        }
+        if(STATE.selected.type === 'task' && STATE.selected.goalId){
+          const gid = STATE.selected.goalId;
+          const box = document.getElementById('goal-expand-' + gid);
+          if(box && box.style.display !== 'none') toggleGoal(gid);
+          selectGoal(gid);
+          return;
+        }
+      }
+    });
+
+    document.addEventListener('click', (e)=>{
+      const t = e.target;
+      if(!(t instanceof HTMLElement)) return;
+
+      // prompt buttons in detail pane（innerHTML 注入的 <script> 不会执行，所以这里做事件代理）
+      if(t.id && t.id.startsWith('gen-')){
+        const pid = t.id.slice(4);
+        _generatePromptForTask(pid);
+        return;
+      }
+      if(t.id && t.id.startsWith('copy-')){
+        const pid = t.id.slice(5);
+        const out = document.getElementById('prompt-' + pid);
+        const err = document.getElementById('prompt-err-' + pid);
+        copyTextFrom(out, err);
+        return;
+      }
+
+      const sel = t.closest('.js-select');
+      if(sel){
+        const target = sel.getAttribute('data-target');
+        if(target==='goal'){
+          selectGoal(sel.getAttribute('data-goal'));
+        }else if(target==='task'){
+          selectTask(sel.getAttribute('data-task'), sel.getAttribute('data-goal'));
+        }
+        return;
+      }
+
+      const tg = t.closest('.js-toggle');
+      if(tg){
+        toggleGoal(tg.getAttribute('data-goal'));
+        return;
+      }
+
+      const flt = t.closest('.js-filter');
+      if(flt){
+        applyFilter(flt.getAttribute('data-goal'), flt.getAttribute('data-filter'));
+        return;
+      }
+
+      const jump = t.closest('.js-jump-goal');
+      if(jump){
+        selectGoal(jump.getAttribute('data-goal'));
+        return;
+      }
+
+      const openTask = t.closest('.js-open-task');
+      if(openTask){
+        const pid = openTask.getAttribute('data-task');
+        if(pid && document.getElementById('detail-task-' + pid)){
+          const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
+          const gid = btn ? btn.getAttribute('data-goal') : '';
+          if(gid){
+            const box = document.getElementById('goal-expand-' + gid);
+            if(box && box.style.display === 'none') toggleGoal(gid);
+          }
+          selectTask(pid, gid);
+        }
+      }
+
+      const openNext = t.closest('.js-open-next');
+      if(openNext){
+        const pid = openNext.getAttribute('data-task');
+        const gid = openNext.getAttribute('data-goal');
+        if(pid) selectTask(pid, gid);
+        else if(gid) selectGoal(gid);
+      }
+
+      const openNewTask = t.closest('.js-open-new-task');
+      if(openNewTask){
+        _openNewTaskDialog(openNewTask.getAttribute('data-goal'));
+        return;
+      }
+
+      const openGoalEdit = t.closest('.js-open-goal-edit');
+      if(openGoalEdit){
+        _openEditGoalDialog(openGoalEdit);
+        return;
+      }
+    });
+
+    // Ajax actions: done/reopen/delete task
+    document.addEventListener('submit', async (e)=>{
+      const form = e.target;
+      if(!(form instanceof HTMLFormElement)) return;
+      if(!form.classList.contains('js-action')) return;
+      e.preventDefault();
+      const action = form.getAttribute('data-action');
+      const pid = form.getAttribute('data-task');
+      try{
+        const btn = form.querySelector('button[type="submit"]');
+        if(btn) btn.disabled = true;
+        await postForm(form);
+        if(action==='delete'){
+          const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
+          if(item) item.remove();
+          toast('已删除');
+          setDetail('<div class="panel pad"><div class="k">DETAIL</div><div class="muted" style="margin-top:8px;">已删除该任务。</div></div>');
+        }else if(action==='done'){
+          const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
+          if(item){ item.setAttribute('data-status','done'); }
+          toast('已完成');
+          // 任务详情模板需要反映“已完成/隐藏 prompt/出现 reopen”，直接刷新页面保持一致。
+          const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
+          const gid = btn ? (btn.getAttribute('data-goal') || '') : '';
+          setTimeout(()=>{ location.href = '/goals?task=' + encodeURIComponent(pid || '') + (gid ? ('&goal=' + encodeURIComponent(gid)) : ''); }, 30);
+          return;
+        }else if(action==='reopen'){
+          const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
+          if(item){ item.setAttribute('data-status','todo'); }
+          toast('已重新打开');
+          const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
+          const gid = btn ? (btn.getAttribute('data-goal') || '') : '';
+          setTimeout(()=>{ location.href = '/goals?task=' + encodeURIComponent(pid || '') + (gid ? ('&goal=' + encodeURIComponent(gid)) : ''); }, 30);
+          return;
+        }
+        refreshNext();
+        refreshEvents();
+      }catch(err){
+        toast('操作失败');
+      }finally{
+        const btn = form.querySelector('button[type="submit"]');
+        if(btn) btn.disabled = false;
+      }
+    });
+
+    async function refreshNext(){
+      const box = document.getElementById('next-list');
+      const btn = document.getElementById('next-refresh');
+      if(!box) return;
+      if(btn) btn.disabled = true;
+      box.innerHTML = '<span class="spin"></span> <span class="muted">分析中…</span>';
+      try{
+        const r = await fetch('/api/recommendations/next?limit=5');
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const item = (data && data.item) ? data.item : null;
+        if(!item){ box.textContent = '暂无推荐。'; return; }
+        const why = Array.isArray(item.why) ? item.why : [];
+        const title = item.title || '';
+        const target = item.target || {};
+        const gid = target.goal_id || '';
+        const pid = target.task_public_id || '';
+        const sentence = (data && data.sentence) ? String(data.sentence) : '';
+
+        box.innerHTML = `
+          <div class="panel" style="background: rgba(0,0,0,0.18);">
+            <div class="pad" style="padding: 10px 12px;">
+              <div style="white-space: pre-wrap;">${sentence || ('建议下一步去完成「' + title + '」。')}</div>
+              <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap:wrap;">
+                <button type="button" class="btn-ghost js-open-next" data-goal="${gid}" data-task="${pid}">打开</button>
+              </div>
+              ${why.length ? `<div class="divider"></div><div class="code">${why.map(x=>'- '+x).join('\n')}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }catch(e){
+        box.textContent = '推荐引擎不可用/请求失败。';
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    function fmtTime(iso){
+      try{
+        const d = new Date(iso);
+        if(Number.isNaN(d.getTime())) return '';
+        const hh = String(d.getHours()).padStart(2,'0');
+        const mm = String(d.getMinutes()).padStart(2,'0');
+        return hh + ':' + mm;
+      }catch(_){ return ''; }
+    }
+
+    async function refreshEvents(){
+      const box = document.getElementById('ev-list');
+      const btn = document.getElementById('ev-refresh');
+      if(!box) return;
+      if(btn) btn.disabled = true;
+      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      try{
+        const r = await fetch('/api/events/recent?limit=30');
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = (data && data.items) ? data.items : [];
+        if(!items.length){ box.textContent = '暂无事件。'; return; }
+
+        // Read/unread state for events (focus touched => read)
+        const readKey = 'openfocus:events_read_ids';
+        const readSet = (function(){
+          try{
+            const raw = localStorage.getItem(readKey) || '[]';
+            const arr = JSON.parse(raw);
+            if(Array.isArray(arr)) return new Set(arr.map(x=> String(x)));
+          }catch(_){ }
+          return new Set();
+        })();
+        function persistReadSet(){
+          try{
+            const arr = Array.from(readSet).slice(-200);
+            localStorage.setItem(readKey, JSON.stringify(arr));
+          }catch(_){ }
+        }
+        function markRead(evId){
+          const id = String(evId || '');
+          if(!id) return;
+          if(readSet.has(id)) return;
+          readSet.add(id);
+          persistReadSet();
+          const el = box.querySelector('.js-ev-item[data-ev-id="' + CSS.escape(id) + '"]');
+          if(el){
+            el.classList.remove('ev-unread');
+            const dot = el.querySelector('.unread-dot');
+            if(dot) dot.style.display = 'none';
+          }
+        }
+
+        // New event notification (best-effort):
+        // - Always show in-app toast when new events appear.
+        // - If user enabled + browser Notification permission already granted, also show system notification.
+        (function(){
+          try{
+            const maxId = Math.max.apply(null, items.map(x => Number(x && x.id || 0)).filter(n => Number.isFinite(n)));
+            const last = Number(localStorage.getItem('openfocus:last_event_id') || '0');
+            const inited = localStorage.getItem('openfocus:events_inited') === '1';
+            if(!inited){
+              localStorage.setItem('openfocus:events_inited', '1');
+              if(Number.isFinite(maxId) && maxId > 0) localStorage.setItem('openfocus:last_event_id', String(maxId));
+              return;
+            }
+            if(Number.isFinite(maxId) && maxId > last){
+              const it0 = items[0] || {};
+              const label = String(it0.kind_label || it0.kind || '新事件');
+              const msg = String(it0.summary || '');
+              toast('新事件：' + label);
+              const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
+              if(enabled && typeof Notification !== 'undefined'){
+                if(Notification.permission === 'granted'){
+                  try{
+                    new Notification('OpenFocus', { body: (label + (msg ? ('\n' + msg) : '')) });
+                  }catch(_){ }
+                }
+              }
+              localStorage.setItem('openfocus:last_event_id', String(maxId));
+            }
+          }catch(_){ }
+        })();
+
+        const html = items.map((it)=>{
+          const t = fmtTime(it.created_at);
+          const label = it.kind_label || it.kind || '';
+          const msg = it.summary || '';
+          const src = it.source_label || '';
+          const task = it.task_public_id || '';
+          const id = String(it.id || '');
+          const unread = id && !readSet.has(id);
+          return `
+            <div class="panel js-ev-item ${unread ? 'ev-unread' : ''}" data-ev-id="${escapeHtml(id)}" tabindex="0" style="margin: 8px 0; background: rgba(0,0,0,0.18); outline: none;">
+              <div class="pad" style="padding: 10px 12px; display:flex; gap: 10px; align-items:flex-start; justify-content:space-between;">
+                <div style="min-width:0; flex:1;">
+                  <div style="display:flex; gap: 8px; align-items:center; flex-wrap:wrap;">
+                    <span class="k">${t ? t : ''}</span>
+                    <span class="muted">${escapeHtml(label)}</span>
+                    <span class="unread-dot" style="display:${unread ? 'inline-block' : 'none'}" title="未读"></span>
+                  </div>
+                  ${msg ? (`<div class="muted" style="margin-top: 6px; white-space: pre-wrap;">${escapeHtml(msg)}</div>`) : ''}
+                  ${src ? (`<div class="muted" style="margin-top: 6px; font-size: 12px;">${escapeHtml(src)}</div>`) : ''}
+                </div>
+                ${task ? `<button type="button" class="btn-ghost js-open-task" data-task="${task}">打开</button>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+        box.innerHTML = html;
+
+        // mark-as-read on focus/click/hover
+        if(!box.__evReadBound){
+          box.__evReadBound = true;
+          const handler = (e)=>{
+            const t = e.target;
+            if(!(t instanceof HTMLElement)) return;
+            const item = t.closest('.js-ev-item');
+            if(!item) return;
+            markRead(item.getAttribute('data-ev-id'));
+          };
+          box.addEventListener('focusin', handler);
+          box.addEventListener('click', handler);
+          box.addEventListener('mouseenter', handler, { capture: true });
+        }
+      }catch(e){
+        box.textContent = '事件加载失败。';
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    async function refreshPromptHistory(taskPid, opts={}){
+      const box = document.getElementById('prompt-history-' + taskPid);
+      if(!box) return;
+      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      try{
+        const r = await fetch('/api/tasks/' + encodeURIComponent(taskPid) + '/recommended_prompt_history?limit=10');
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = (data && data.items) ? data.items : [];
+        if(!items.length){ box.textContent = '暂无历史。'; return; }
+
+        // 如果历史里已有 prompt，且本地还没记录过，则同步到本地状态，保证按钮显示“重新生成”。
+        const st = _getPromptState(String(taskPid));
+        const firstPrompt = (items[0] && items[0].prompt) ? String(items[0].prompt) : '';
+        if(st && st.status !== 'loading' && firstPrompt && !String(st.prompt || '').trim()){
+          st.prompt = firstPrompt;
+          st.status = 'done';
+          _applyPromptUi(String(taskPid));
+        }
+
+        const html = items.map((it, idx)=>{
+          const t = it.created_at || '';
+          const label = t ? (t.replace('T',' ').slice(0,16)) : ('#' + (idx+1));
+          return `
+            <details class="panel" style="margin-top: 8px; background: rgba(0,0,0,0.18);">
+              <summary class="pad" style="padding: 8px 10px; cursor:pointer; user-select:none;">
+                <span class="k">${label}</span>
+              </summary>
+              <div class="pad" style="padding-top: 0;">
+                <textarea rows="10" readonly>${it.prompt || ''}</textarea>
+                <div style="margin-top: 8px; display:flex; gap: 10px;">
+                  <button type="button" class="btn-ghost js-copy-nearest">复制</button>
+                </div>
+              </div>
+            </details>
+          `;
+        }).join('');
+        box.innerHTML = html;
+        if(opts && opts.preferSetCurrent){
+          const out = document.getElementById('prompt-' + taskPid);
+          if(out && !String(out.value||'').trim() && items[0] && items[0].prompt){
+            out.value = String(items[0].prompt);
+          }
+        }
+      }catch(e){
+        box.textContent = '历史加载失败。';
+      }
+    }
+
+    document.getElementById('next-refresh')?.addEventListener('click', refreshNext);
+    document.getElementById('ev-refresh')?.addEventListener('click', refreshEvents);
+    document.getElementById('goal-gen')?.addEventListener('click', _extractGoalFromDescription);
+    document.getElementById('task-gen')?.addEventListener('click', _extractTaskTitleFromDescription);
+    document.getElementById('goal-edit-gen')?.addEventListener('click', async ()=>{
+      await _extractGoalFromDescriptionGeneric({
+        descEl: document.getElementById('goal-edit-description'),
+        outEl: document.getElementById('goal-edit-content'),
+        btnEl: document.getElementById('goal-edit-gen'),
+        traceEl: document.getElementById('goal-edit-gen-trace'),
+      });
+    });
+
+    function _refreshNotifyButton(){
+      const btn = document.getElementById('notify-toggle');
+      if(!btn) return;
+      const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
+      if(typeof Notification === 'undefined'){
+        btn.textContent = '系统通知不可用';
+        btn.disabled = true;
+        return;
+      }
+      if(Notification.permission === 'denied'){
+        btn.textContent = '通知已禁用';
+        btn.disabled = false;
+        return;
+      }
+      btn.textContent = enabled ? '关闭系统通知' : '启用系统通知';
+      btn.disabled = false;
+    }
+
+    async function _toggleNotify(){
+      if(typeof Notification === 'undefined'){
+        toast('当前浏览器不支持系统通知');
+        return;
+      }
+      const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
+      if(enabled){
+        localStorage.setItem('openfocus:notify_enabled', '0');
+        _refreshNotifyButton();
+        toast('已关闭系统通知');
+        return;
+      }
+
+      // enable
+      if(Notification.permission === 'granted'){
+        localStorage.setItem('openfocus:notify_enabled', '1');
+        _refreshNotifyButton();
+        toast('已启用系统通知');
+        return;
+      }
+      if(Notification.permission === 'denied'){
+        toast('通知权限已被浏览器拒绝，请在浏览器站点设置里改为“允许”。');
+        _refreshNotifyButton();
+        return;
+      }
+      try{
+        const p = await Notification.requestPermission();
+        if(p === 'granted'){
+          localStorage.setItem('openfocus:notify_enabled', '1');
+          toast('已启用系统通知');
+        }else{
+          toast('未获得通知权限');
+        }
+      }catch(_){
+        toast('通知权限请求失败');
+      }finally{
+        _refreshNotifyButton();
+      }
+    }
+
+
+    document.getElementById('notify-toggle')?.addEventListener('click', _toggleNotify);
+    _refreshNotifyButton();
+
+    // Copy buttons in history list
+    document.addEventListener('click', (e)=>{
+      const t = e.target;
+      if(!(t instanceof HTMLElement)) return;
+      const c = t.closest('.js-copy-nearest');
+      if(!c) return;
+      const ta = c.closest('details')?.querySelector('textarea');
+      if(ta) copyTextFrom(ta, null);
+    });
+
+    // periodic refresh
+    setInterval(refreshNext, 30 * 60 * 1000);
+    setInterval(refreshEvents, 15 * 1000);
+
+    // initial
+    refreshNext();
+    refreshEvents();
+
+    // initial selection from server params or last
+    (function(){
+      const url = new URL(window.location.href);
+      const goal = url.searchParams.get('goal');
+      const task = url.searchParams.get('task');
+      const openNew = url.searchParams.get('new');
+      if(openNew === '1'){
+        try{ document.getElementById('new-goal-dialog')?.showModal(); }catch(_){ }
+      }
+      if(task && document.getElementById('detail-task-' + task)){
+        const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + task + '"]');
+        const gid = btn ? btn.getAttribute('data-goal') : goal;
+        if(gid){
+          const box = document.getElementById('goal-expand-' + gid);
+          if(box && box.style.display === 'none') toggleGoal(gid);
+        }
+        selectTask(task, gid);
+        return;
+      }
+      if(goal && document.getElementById('detail-goal-' + goal)){
+        selectGoal(goal);
+        return;
+      }
+      try{
+        const lastTask = localStorage.getItem('openfocus:last_task');
+        if(lastTask && document.getElementById('detail-task-' + lastTask)){
+          const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + lastTask + '"]');
+          const gid = btn ? btn.getAttribute('data-goal') : '';
+          if(gid){
+            const box = document.getElementById('goal-expand-' + gid);
+            if(box && box.style.display === 'none') toggleGoal(gid);
+          }
+          selectTask(lastTask, gid);
+          return;
+        }
+        const lastGoal = localStorage.getItem('openfocus:last_goal');
+        if(lastGoal && document.getElementById('detail-goal-' + lastGoal)){
+          selectGoal(lastGoal);
+          return;
+        }
+      }catch(_){ }
+
+      // default focus: first goal
+      const first = document.querySelector('.nav-item[data-type="goal"]');
+      if(first) selectGoal(first.getAttribute('data-id'));
+    })();
+
+    // init dialog submit UX
+    (function(){
+      const f = document.getElementById('new-goal-form');
+      const b = document.getElementById('new-goal-submit');
+      const h = document.getElementById('new-goal-hint');
+      if(!f || !b || !h) return;
+      f.addEventListener('submit', ()=>{ b.disabled = true; h.style.display = 'block'; });
+    })();
+  </script>
 {% endblock %}

@@ -1,68 +1,80 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>目标详情</h1>
-
-  <div class="card">
-    <div><strong>{{ goal.content }}</strong></div>
+  <div style="margin-top: 14px;" class="panel pad">
+    <div class="k">目标详情</div>
+    <div style="font-size: 16px; margin-top: 6px;">{{ goal.content }}</div>
     {% if goal.description %}
-      <div class="muted" style="margin-top: 6px; white-space: pre-wrap;">{{ goal.description }}</div>
+      <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ goal.description }}</div>
     {% endif %}
-    <div class="muted" style="margin-top: 8px;">
-      状态：{{ goal.status }} · 优先级：{{ goal.priority }} · 重要程度：{{ goal.importance }}
-      · 完成时间：{{ goal.due_date }} · 创建于：{{ goal.created_at }}
+
+    <div class="divider"></div>
+    <div style="display:flex; gap: 8px; flex-wrap:wrap;">
+      <span class="pill">status {{ goal.status }}</span>
+      <span class="pill">priority {{ goal.priority }}</span>
+      <span class="pill">importance {{ goal.importance }}</span>
+      <span class="pill">DDL {{ goal.due_date }}</span>
+      <span class="pill">created_at {{ goal.created_at }}</span>
     </div>
-    <div style="margin-top: 10px; display:flex; gap: 10px;">
-      <a href="/goals">返回列表</a>
-      <a href="/goals/{{ goal.id }}/edit">编辑目标</a>
+
+    <div class="divider"></div>
+    <div style="display:flex; gap: 10px; flex-wrap:wrap;">
+      <a href="/goals" class="btn-ghost" role="button">返回 Dashboard</a>
+      <a href="/goals/{{ goal.id }}/edit" class="btn-ghost" role="button">编辑目标</a>
+      <form method="post" action="/goals/{{ goal.id }}/plan/start" style="margin:0;">
+        <button type="submit" class="btn-ghost">Plan</button>
+      </form>
     </div>
   </div>
 
-  <h2>Tasks（手动模式可维护）</h2>
-  <div class="card">
-    <form method="post" action="/goals/{{ goal.id }}/tasks">
-      <div class="row">
-        <div>
-          <label>Task 标题</label>
-          <input name="title" placeholder="例如：把 focus_report 接入 coco" required />
-        </div>
-        <div style="display:flex; align-items:end; justify-content:flex-end;">
-          <button type="submit">添加 Task</button>
+  <div style="margin-top: 14px;" class="panel pad">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+      <div>
+        <div class="k">TASKS</div>
+        <div class="muted">手动模式可维护；也可在 Dashboard 右侧生成推荐提示词。</div>
+      </div>
+      <div class="pill">{{ tasks|length }} tasks</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <form method="post" action="/goals/{{ goal.id }}/tasks" class="panel" style="background: rgba(0,0,0,0.18);">
+      <div class="pad" style="padding: 10px 12px;">
+        <div class="row">
+          <div>
+            <label class="muted">Task 标题</label>
+            <input name="title" placeholder="例如：把 focus_report 接入 coco" required />
+          </div>
+          <div style="display:flex; align-items:end; justify-content:flex-end;">
+            <button type="submit">添加 Task</button>
+          </div>
         </div>
       </div>
     </form>
-  </div>
 
-  {% if tasks|length == 0 %}
-    <div class="card">还没有 tasks。</div>
-  {% endif %}
+    {% if tasks|length == 0 %}
+      <div class="divider"></div>
+      <div class="muted">还没有 tasks。</div>
+    {% endif %}
 
-  {% for t in tasks %}
-    <div class="card">
-      <div><strong>{{ t.title }}</strong></div>
-      <div class="muted">status={{ t.status }} · public_id={{ t.public_id }}</div>
-      <div style="margin-top: 10px; display:flex; gap: 10px;">
-        {% if t.status != 'done' %}
-          <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;">
-            <button type="submit">标记完成</button>
-          </form>
-        {% endif %}
-        <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该 task？')">
-          <button type="submit" style="background:#b91c1c;">删除</button>
-        </form>
-      </div>
-
-      <details style="margin-top: 12px;">
-        <summary>推荐提示词（复制给 Agent 执行）</summary>
-        <div style="margin-top: 8px;">
-          <textarea id="prompt-{{ t.id }}" rows="14" readonly style="width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;" placeholder="点击下方按钮生成推荐提示词（会调用 LLM）。"></textarea>
-          <div style="display:flex; gap:10px; margin-top:8px;">
-            <button type="button" id="gen-{{ t.id }}" onclick="(async()=>{const btn=document.getElementById('gen-{{ t.id }}'); const out=document.getElementById('prompt-{{ t.id }}'); const err=document.getElementById('prompt-err-{{ t.id }}'); if(!btn||!out||!err) return; err.textContent=''; btn.disabled=true; const old=btn.textContent; btn.textContent='生成中...'; try{const r=await fetch('/api/tasks/{{ t.public_id }}/recommended_prompt'); if(!r.ok){const txt=await r.text(); throw new Error(txt||('HTTP '+r.status));} const data=await r.json(); out.value=(data && data.prompt) ? String(data.prompt) : ''; if(!out.value){throw new Error('返回为空');}}catch(e){err.textContent=String(e&&e.message?e.message:e); }finally{btn.disabled=false; btn.textContent=old;}})();">生成提示词</button>
-            <button type="button" onclick="(async()=>{const el=document.getElementById('prompt-{{ t.id }}'); const err=document.getElementById('prompt-err-{{ t.id }}'); if(!el||!err) return; const v=el.value||el.textContent||''; if(!v.trim()){err.textContent='请先生成提示词。'; return;} try{await navigator.clipboard.writeText(v); err.textContent='已复制'; setTimeout(()=>{if(err.textContent==='已复制') err.textContent='';}, 1000);}catch(e){el.focus(); el.select(); err.textContent='复制失败（已选中文本，可手动复制）。';}})();">复制提示词</button>
+    {% for t in tasks %}
+      <div class="panel" style="margin-top: 10px; background: rgba(0,0,0,0.18);">
+        <div class="pad" style="padding: 10px 12px; display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div style="min-width:0; flex:1;">
+            <div>{{ t.title }}</div>
+            <div class="muted" style="margin-top: 6px;">状态：{{ t.status }} · taskId={{ t.public_id }}</div>
           </div>
-          <div id="prompt-err-{{ t.id }}" class="muted" style="margin-top: 6px; color:#b91c1c;"></div>
-          <div class="muted" style="margin-top: 6px;">提示：如 OpenFocus 不是运行在 127.0.0.1:8001，请把生成的提示词里的 server URL 替换为实际地址。</div>
+          <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
+            {% if t.status != 'done' %}
+              <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;">
+                <button type="submit">标记完成</button>
+              </form>
+            {% endif %}
+            <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该 task？')">
+              <button type="submit" class="btn-danger">删除</button>
+            </form>
+          </div>
         </div>
-      </details>
-    </div>
-  {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
 {% endblock %}
