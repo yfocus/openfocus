@@ -7,7 +7,7 @@ import mimetypes
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
@@ -68,6 +68,24 @@ def _human_since(ts: dt.datetime | None, *, now: dt.datetime | None = None) -> s
 
 
 templates.env.filters["human_since"] = _human_since
+
+
+def _map_companion_files_error(e: CompanionGrpcError) -> HTTPException:
+    msg = str(e or "").strip()
+    low = msg.lower()
+    if ("not found" in low) or ("no such file" in low):
+        return HTTPException(status_code=404, detail=msg or "not found")
+    if ("too large" in low) or ("file too large" in low):
+        return HTTPException(status_code=413, detail=msg or "file too large")
+    if (
+        ("traversal" in low)
+        or ("invalid path" in low)
+        or ("must be absolute" in low)
+        or ("not a directory" in low)
+        or ("root_path" in low)
+    ):
+        return HTTPException(status_code=400, detail=msg or "bad request")
+    return HTTPException(status_code=502, detail=f"Companion 文件服务错误：{msg}")
 
 
 
@@ -1569,15 +1587,107 @@ def delete_agent_space(task_public_id: str) -> dict:
 
 
 @app.get("/api/agent_spaces/{space_id}/files/list")
-def agent_space_files_list_disabled(space_id: int, path: str = "") -> dict:
-    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")
+async def agent_space_files_list(space_id: int, path: str = "") -> dict:
+    # 通过 Companion(gRPC) 从远端节点列目录（只读）
+    with session_scope() as s:
+        sp = s.get(AgentSpace, int(space_id))
+        if sp is None:
+            raise HTTPException(status_code=404, detail="AgentSpace not found")
+        if not sp.companion_id:
+            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
+
+        c = s.get(Companion, int(sp.companion_id))
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+
+        root_path = str(sp.root_path or "")
+        cid = int(c.id)
+
+    conn = COMPANION_GRPC.registry.get(cid)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+
+    try:
+        res = await conn.request_files_list(root_path=root_path, rel_path=str(path or ""), timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        raise _map_companion_files_error(e)
+
+    entries = [
+        {
+            "name": it.name,
+            "rel_path": it.rel_path,
+            "kind": it.kind,
+            "size": int(it.size),
+            "mtime": float(it.mtime),
+        }
+        for it in (res.entries or [])
+    ]
+    return {"ok": True, "path": res.path, "entries": entries}
 
 
 @app.get("/api/agent_spaces/{space_id}/files/read")
-def agent_space_files_read_disabled(space_id: int, path: str) -> dict:
-    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")
+async def agent_space_files_read(space_id: int, path: str) -> dict:
+    with session_scope() as s:
+        sp = s.get(AgentSpace, int(space_id))
+        if sp is None:
+            raise HTTPException(status_code=404, detail="AgentSpace not found")
+        if not sp.companion_id:
+            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
+
+        c = s.get(Companion, int(sp.companion_id))
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+
+        root_path = str(sp.root_path or "")
+        cid = int(c.id)
+
+    conn = COMPANION_GRPC.registry.get(cid)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+
+    try:
+        res = await conn.request_files_read(root_path=root_path, rel_path=str(path or ""), max_bytes=256 * 1024)
+    except CompanionGrpcError as e:
+        raise _map_companion_files_error(e)
+
+    return {
+        "ok": True,
+        "path": res.path,
+        "content": res.content,
+        "truncated": bool(res.truncated),
+        "mime": res.mime,
+    }
 
 
 @app.get("/api/agent_spaces/{space_id}/files/raw")
-def agent_space_files_raw_disabled(space_id: int, path: str) -> dict:
-    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")
+async def agent_space_files_raw(space_id: int, path: str) -> Response:
+    with session_scope() as s:
+        sp = s.get(AgentSpace, int(space_id))
+        if sp is None:
+            raise HTTPException(status_code=404, detail="AgentSpace not found")
+        if not sp.companion_id:
+            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
+
+        c = s.get(Companion, int(sp.companion_id))
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+
+        root_path = str(sp.root_path or "")
+        cid = int(c.id)
+
+    conn = COMPANION_GRPC.registry.get(cid)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+
+    try:
+        res = await conn.request_files_raw(root_path=root_path, rel_path=str(path or ""), max_bytes=2 * 1024 * 1024)
+    except CompanionGrpcError as e:
+        raise _map_companion_files_error(e)
+
+    return Response(content=bytes(res.data), media_type=(res.mime or "application/octet-stream"))

@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import mimetypes
 import secrets
 import string
 import subprocess
@@ -205,6 +206,107 @@ def _choose_directory() -> str:
     return path
 
 
+def _resolve_inside_root(*, root_path: str, rel_path: str) -> Path:
+    root = Path(root_path).expanduser()
+    if not root.is_absolute():
+        raise ValueError("root_path must be absolute")
+    if not root.exists() or not root.is_dir():
+        raise ValueError("root_path not found")
+
+    raw = str(rel_path or "")
+    # 安全：不接受绝对路径（否则会被当成相对路径去读，语义不清且容易误用）。
+    try:
+        if raw.startswith("/") or Path(raw).is_absolute():
+            raise ValueError("invalid path")
+    except Exception:
+        # Path(raw) 解析异常时也按 invalid path 处理
+        raise ValueError("invalid path")
+
+    rel = raw.lstrip("/")
+    p = (root / rel)
+
+    # 先 normalize，再做 resolve（包含 symlink）检查越界
+    try:
+        rp = p.resolve(strict=False)
+        rr = root.resolve(strict=True)
+    except Exception:
+        raise ValueError("invalid path")
+    try:
+        rp.relative_to(rr)
+    except Exception:
+        raise ValueError("path traversal is not allowed")
+    return p
+
+
+def _list_dir(*, root_path: str, rel_path: str) -> tuple[str, list[pb2.FileEntry]]:
+    p = _resolve_inside_root(root_path=root_path, rel_path=rel_path)
+    if not p.exists():
+        raise ValueError("path not found")
+    if not p.is_dir():
+        raise ValueError("not a directory")
+
+    entries: list[pb2.FileEntry] = []
+    rr = Path(root_path).expanduser().resolve(strict=True)
+    for child in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+        try:
+            st = child.lstat()
+        except Exception:
+            continue
+        kind = "dir" if child.is_dir() else "file"
+        try:
+            rel = str(child.resolve(strict=False).relative_to(rr))
+        except Exception:
+            # 如果 resolve 后越界，直接跳过
+            continue
+        entries.append(
+            pb2.FileEntry(
+                name=child.name,
+                rel_path=rel,
+                kind=kind,
+                size=int(getattr(st, "st_size", 0) or 0),
+                mtime=float(getattr(st, "st_mtime", 0.0) or 0.0),
+            )
+        )
+    return str(rel_path or ""), entries
+
+
+def _read_text(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, str, bool, str]:
+    p = _resolve_inside_root(root_path=root_path, rel_path=rel_path)
+    if not p.exists() or not p.is_file():
+        raise ValueError("file not found")
+    max_bytes = int(max_bytes or 0)
+    if max_bytes <= 0:
+        max_bytes = 256 * 1024
+    max_bytes = min(max_bytes, 2 * 1024 * 1024)
+    raw = p.read_bytes()
+    truncated = len(raw) > max_bytes
+    raw2 = raw[:max_bytes]
+    mime, _ = mimetypes.guess_type(str(p))
+    mime = mime or "text/plain"
+    # UTF-8 优先，失败则 replace
+    try:
+        text = raw2.decode("utf-8")
+    except Exception:
+        text = raw2.decode("utf-8", errors="replace")
+    return str(rel_path or ""), text, bool(truncated), mime
+
+
+def _read_raw(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, bytes, str]:
+    p = _resolve_inside_root(root_path=root_path, rel_path=rel_path)
+    if not p.exists() or not p.is_file():
+        raise ValueError("file not found")
+    max_bytes = int(max_bytes or 0)
+    if max_bytes <= 0:
+        max_bytes = 2 * 1024 * 1024
+    max_bytes = min(max_bytes, 10 * 1024 * 1024)
+    raw = p.read_bytes()
+    if len(raw) > max_bytes:
+        raise ValueError("file too large")
+    mime, _ = mimetypes.guess_type(str(p))
+    mime = mime or "application/octet-stream"
+    return str(rel_path or ""), raw, mime
+
+
 async def run_companion(*, grpc_addr: str | None = None, stop_event: asyncio.Event | None = None) -> None:
     """运行 Companion 主循环（gRPC 客户端）。
 
@@ -245,64 +347,144 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
     await out_q.put(pb2.ClientToServer(hello=hello))
 
     async def _outgoing() -> AsyncIterator[pb2.ClientToServer]:
-        while not stop_event.is_set():
-            msg = await out_q.get()
-            yield msg
+        # 允许 stop_event 在 out_q 空时也能打断等待，避免测试/退出时只能靠取消任务。
+        while True:
+            if stop_event.is_set():
+                return
+
+            get_task = asyncio.create_task(out_q.get())
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait({get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+
+            if stop_task in done:
+                return
+            yield get_task.result()
 
     async with grpc.aio.insecure_channel(addr) as channel:
         stub = pb2_grpc.CompanionControlStub(channel)
-        async for msg in stub.Connect(_outgoing()):
-            which = msg.WhichOneof("msg")
-            if which == "welcome":
-                cid = int(msg.welcome.companion_id or 0)
-                if cid > 0 and cid != RUNTIME.server_companion_id:
-                    RUNTIME.server_companion_id = cid
-                    RUNTIME._persist()
-                continue
-            if which == "pairing_code":
-                req = msg.pairing_code
-                try:
-                    code, exp = RUNTIME.current_code(force_new=bool(req.force_new))
-                    resp = pb2.PairingCodeResponse(
-                        request_id=req.request_id,
-                        ok=True,
-                        code=code,
-                        expires_at=exp.isoformat(),
-                    )
-                except Exception as e:
-                    resp = pb2.PairingCodeResponse(request_id=req.request_id, ok=False, error=str(e))
-                await out_q.put(pb2.ClientToServer(pairing_code_resp=resp))
-                continue
-            if which == "ping":
-                p = msg.ping
-                await out_q.put(
-                    pb2.ClientToServer(
-                        pong=pb2.Pong(ts_unix_ms=_now_ms(), ping_ts_unix_ms=p.ts_unix_ms)
-                    )
-                )
-                continue
+        call = stub.Connect(_outgoing())
 
-            if which == "pair":
-                req = msg.pair
-                try:
-                    token = RUNTIME.confirm_pair(req.code)
-                    resp = pb2.PairResponse(request_id=req.request_id, ok=True, auth_token=token)
-                except Exception as e:
-                    resp = pb2.PairResponse(request_id=req.request_id, ok=False, error=str(e))
-                await out_q.put(pb2.ClientToServer(pair_resp=resp))
-                continue
+        async def _cancel_on_stop() -> None:
+            await stop_event.wait()
+            try:
+                call.cancel()
+            except Exception:
+                pass
 
-            if which == "choose_directory":
-                req = msg.choose_directory
-                try:
-                    if not (RUNTIME.auth_token or "").strip():
-                        raise RuntimeError("Companion 尚未配对")
-                    path = _choose_directory()
-                    resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=True, path=path)
-                except Exception as e:
-                    resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=False, error=str(e))
-                await out_q.put(pb2.ClientToServer(choose_directory_resp=resp))
-                continue
+        cancel_task = asyncio.create_task(_cancel_on_stop(), name="companion-cancel-on-stop")
+        try:
+            async for msg in call:
+                which = msg.WhichOneof("msg")
+                if which == "welcome":
+                    cid = int(msg.welcome.companion_id or 0)
+                    if cid > 0 and cid != RUNTIME.server_companion_id:
+                        RUNTIME.server_companion_id = cid
+                        RUNTIME._persist()
+                    continue
+                if which == "pairing_code":
+                    req = msg.pairing_code
+                    try:
+                        code, exp = RUNTIME.current_code(force_new=bool(req.force_new))
+                        resp = pb2.PairingCodeResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            code=code,
+                            expires_at=exp.isoformat(),
+                        )
+                    except Exception as e:
+                        resp = pb2.PairingCodeResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(pairing_code_resp=resp))
+                    continue
+                if which == "ping":
+                    p = msg.ping
+                    await out_q.put(
+                        pb2.ClientToServer(
+                            pong=pb2.Pong(ts_unix_ms=_now_ms(), ping_ts_unix_ms=p.ts_unix_ms)
+                        )
+                    )
+                    continue
+
+                if which == "pair":
+                    req = msg.pair
+                    try:
+                        token = RUNTIME.confirm_pair(req.code)
+                        resp = pb2.PairResponse(request_id=req.request_id, ok=True, auth_token=token)
+                    except Exception as e:
+                        resp = pb2.PairResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(pair_resp=resp))
+                    continue
+
+                if which == "choose_directory":
+                    req = msg.choose_directory
+                    try:
+                        if not (RUNTIME.auth_token or "").strip():
+                            raise RuntimeError("Companion 尚未配对")
+                        path = _choose_directory()
+                        resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=True, path=path)
+                    except Exception as e:
+                        resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(choose_directory_resp=resp))
+                    continue
+
+                if which == "files_list":
+                    req = msg.files_list
+                    try:
+                        path, entries = _list_dir(root_path=req.root_path, rel_path=req.rel_path)
+                        resp = pb2.FilesListResponse(request_id=req.request_id, ok=True, path=path, entries=entries)
+                    except Exception as e:
+                        resp = pb2.FilesListResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(files_list_resp=resp))
+                    continue
+
+                if which == "files_read":
+                    req = msg.files_read
+                    try:
+                        path, content, truncated, mime = _read_text(
+                            root_path=req.root_path,
+                            rel_path=req.rel_path,
+                            max_bytes=req.max_bytes,
+                        )
+                        resp = pb2.FilesReadResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            path=path,
+                            content=content,
+                            truncated=bool(truncated),
+                            mime=mime,
+                        )
+                    except Exception as e:
+                        resp = pb2.FilesReadResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(files_read_resp=resp))
+                    continue
+
+                if which == "files_raw":
+                    req = msg.files_raw
+                    try:
+                        path, data, mime = _read_raw(
+                            root_path=req.root_path,
+                            rel_path=req.rel_path,
+                            max_bytes=req.max_bytes,
+                        )
+                        resp = pb2.FilesRawResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            path=path,
+                            data=data,
+                            mime=mime,
+                        )
+                    except Exception as e:
+                        resp = pb2.FilesRawResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(files_raw_resp=resp))
+                    continue
+        except asyncio.CancelledError:
+            # stop_event 触发的 call.cancel() 会导致本地 CANCELLED，这里视为正常退出。
+            if stop_event.is_set():
+                return
+            raise
+        finally:
+            cancel_task.cancel()
 
 
 def _print_banner() -> None:

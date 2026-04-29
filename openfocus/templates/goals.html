@@ -412,7 +412,7 @@
         <select id="agent-space-companion" style="width:100%;">
           <option value="">加载中…</option>
         </select>
-        <div class="muted" style="margin-top: 6px; font-size: 12px;">如果没有可用 Companion，请先到顶部导航栏的 `Companion` 页面完成注册与认证。</div>
+        <div class="muted" style="margin-top: 6px; font-size: 12px;">只有“已认证/在线”的 Companion 才能创建工作区。若列表为空或为灰色，请先到 <a href="/companions">Companion</a> 页面完成认证。</div>
       </div>
       <div style="margin-bottom: 10px;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
@@ -1188,6 +1188,7 @@
 
     // AgentSpace dialog wiring
     const AGENT_SPACE_STATE = { taskPid: '', companionId: '' };
+    const AGENT_SPACE_LAST_COMPANION_KEY = 'openfocus:last_companion_id';
     function _openAgentSpaceDialog(taskPid){
       const pid = String(taskPid || '').trim();
       if(!pid){ toast('taskId 缺失'); return; }
@@ -1214,18 +1215,49 @@
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const items = (data && data.items) ? data.items : [];
-        const active = items.filter(x => x && x.status === 'active');
+        const order = { active: 0, pending_certification: 1, offline: 2 };
+        const all = items.slice().filter(Boolean).sort((a, b)=>{
+          const oa = (order[String(a.status||'')] ?? 99);
+          const ob = (order[String(b.status||'')] ?? 99);
+          if(oa !== ob) return oa - ob;
+          return Number(b.id||0) - Number(a.id||0);
+        });
+        const active = all.filter(x => x && x.status === 'active');
         if(!sel) return;
-        if(!active.length){
-          sel.innerHTML = '<option value="">暂无可用 Companion</option>';
+        if(!all.length){
+          sel.innerHTML = '<option value="">暂无 Companion</option>';
           return;
         }
-        sel.innerHTML = active.map(it => {
+
+        const statusLabel = (st)=>{
+          const s = String(st || '');
+          if(s === 'active') return '已认证/在线';
+          if(s === 'pending_certification') return '待认证';
+          if(s === 'offline') return '离线';
+          return s || '未知';
+        };
+
+        sel.innerHTML = all.map(it => {
           const label = (it.name || it.device_id || ('companion#' + it.id));
-          return '<option value="' + String(it.id) + '">' + escapeHtml(label) + '</option>';
+          const st = String(it.status || '');
+          const disabled = (st !== 'active');
+          return '<option value="' + String(it.id) + '"' + (disabled ? ' disabled' : '') + '>'
+            + escapeHtml(label) + '（' + escapeHtml(statusLabel(st)) + '）'
+            + '</option>';
         }).join('');
-        sel.value = String(active[0].id);
-        AGENT_SPACE_STATE.companionId = sel.value;
+
+        const last = String(localStorage.getItem(AGENT_SPACE_LAST_COMPANION_KEY) || '').trim();
+        let chosen = '';
+        if(last && active.some(x => String(x.id) === last)) chosen = last;
+        else if(active[0] && active[0].id) chosen = String(active[0].id);
+        else chosen = '';
+        if(chosen){
+          sel.value = chosen;
+          AGENT_SPACE_STATE.companionId = chosen;
+          localStorage.setItem(AGENT_SPACE_LAST_COMPANION_KEY, chosen);
+        }else{
+          AGENT_SPACE_STATE.companionId = '';
+        }
       }catch(e){
         if(sel) sel.innerHTML = '<option value="">加载失败</option>';
       }finally{
@@ -1295,6 +1327,7 @@
     document.getElementById('agent-space-companion')?.addEventListener('change', (e)=>{
       const v = String(e?.target?.value || '').trim();
       AGENT_SPACE_STATE.companionId = v;
+      if(v) localStorage.setItem(AGENT_SPACE_LAST_COMPANION_KEY, v);
     });
     document.getElementById('agent-space-create')?.addEventListener('click', _createAgentSpace);
 

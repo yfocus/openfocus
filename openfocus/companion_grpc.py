@@ -131,6 +131,79 @@ class CompanionConnection:
             raise CompanionGrpcError("missing code")
         return code, exp
 
+    async def request_files_list(self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0) -> pb2.FilesListResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="files_list")
+        await self._out_q.put(
+            pb2.ServerToClient(files_list=pb2.FilesListRequest(request_id=rid, root_path=root_path, rel_path=rel_path))
+        )
+        try:
+            res: pb2.FilesListResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "files_list failed")
+        return res
+
+    async def request_files_read(
+        self,
+        *,
+        root_path: str,
+        rel_path: str,
+        max_bytes: int = 256 * 1024,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.FilesReadResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="files_read")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                files_read=pb2.FilesReadRequest(
+                    request_id=rid,
+                    root_path=root_path,
+                    rel_path=rel_path,
+                    max_bytes=int(max_bytes),
+                )
+            )
+        )
+        try:
+            res: pb2.FilesReadResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "files_read failed")
+        return res
+
+    async def request_files_raw(
+        self,
+        *,
+        root_path: str,
+        rel_path: str,
+        max_bytes: int = 2 * 1024 * 1024,
+        timeout_seconds: float = 20.0,
+    ) -> pb2.FilesRawResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="files_raw")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                files_raw=pb2.FilesRawRequest(
+                    request_id=rid,
+                    root_path=root_path,
+                    rel_path=rel_path,
+                    max_bytes=int(max_bytes),
+                )
+            )
+        )
+        try:
+            res: pb2.FilesRawResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "files_raw failed")
+        return res
+
     def handle_incoming(self, msg: pb2.ClientToServer) -> None:
         self.mark_seen()
         which = msg.WhichOneof("msg")
@@ -152,6 +225,24 @@ class CompanionConnection:
             r: pb2.PairingCodeResponse = msg.pairing_code_resp
             p = self._pending.get(r.request_id)
             if p and p.kind == "pairing_code" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "files_list_resp":
+            r: pb2.FilesListResponse = msg.files_list_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "files_list" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "files_read_resp":
+            r: pb2.FilesReadResponse = msg.files_read_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "files_read" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "files_raw_resp":
+            r: pb2.FilesRawResponse = msg.files_raw_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "files_raw" and not p.fut.done():
                 p.fut.set_result(r)
             return
         if which == "choose_directory_resp":
@@ -302,6 +393,13 @@ class CompanionGrpcServer:
     async def stop(self) -> None:
         if self._server is None:
             return
-        await self._server.stop(grace=None)
+        server = self._server
+        # 尽量等待底层资源释放，避免在 pytest/anyio 频繁启动/关闭时触发 gRPC aio 的不稳定。
+        await server.stop(grace=0)
+        try:
+            await server.wait_for_termination(timeout=1.0)
+        except TypeError:
+            # 兼容不同 grpcio 版本的签名
+            await server.wait_for_termination()
         self._server = None
         self.bound_addr = None

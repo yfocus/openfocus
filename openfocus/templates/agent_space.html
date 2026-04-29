@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+  <div style="height: 100%; min-height: 0; display: flex; flex-direction: column;">
   <div class="panel pad" style="margin-top: 14px;">
     <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
       <div>
@@ -9,6 +10,9 @@
       </div>
       <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
         <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button">返回 Dashboard</a>
+        {% if space %}
+          <button type="button" class="btn-danger" id="space-release">释放工作区</button>
+        {% endif %}
       </div>
     </div>
     <div class="divider"></div>
@@ -22,13 +26,224 @@
     {% endif %}
   </div>
 
-  <div class="panel pad" style="margin-top: 14px;">
-    <div class="k">说明</div>
-    <div class="muted" style="margin-top: 8px; white-space: pre-wrap;">
-      该页面的 FILES / PREVIEW / AGENT 交互将通过 Companion 机制接入。
-      当前版本先完成“独立 Companion 进程 + OpenFocus 反向代理 + 创建工作区/选择目录/认证”的闭环，
-      具体文件树预览与 Agent 对话流将在后续迭代实现。
+  {% if space %}
+  <div class="layout-3" style="flex: 1 1 0; min-height: 0; height: auto; margin-top: 14px;">
+    <!-- Col 1: files tree -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
+        <div class="pad" style="padding: 14px; flex: 0 0 auto;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+            <div class="k">FILES</div>
+            <button type="button" class="btn-ghost" id="tree-refresh">刷新</button>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="col-scroll pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
+          <div id="file-tree" class="muted">加载中…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Col 2: preview -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
+        <div class="pad" style="padding: 14px; flex: 0 0 auto;">
+          <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
+            <div class="k">PREVIEW</div>
+            <div class="muted" id="preview-path" style="font-size: 12px;"></div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="col-scroll pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
+          <div id="preview" class="muted">选择一个文件预览（代码 / Markdown / 图片）。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Col 3: agent placeholder -->
+    <div class="panel" style="height:100%; padding:0;">
+      <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
+        <div class="pad" style="padding: 14px; flex: 0 0 auto;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+            <div class="k">AGENT</div>
+            <div class="muted" style="font-size: 12px;">—</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="col-scroll pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
+          <div class="muted">AGENT 对话流将在后续迭代实现。</div>
+        </div>
+      </div>
     </div>
   </div>
-{% endblock %}
 
+  <script>
+    const SPACE_ID = {{ space.id }};
+    const TASK_PUBLIC_ID = "{{ task.public_id|e }}";
+
+    function esc(s){
+      const x = String(s ?? '');
+      return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
+    }
+
+    function isLikelyImage(name){
+      const n = String(name||'').toLowerCase();
+      return n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg') || n.endsWith('.gif') || n.endsWith('.webp');
+    }
+
+    function isLikelyMarkdown(name){
+      const n = String(name||'').toLowerCase();
+      return n.endsWith('.md') || n.endsWith('.markdown');
+    }
+
+    function renderMarkdownLite(md){
+      // MVP：非常轻量的 markdown 渲染（标题/段落/代码块），避免引入额外依赖。
+      const lines = String(md||'').split(/\r?\n/);
+      let out = '';
+      let inCode = false;
+      let codeBuf = [];
+      for(const line of lines){
+        if(line.trim().startsWith('```')){
+          if(!inCode){ inCode = true; codeBuf = []; }
+          else{
+            inCode = false;
+            out += '<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>';
+          }
+          continue;
+        }
+        if(inCode){ codeBuf.push(line); continue; }
+        const m = line.match(/^(#{1,6})\s+(.*)$/);
+        if(m){
+          const level = m[1].length;
+          out += `<h${level}>${esc(m[2]||'')}</h${level}>`;
+          continue;
+        }
+        if(!line.trim()){
+          out += '<div style="height: 8px;"></div>';
+          continue;
+        }
+        out += '<p>' + esc(line) + '</p>';
+      }
+      return out || '<div class="muted">—</div>';
+    }
+
+    async function fetchJson(url){
+      const r = await fetch(url);
+      if(!r.ok){
+        const t = await r.text().catch(()=> '');
+        throw new Error(t || ('HTTP ' + r.status));
+      }
+      return await r.json();
+    }
+
+    function _indentPx(depth){
+      const d = Math.max(0, Math.min(Number(depth||0), 16));
+      return (d * 12) + 'px';
+    }
+
+    async function loadDirInto(detailsEl, relPath, depth){
+      const box = document.createElement('div');
+      box.className = 'muted';
+      box.textContent = '加载中…';
+      detailsEl.appendChild(box);
+      try{
+        const data = await fetchJson(`/api/agent_spaces/${SPACE_ID}/files/list?path=${encodeURIComponent(relPath||'')}`);
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        box.innerHTML = '';
+        if(!entries.length){ box.textContent = '—'; return; }
+        for(const it of entries){
+          const kind = String(it.kind||'');
+          if(kind === 'dir'){
+            const d = document.createElement('details');
+            d.dataset.path = String(it.rel_path||'');
+            d.style.marginLeft = _indentPx(depth || 0);
+            const s = document.createElement('summary');
+            s.style.cursor = 'pointer';
+            s.innerHTML = '📁 ' + esc(it.name||'');
+            d.appendChild(s);
+            d.addEventListener('toggle', async ()=>{
+              if(!d.open) return;
+              if(d.dataset.loaded === '1') return;
+              d.dataset.loaded = '1';
+              await loadDirInto(d, d.dataset.path || '', (depth || 0) + 1);
+            });
+            box.appendChild(d);
+          }else{
+            const a = document.createElement('a');
+            a.href = 'javascript:void(0)';
+            a.style.display = 'block';
+            a.style.padding = '2px 0';
+            a.style.marginLeft = _indentPx(depth || 0);
+            a.dataset.path = String(it.rel_path||'');
+            a.dataset.name = String(it.name||'');
+            a.innerHTML = '📄 ' + esc(it.name||'');
+            a.addEventListener('click', ()=> openPreview(a.dataset.path || '', a.dataset.name || ''));
+            box.appendChild(a);
+          }
+        }
+      }catch(e){
+        box.textContent = '加载失败：' + String(e && e.message ? e.message : e);
+      }
+    }
+
+    async function openPreview(relPath, name){
+      const p = document.getElementById('preview');
+      const label = document.getElementById('preview-path');
+      if(label) label.textContent = relPath;
+      if(p) p.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      try{
+        if(isLikelyImage(name)){
+          const url = `/api/agent_spaces/${SPACE_ID}/files/raw?path=${encodeURIComponent(relPath)}`;
+          p.innerHTML = `<img src="${url}" style="max-width:100%; height:auto;" />`;
+          return;
+        }
+        const data = await fetchJson(`/api/agent_spaces/${SPACE_ID}/files/read?path=${encodeURIComponent(relPath)}`);
+        const content = String(data.content || '');
+        if(isLikelyMarkdown(name)){
+          p.innerHTML = '<div class="md">' + renderMarkdownLite(content) + '</div>';
+        }else{
+          p.innerHTML = '<pre style="white-space:pre; overflow:auto;">' + esc(content) + '</pre>';
+        }
+      }catch(e){
+        if(p) p.textContent = '预览失败：' + String(e && e.message ? e.message : e);
+      }
+    }
+
+    async function initTree(){
+      const root = document.getElementById('file-tree');
+      root.innerHTML = '';
+      const d = document.createElement('details');
+      d.open = true;
+      d.dataset.path = '';
+      const s = document.createElement('summary');
+      s.style.cursor = 'pointer';
+      s.innerHTML = '📦 workspace';
+      d.appendChild(s);
+      root.appendChild(d);
+      d.dataset.loaded = '1';
+      await loadDirInto(d, '', 1);
+    }
+
+    async function releaseSpace(){
+      if(!confirm('确认释放该 AgentSpace？（只会删除 OpenFocus 侧记录，不会删除你的本地文件）')) return;
+      try{
+        const r = await fetch('/api/tasks/' + encodeURIComponent(TASK_PUBLIC_ID) + '/agent_space', { method: 'DELETE' });
+        if(!r.ok){
+          const t = await r.text().catch(()=> '');
+          throw new Error(t || ('HTTP ' + r.status));
+        }
+        toast('已释放');
+        location.href = '/goals?task=' + encodeURIComponent(TASK_PUBLIC_ID);
+      }catch(e){
+        toast('释放失败');
+        alert('释放失败：' + String(e && e.message ? e.message : e));
+      }
+    }
+
+    document.getElementById('tree-refresh')?.addEventListener('click', initTree);
+    document.getElementById('space-release')?.addEventListener('click', releaseSpace);
+    initTree();
+  </script>
+  {% endif %}
+  </div>
+{% endblock %}

@@ -69,6 +69,61 @@ message ChooseDirectoryResponse {
   string error = 4;
 }
 
+message FileEntry {
+  string name = 1;
+  string rel_path = 2;
+  string kind = 3; // file/dir
+  int64 size = 4;
+  double mtime = 5;
+}
+
+message FilesListRequest {
+  string request_id = 1;
+  string root_path = 2;
+  string rel_path = 3;
+}
+
+message FilesListResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string path = 3;
+  repeated FileEntry entries = 4;
+  string error = 5;
+}
+
+message FilesReadRequest {
+  string request_id = 1;
+  string root_path = 2;
+  string rel_path = 3;
+  int64 max_bytes = 4;
+}
+
+message FilesReadResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string path = 3;
+  string content = 4;
+  bool truncated = 5;
+  string mime = 6;
+  string error = 7;
+}
+
+message FilesRawRequest {
+  string request_id = 1;
+  string root_path = 2;
+  string rel_path = 3;
+  int64 max_bytes = 4;
+}
+
+message FilesRawResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string path = 3;
+  bytes data = 4;
+  string mime = 5;
+  string error = 6;
+}
+
 message ServerToClient {
   oneof msg {
     Welcome welcome = 10;
@@ -76,6 +131,9 @@ message ServerToClient {
     PairingCodeRequest pairing_code = 4;
     PairRequest pair = 2;
     ChooseDirectoryRequest choose_directory = 3;
+    FilesListRequest files_list = 11;
+    FilesReadRequest files_read = 12;
+    FilesRawRequest files_raw = 13;
   }
 }
 
@@ -86,6 +144,9 @@ message ClientToServer {
     PairingCodeResponse pairing_code_resp = 5;
     PairResponse pair_resp = 3;
     ChooseDirectoryResponse choose_directory_resp = 4;
+    FilesListResponse files_list_resp = 11;
+    FilesReadResponse files_read_resp = 12;
+    FilesRawResponse files_raw_resp = 13;
   }
 }
 

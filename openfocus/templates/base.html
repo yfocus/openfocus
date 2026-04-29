@@ -49,6 +49,7 @@
       }
 
       body.fullscreen .app { height: 100vh; }
+      body.wide .app { max-width: none; }
 
       .page {
         flex: 1;
@@ -181,6 +182,7 @@
         height: calc(100% - 14px);
         min-height: 0;
       }
+      body.wide .layout-3 { grid-template-columns: minmax(260px, 1fr) minmax(320px, 1fr) minmax(320px, 1fr); }
       .layout-3 > * { min-height: 0; }
       @media (max-width: 1100px) {
         .layout-3 { grid-template-columns: 1fr; height: auto; }
@@ -328,7 +330,7 @@
     </style>
   </head>
   {% set _path = (request.url.path if request and request.url else '') %}
-  <body class="{{ 'fullscreen' if _path == '/goals' else '' }}">
+  <body class="{{ 'fullscreen' if _path == '/goals' else ('fullscreen wide' if _path.endswith('/agent_space') else '') }}">
     <div class="app">
       <div class="topbar">
         <div class="brand">
