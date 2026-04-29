@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
+import mimetypes
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
 from .db import get_engine, session_scope
-from .models import Base, Event, Goal, GoalPlanMessage, GoalPlanSession, Task
-from .schemas import AgentEventIn, FocusReportIn
+from .models import AgentSpace, Base, Companion, Event, Goal, GoalPlanMessage, GoalPlanSession, Task
+from .schemas import (
+    AgentEventIn,
+    AgentSpaceCreateIn,
+    FocusReportIn,
+)
 
 from .agent.llm.openai_compat import OpenAICompatibleProvider
 from .agent.agents.task_prompt_recommender import TaskPromptRecommenderAgent
+
+from .companion_grpc import CompanionGrpcError, CompanionGrpcServer
 
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 app = FastAPI(title="OpenFocus", version="0.1.0")
+
+
+# OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
+COMPANION_GRPC = CompanionGrpcServer()
 
 
 def _utcnow() -> dt.datetime:
@@ -89,6 +101,19 @@ def _startup() -> None:
         sess_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goal_plan_sessions)").fetchall()]
         if "source_goal_id" not in sess_cols:
             conn.execute(text("ALTER TABLE goal_plan_sessions ADD COLUMN source_goal_id INTEGER"))
+
+        # agent_spaces 补字段（Companion 架构升级）
+        space_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)").fetchall()]
+        if "companion_id" not in space_cols:
+            conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
+
+
+@app.on_event("startup")
+async def _startup_companion_grpc() -> None:
+    # 测试里可能希望手动控制启动/端口
+    if os.environ.get("OPENFOCUS_GRPC_AUTOSTART", "1") == "0":
+        return
+    await COMPANION_GRPC.start()
 
 
 def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str | None]:
@@ -188,6 +213,14 @@ def goals_list(request: Request) -> HTMLResponse:
         for t in tasks:
             tasks_by_goal.setdefault(t.goal_id, []).append(t)
 
+        # AgentSpace：用于 Task 详情页展示“创建/进入工作区”
+        public_ids = [t.public_id for t in tasks]
+        agent_spaces_by_task: dict[str, AgentSpace] = {}
+        if public_ids:
+            spaces = s.query(AgentSpace).filter(AgentSpace.task_public_id.in_(public_ids)).all()
+            for sp in spaces:
+                agent_spaces_by_task[sp.task_public_id] = sp
+
         # 尽量用已有 events 推断“进行中/进度百分比/最近更新时间”
         public_ids = [t.public_id for t in tasks]
         latest_event_by_task: dict[str, Event] = {}
@@ -286,6 +319,7 @@ def goals_list(request: Request) -> HTMLResponse:
         {
             "goals": goals,
             "tasks_by_goal": tasks_by_goal,
+            "agent_spaces_by_task": agent_spaces_by_task,
             "task_meta": task_meta,
             "goal_display": goal_display,
             "task_display": task_display,
@@ -526,6 +560,10 @@ def tasks_delete(task_id: int) -> RedirectResponse:
         if t is None:
             raise HTTPException(status_code=404, detail="Task not found")
         goal_id = t.goal_id
+        # 清理该 task 绑定的 AgentSpace（若存在）
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == t.public_id).one_or_none()
+        if space is not None:
+            s.delete(space)
         s.delete(t)
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
@@ -986,6 +1024,200 @@ def memory_view(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/companions", response_class=HTMLResponse)
+def companions_view(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "companions.html", {})
+
+
+def _companion_display_status(c: Companion, *, now: dt.datetime | None = None) -> str:
+    now = now or _utcnow()
+    if (c.status or "").strip() == "pending_certification":
+        return "pending_certification"
+    last = c.last_seen_at
+    if last is None:
+        return "offline"
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=dt.timezone.utc)
+    # 30 秒无心跳即认为 offline（MVP 简化）
+    return "active" if (now - last).total_seconds() <= 30 else "offline"
+
+
+@app.post("/api/companions/register")
+def companion_register(payload: dict) -> dict:
+    """Companion -> OpenFocus 注册/心跳。
+
+    Companion 进程启动后应定期调用该接口刷新 last_seen。
+    """
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    device_id = str(payload.get("device_id") or "").strip()
+    base_url = str(payload.get("base_url") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not device_id or len(device_id) > 64:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if not base_url or len(base_url) > 1024:
+        raise HTTPException(status_code=400, detail="base_url is required")
+
+    now = _utcnow()
+    with session_scope() as s:
+        c = s.query(Companion).filter(Companion.device_id == device_id).one_or_none()
+        if c is None:
+            c = Companion(device_id=device_id, base_url=base_url, name=name)
+            s.add(c)
+            s.flush()
+        else:
+            c.base_url = base_url
+            if name:
+                c.name = name
+        c.last_seen_at = now
+        # 若已配对成功则保持 active
+        if (c.auth_token or "").strip():
+            c.status = "active"
+        else:
+            c.status = "pending_certification"
+        s.add(c)
+        cid = c.id
+        status_out = c.status
+
+    return {"ok": True, "id": cid, "status": status_out}
+
+
+@app.get("/api/companions")
+def companions_list(limit: int = 50) -> dict:
+    limit = max(1, min(int(limit or 50), 200))
+    now = _utcnow()
+    with session_scope() as s:
+        comps = s.query(Companion).order_by(Companion.id.desc()).limit(limit).all()
+        ids = [c.id for c in comps]
+        spaces_by_comp: dict[int, list[dict]] = {cid: [] for cid in ids}
+        if ids:
+            spaces = s.query(AgentSpace).filter(AgentSpace.companion_id.in_(ids)).order_by(AgentSpace.id.desc()).all()
+            for sp in spaces:
+                cid = int(getattr(sp, "companion_id", 0) or 0)
+                if cid in spaces_by_comp:
+                    spaces_by_comp[cid].append({"id": sp.id, "task_public_id": sp.task_public_id})
+
+    items: list[dict] = []
+    for c in comps:
+        items.append(
+            {
+                "id": c.id,
+                "device_id": c.device_id,
+                "name": c.name,
+                "base_url": c.base_url,
+                "status": _companion_display_status(c, now=now),
+                "last_seen_at": (c.last_seen_at.isoformat() if c.last_seen_at else None),
+                "agent_spaces": spaces_by_comp.get(c.id, []),
+            }
+        )
+    return {"ok": True, "items": items}
+
+
+@app.post("/api/companions/{companion_id:int}/pair")
+async def companion_pair(companion_id: int, payload: dict) -> dict:
+    code = str((payload.get("code") if isinstance(payload, dict) else "") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+    if len(code) != 10:
+        raise HTTPException(status_code=400, detail="认证码必须为 10 位")
+
+    now = _utcnow()
+    minute_start = now.replace(second=0, microsecond=0)
+
+    with session_scope() as s:
+        c = s.get(Companion, companion_id)
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+
+        # 每分钟最多 10 次尝试
+        ws = c.pair_attempt_window_start
+        if ws is None or (ws.replace(tzinfo=dt.timezone.utc) if ws.tzinfo is None else ws) != minute_start:
+            c.pair_attempt_window_start = minute_start
+            c.pair_attempt_count = 0
+        if c.pair_attempt_count >= 10:
+            raise HTTPException(status_code=429, detail="本分钟认证尝试次数已达上限（10 次）")
+        c.pair_attempt_count += 1
+        s.add(c)
+
+        device_id = c.device_id
+
+    # 通过 gRPC 长连接下发配对确认
+    conn = COMPANION_GRPC.registry.get(companion_id)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+    try:
+        token = await conn.request_pair(code, timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion 配对失败：{e}")
+
+    with session_scope() as s:
+        c3 = s.get(Companion, companion_id)
+        if c3 is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        c3.auth_token = token
+        c3.status = "active"
+        c3.last_seen_at = now
+        s.add(c3)
+
+        s.add(
+            Event(
+                kind="companion.paired",
+                agent="openfocus/ui",
+                task_id=None,
+                payload={"companion_id": companion_id, "device_id": device_id},
+            )
+        )
+    return {"ok": True}
+
+
+@app.post("/api/companions/{companion_id:int}/pairing_code")
+async def companion_pairing_code(companion_id: int) -> dict:
+    """用户点击“认证”时获取（并刷新）当前配对码。
+
+    设计约束：每次用户点击认证都生成一个新的 code，有效期 10 分钟。
+    """
+
+    with session_scope() as s:
+        c = s.get(Companion, companion_id)
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if _companion_display_status(c) == "offline":
+            raise HTTPException(status_code=400, detail="Companion offline")
+
+    conn = COMPANION_GRPC.registry.get(companion_id)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+
+    try:
+        _code, expires_at = await conn.request_pairing_code(force_new=True, timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion 获取配对码失败：{e}")
+
+    # 安全要求：配对码只在 Companion 终端/本机侧展示；Web 侧不回传 code，避免“自动填充”绕过人工确认。
+    return {"ok": True, "expires_at": expires_at}
+
+
+@app.post("/api/companions/{companion_id:int}/choose_directory")
+async def companion_choose_directory_proxy(companion_id: int) -> dict:
+    with session_scope() as s:
+        c = s.get(Companion, companion_id)
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+        device_id = c.device_id
+
+    conn = COMPANION_GRPC.registry.get(companion_id)
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+    try:
+        path = await conn.request_choose_directory(timeout_seconds=30.0)
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion 目录选择失败：{e}")
+    return {"ok": True, "path": path}
+
+
 @app.post("/memory/save", include_in_schema=False)
 def memory_save(user_card: str = Form(""), user_memory: str = Form("")) -> RedirectResponse:
     mem_dir = _memory_dir()
@@ -1239,3 +1471,113 @@ def task_recommended_prompt_history(task_public_id: str, limit: int = 10) -> dic
             }
         )
     return {"task_public_id": task_public_id, "items": items}
+
+
+@app.get("/tasks/{task_public_id}/agent_space", response_class=HTMLResponse)
+def agent_space_view(request: Request, task_public_id: str) -> HTMLResponse:
+    with session_scope() as s:
+        task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        goal = s.query(Goal).filter(Goal.id == task.goal_id).one_or_none()
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        companion = None
+        if space is not None and getattr(space, "companion_id", None):
+            companion = s.get(Companion, int(space.companion_id))
+
+    return templates.TemplateResponse(
+        request,
+        "agent_space.html",
+        {
+            "task": task,
+            "goal": goal,
+            "space": space,
+            "companion": companion,
+        },
+    )
+
+
+@app.get("/api/tasks/{task_public_id}/agent_space")
+def get_agent_space(task_public_id: str) -> dict:
+    with session_scope() as s:
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        if space is None:
+            return {"ok": True, "space": None}
+        return {
+            "ok": True,
+            "space": {
+                "id": space.id,
+                "task_public_id": space.task_public_id,
+                "companion_id": getattr(space, "companion_id", None),
+                "root_path": space.root_path,
+                "agent_type": space.agent_type,
+            },
+        }
+
+
+@app.post("/api/tasks/{task_public_id}/agent_space")
+def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict:
+    root_path = str((payload.root_path or "").strip())
+    if not root_path:
+        raise HTTPException(status_code=400, detail="root_path 不能为空")
+
+    agent_type = (payload.agent_type or "").strip().lower()
+    if agent_type not in {"trae-cli", "coco"}:
+        raise HTTPException(status_code=400, detail="暂不支持该 agent_type（当前仅支持 trae-cli(coco)）")
+
+    with session_scope() as s:
+        task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        comp = s.get(Companion, int(payload.companion_id))
+        if comp is None:
+            raise HTTPException(status_code=400, detail="Companion 不存在")
+        if comp.status != "active" or not (comp.auth_token or "").strip():
+            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+
+        existing = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        if existing is not None:
+            # 简化：已存在则更新（方便快速迭代）
+            existing.companion_id = int(payload.companion_id)
+            existing.root_path = root_path
+            existing.agent_type = "trae-cli"  # 统一落库为 trae-cli
+            s.add(existing)
+            s.flush()
+            space = existing
+        else:
+            space = AgentSpace(
+                task_public_id=task_public_id,
+                companion_id=int(payload.companion_id),
+                root_path=root_path,
+                agent_type="trae-cli",
+            )
+            s.add(space)
+            s.flush()
+
+    return {"ok": True, "space_id": space.id}
+
+
+@app.delete("/api/tasks/{task_public_id}/agent_space")
+def delete_agent_space(task_public_id: str) -> dict:
+    with session_scope() as s:
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        if space is None:
+            return {"ok": True}
+        s.delete(space)
+    return {"ok": True}
+
+
+@app.get("/api/agent_spaces/{space_id}/files/list")
+def agent_space_files_list_disabled(space_id: int, path: str = "") -> dict:
+    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")
+
+
+@app.get("/api/agent_spaces/{space_id}/files/read")
+def agent_space_files_read_disabled(space_id: int, path: str) -> dict:
+    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")
+
+
+@app.get("/api/agent_spaces/{space_id}/files/raw")
+def agent_space_files_raw_disabled(space_id: int, path: str) -> dict:
+    raise HTTPException(status_code=501, detail="FILES/PREVIEW 尚未接入独立 Companion（后续迭代）")

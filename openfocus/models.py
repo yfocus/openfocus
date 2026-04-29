@@ -109,3 +109,58 @@ class GoalPlanMessage(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
+
+
+class AgentSpace(Base):
+    __tablename__ = "agent_spaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 绑定 Task.public_id（对外稳定标识）；避免依赖自增 id
+    task_public_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+
+    # 该 AgentSpace 运行在哪个 Companion 环境上（为空表示尚未绑定/未升级数据）。
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
+    agent_type: Mapped[str] = mapped_column(String(64), nullable=False, default="trae-cli")
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class Companion(Base):
+    __tablename__ = "companions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Companion 侧稳定标识（本机持久化）。
+    device_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+
+    # pending_certification | active
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending_certification")
+
+    # 配对完成后下发/保存的 token（OpenFocus -> Companion 反向代理用）
+    auth_token: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+
+    last_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # 输入认证码限流（每分钟最多 3 次）
+    pair_attempt_window_start: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pair_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )

@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package openfocus.companion.v1;
+
+// CompanionControl 是 OpenFocus(Control Plane) 与 Companion(Data Plane) 的控制通道。
+//
+// - Companion 作为客户端发起连接（更易穿透 NAT/防火墙）
+// - 双向流同时承载：注册(hello)、心跳(ping/pong)、命令与结果
+
+message Hello {
+  string device_id = 1;
+  string name = 2;
+  repeated string capabilities = 3;
+
+  // Companion 本地持久化的配对 token（若已有）。用于重连时快速恢复 active。
+  string auth_token = 4;
+
+  // OpenFocus 侧为该 Companion 分配的稳定 ID（服务端生成）。
+  // Companion 首次连接时可为空/0；OpenFocus 会通过 Welcome 下发分配结果。
+  int64 server_companion_id = 5;
+}
+
+message Welcome {
+  int64 companion_id = 1;
+}
+
+message Ping {
+  int64 ts_unix_ms = 1;
+}
+
+message Pong {
+  int64 ts_unix_ms = 1;
+  int64 ping_ts_unix_ms = 2;
+}
+
+message PairRequest {
+  string request_id = 1;
+  string code = 2;
+}
+
+message PairingCodeRequest {
+  string request_id = 1;
+  bool force_new = 2;
+}
+
+message PairingCodeResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string code = 3;
+  string expires_at = 4;
+  string error = 5;
+}
+
+message PairResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string auth_token = 3;
+  string error = 4;
+}
+
+message ChooseDirectoryRequest {
+  string request_id = 1;
+}
+
+message ChooseDirectoryResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string path = 3;
+  string error = 4;
+}
+
+message ServerToClient {
+  oneof msg {
+    Welcome welcome = 10;
+    Ping ping = 1;
+    PairingCodeRequest pairing_code = 4;
+    PairRequest pair = 2;
+    ChooseDirectoryRequest choose_directory = 3;
+  }
+}
+
+message ClientToServer {
+  oneof msg {
+    Hello hello = 1;
+    Pong pong = 2;
+    PairingCodeResponse pairing_code_resp = 5;
+    PairResponse pair_resp = 3;
+    ChooseDirectoryResponse choose_directory_resp = 4;
+  }
+}
+
+service CompanionControl {
+  rpc Connect(stream ClientToServer) returns (stream ServerToClient);
+}

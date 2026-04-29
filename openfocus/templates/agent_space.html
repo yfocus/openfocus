@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel pad" style="margin-top: 14px;">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
+      <div>
+        <div class="k">AGENT SPACE</div>
+        <div style="margin-top: 6px; font-size: 14px;">{{ task.title }}</div>
+        <div class="muted" style="margin-top: 6px;">taskId {{ task.public_id }}{% if goal %} · goal {{ goal.content }}{% endif %}</div>
+      </div>
+      <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
+        <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button">返回 Dashboard</a>
+      </div>
+    </div>
+    <div class="divider"></div>
+
+    {% if space %}
+      <div class="muted">Companion：{% if companion %}{{ companion.name or companion.device_id }}{% else %}{{ space.companion_id }}{% endif %}</div>
+      <div class="muted" style="margin-top: 6px;">工作目录：{{ space.root_path }}</div>
+      <div class="muted" style="margin-top: 6px;">agent：{{ space.agent_type }}</div>
+    {% else %}
+      <div class="muted">尚未创建工作区。请回到任务详情点击“创建工作区”。</div>
+    {% endif %}
+  </div>
+
+  <div class="panel pad" style="margin-top: 14px;">
+    <div class="k">说明</div>
+    <div class="muted" style="margin-top: 8px; white-space: pre-wrap;">
+      该页面的 FILES / PREVIEW / AGENT 交互将通过 Companion 机制接入。
+      当前版本先完成“独立 Companion 进程 + OpenFocus 反向代理 + 创建工作区/选择目录/认证”的闭环，
+      具体文件树预览与 Agent 对话流将在后续迭代实现。
+    </div>
+  </div>
+{% endblock %}
+

@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel pad" style="margin-top: 14px;">
+    <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
+      <div>
+        <div class="k">COMPANION</div>
+        <div class="muted" style="margin-top: 6px;">管理已注册的 Companion（active/offline/pending certification）。</div>
+      </div>
+      <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
+        <button type="button" class="btn-ghost" id="comp-refresh">刷新</button>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div id="comp-list" class="muted">加载中…</div>
+  </div>
+
+  <dialog id="pair-dialog" class="panel" style="max-width: 560px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="pad" style="padding: 14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div>
+            <div class="k">认证 Companion</div>
+            <div class="muted" style="margin-top: 4px;" id="pair-hint">—</div>
+          </div>
+          <button type="submit" class="btn-ghost">关闭</button>
+        </div>
+      </div>
+    </form>
+    <div class="divider"></div>
+    <div class="pad" style="padding: 14px;">
+      <div class="muted" style="margin-bottom: 10px;">点击“认证”后系统会让 Companion 生成新的 10 位认证码（有效期 10 分钟），并仅在 Companion 终端输出。请复制到这里。</div>
+      <input id="pair-code" placeholder="例如：A1B2C3D4E5" maxlength="10" />
+      <div style="display:flex; justify-content:flex-end; gap: 10px; margin-top: 10px; flex-wrap:wrap;">
+        <button type="button" id="pair-submit">认证</button>
+      </div>
+      <div id="pair-err" class="muted" style="margin-top: 10px; color: var(--danger);"></div>
+    </div>
+  </dialog>
+
+  <script>
+    const STATE = { currentId: null };
+
+    function esc(s){
+      const x = String(s ?? '');
+      return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
+    }
+
+    function badge(status){
+      const s = String(status||'');
+      if(s === 'active') return '<span class="pill" style="border-color: rgba(43,255,183,0.35);">active</span>';
+      if(s === 'offline') return '<span class="pill" style="border-color: rgba(255,209,102,0.35);">offline</span>';
+      return '<span class="pill" style="border-color: rgba(255,59,92,0.35);">pending certification</span>';
+    }
+
+    async function refresh(){
+      const box = document.getElementById('comp-list');
+      const btn = document.getElementById('comp-refresh');
+      if(btn) btn.disabled = true;
+      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      try{
+        const r = await fetch('/api/companions?limit=50');
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = (data && data.items) ? data.items : [];
+        if(!items.length){ box.textContent = '暂无 Companion。请先启动 Companion 进程并让其向 OpenFocus register。'; return; }
+        box.innerHTML = items.map((it)=>{
+          const spaces = Array.isArray(it.agent_spaces) ? it.agent_spaces : [];
+          return `
+            <div class="panel" style="margin: 10px 0; background: rgba(0,0,0,0.18);">
+              <div class="pad" style="padding: 10px 12px;">
+                <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px; flex-wrap:wrap;">
+                  <div style="min-width:0; flex:1;">
+                    <div class="k">${esc(it.name || it.device_id || 'companion')}</div>
+                    <div class="muted" style="margin-top: 6px;">base_url: ${esc(it.base_url || '')}</div>
+                    <div class="muted" style="margin-top: 6px;">device_id: ${esc(it.device_id || '')}</div>
+                  </div>
+                  <div style="display:flex; gap: 10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                    ${badge(it.status)}
+                    ${(it.status === 'pending_certification') ? `<button type="button" class="btn-ghost js-pair" data-id="${esc(it.id)}">认证</button>` : ''}
+                  </div>
+                </div>
+
+                <div class="divider"></div>
+                <div class="muted">关联 AgentSpace：${spaces.length ? esc(spaces.map(x=> (x.task_public_id || ('space#'+x.id))).join(', ')) : '—'}</div>
+                <div class="muted" style="margin-top: 6px;">last_seen: ${esc(it.last_seen_at || '—')}</div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }catch(e){
+        box.textContent = '加载失败：' + String(e && e.message ? e.message : e);
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    async function pairCurrent(){
+      const id = STATE.currentId;
+      const code = String(document.getElementById('pair-code')?.value || '').trim();
+      const err = document.getElementById('pair-err');
+      if(err) err.textContent = '';
+      if(!id){ if(err) err.textContent='id 缺失'; return; }
+      if(!code){ if(err) err.textContent='请输入认证码'; return; }
+      try{
+        const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code })
+        });
+        if(!r.ok){
+          const t = await r.text().catch(()=> '');
+          throw new Error(t || ('HTTP ' + r.status));
+        }
+        toast('认证成功');
+        document.getElementById('pair-dialog')?.close();
+        await refresh();
+      }catch(e){
+        if(err) err.textContent = String(e && e.message ? e.message : e);
+      }
+    }
+
+    document.getElementById('comp-refresh')?.addEventListener('click', refresh);
+    document.getElementById('pair-submit')?.addEventListener('click', pairCurrent);
+
+    document.addEventListener('click', (e)=>{
+      const t = e.target;
+      if(!(t instanceof HTMLElement)) return;
+      const b = t.closest('.js-pair');
+      if(!b) return;
+      const id = b.getAttribute('data-id');
+      STATE.currentId = id;
+      document.getElementById('pair-hint').textContent = 'companion_id=' + id + ' · 正在生成认证码（请看 Companion 终端）…';
+      document.getElementById('pair-code').value = '';
+      document.getElementById('pair-err').textContent = '';
+
+      // 每次点击“认证”都让服务端通过 gRPC 向 Companion 请求一个新的配对码
+      (async ()=>{
+        try{
+          const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pairing_code', { method: 'POST' });
+          if(!r.ok){
+            const t = await r.text().catch(()=> '');
+            throw new Error(t || ('HTTP ' + r.status));
+          }
+          const data = await r.json();
+          const exp = String((data && data.expires_at) ? data.expires_at : '').trim();
+          document.getElementById('pair-hint').textContent = 'companion_id=' + id + (exp ? (' · expires_at=' + exp) : '') + ' · 请到 Companion 终端复制配对码';
+        }catch(err){
+          document.getElementById('pair-hint').textContent = 'companion_id=' + id;
+          document.getElementById('pair-err').textContent = String(err && err.message ? err.message : err);
+        }
+      })();
+
+      try{ document.getElementById('pair-dialog')?.showModal(); }catch(_){ }
+    });
+
+    refresh();
+    setInterval(refresh, 10 * 1000);
+  </script>
+{% endblock %}

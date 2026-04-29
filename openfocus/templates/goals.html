@@ -170,6 +170,12 @@
                     <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('确认删除该任务？')">
                       <button type="submit" class="btn-danger">删除</button>
                     </form>
+                    {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
+                    {% if sp %}
+                      <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost" role="button">进入工作区</a>
+                    {% else %}
+                      <button type="button" class="btn-ghost js-open-agent-space" data-task="{{ t.public_id }}">创建工作区</button>
+                    {% endif %}
                     <button type="button" class="btn-ghost js-jump-goal" data-goal="{{ g.id }}">查看目标</button>
                   </div>
 
@@ -377,6 +383,55 @@
         <input type="hidden" name="priority" value="normal" id="goal-edit-priority" />
         <input type="hidden" name="importance" value="normal" id="goal-edit-importance" />
       </form>
+    </div>
+  </dialog>
+
+  <!-- AgentSpace dialog (create workspace from task detail) -->
+  <dialog id="agent-space-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="pad" style="padding: 14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <div>
+            <div class="k">创建工作区</div>
+            <div class="muted" style="margin-top: 4px;" id="agent-space-task-hint">—</div>
+          </div>
+          <button type="submit" class="btn-ghost">关闭</button>
+        </div>
+      </div>
+    </form>
+    <div class="divider"></div>
+    <div class="pad" style="padding: 14px;">
+      <div class="muted" style="margin-bottom: 10px;">
+        选择一个本地目录作为该 Task 的工作目录、选择一个 agent 类型，并选择一个 Companion 环境。
+      </div>
+      <div style="margin-bottom: 10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <label class="muted">Companion 环境</label>
+          <button type="button" class="btn-ghost" id="agent-space-companion-refresh">刷新</button>
+        </div>
+        <select id="agent-space-companion" style="width:100%;">
+          <option value="">加载中…</option>
+        </select>
+        <div class="muted" style="margin-top: 6px; font-size: 12px;">如果没有可用 Companion，请先到顶部导航栏的 `Companion` 页面完成注册与认证。</div>
+      </div>
+      <div style="margin-bottom: 10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
+          <label class="muted">工作目录（绝对路径）</label>
+          <button type="button" class="btn-ghost" id="agent-space-pick">选择目录</button>
+        </div>
+        <input type="text" id="agent-space-root" placeholder="/Users/..." style="width:100%;" />
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label class="muted">Agent 类型</label>
+        <select id="agent-space-agent" style="width:100%;">
+          <option value="trae-cli">trae-cli（coco）</option>
+        </select>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
+        <button type="button" id="agent-space-create">创建并进入</button>
+      </div>
+      <div id="agent-space-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 创建中…</div>
+      <div id="agent-space-err" class="muted" style="margin-top: 10px; color: var(--danger);"></div>
     </div>
   </dialog>
 
@@ -846,6 +901,13 @@
         _openEditGoalDialog(openGoalEdit);
         return;
       }
+
+      const openAgentSpace = t.closest('.js-open-agent-space');
+      if(openAgentSpace){
+        const pid = openAgentSpace.getAttribute('data-task');
+        _openAgentSpaceDialog(pid);
+        return;
+      }
     });
 
     // Ajax actions: done/reopen/delete task
@@ -1123,6 +1185,118 @@
         traceEl: document.getElementById('goal-edit-gen-trace'),
       });
     });
+
+    // AgentSpace dialog wiring
+    const AGENT_SPACE_STATE = { taskPid: '', companionId: '' };
+    function _openAgentSpaceDialog(taskPid){
+      const pid = String(taskPid || '').trim();
+      if(!pid){ toast('taskId 缺失'); return; }
+      AGENT_SPACE_STATE.taskPid = pid;
+      const dlg = document.getElementById('agent-space-dialog');
+      const hint = document.getElementById('agent-space-task-hint');
+      if(hint) hint.textContent = 'taskId=' + pid;
+      const err = document.getElementById('agent-space-err');
+      if(err) err.textContent = '';
+      const root = document.getElementById('agent-space-root');
+      if(root) root.value = '';
+      AGENT_SPACE_STATE.companionId = '';
+      refreshCompanionsForAgentSpace();
+      try{ dlg?.showModal(); }catch(_){ }
+    }
+
+    async function refreshCompanionsForAgentSpace(){
+      const sel = document.getElementById('agent-space-companion');
+      const btn = document.getElementById('agent-space-companion-refresh');
+      if(btn) btn.disabled = true;
+      if(sel){ sel.innerHTML = '<option value="">加载中…</option>'; }
+      try{
+        const r = await fetch('/api/companions?limit=50');
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = (data && data.items) ? data.items : [];
+        const active = items.filter(x => x && x.status === 'active');
+        if(!sel) return;
+        if(!active.length){
+          sel.innerHTML = '<option value="">暂无可用 Companion</option>';
+          return;
+        }
+        sel.innerHTML = active.map(it => {
+          const label = (it.name || it.device_id || ('companion#' + it.id));
+          return '<option value="' + String(it.id) + '">' + escapeHtml(label) + '</option>';
+        }).join('');
+        sel.value = String(active[0].id);
+        AGENT_SPACE_STATE.companionId = sel.value;
+      }catch(e){
+        if(sel) sel.innerHTML = '<option value="">加载失败</option>';
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    async function _pickAgentSpaceDir(){
+      const btn = document.getElementById('agent-space-pick');
+      if(btn) btn.disabled = true;
+      try{
+        const sel = document.getElementById('agent-space-companion');
+        const cid = String(sel?.value || AGENT_SPACE_STATE.companionId || '').trim();
+        if(!cid){ throw new Error('请先选择 Companion'); }
+        AGENT_SPACE_STATE.companionId = cid;
+        const r = await fetch('/api/companions/' + encodeURIComponent(cid) + '/choose_directory', { method: 'POST' });
+        if(!r.ok){
+          const txt = await r.text().catch(()=> '');
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        const data = await r.json();
+        const p = (data && data.path) ? String(data.path) : '';
+        if(!p.trim()) throw new Error('返回为空');
+        const root = document.getElementById('agent-space-root');
+        if(root) root.value = p;
+      }catch(e){
+        toast('目录选择失败（可手动输入绝对路径）');
+      }finally{
+        if(btn) btn.disabled = false;
+      }
+    }
+
+    async function _createAgentSpace(){
+      const pid = String(AGENT_SPACE_STATE.taskPid || '').trim();
+      const root = String(document.getElementById('agent-space-root')?.value || '').trim();
+      const agent = String(document.getElementById('agent-space-agent')?.value || 'trae-cli').trim();
+      const cid = String(document.getElementById('agent-space-companion')?.value || AGENT_SPACE_STATE.companionId || '').trim();
+      const err = document.getElementById('agent-space-err');
+      const hint = document.getElementById('agent-space-hint');
+      if(err) err.textContent = '';
+      if(!pid){ toast('taskId 缺失'); return; }
+      if(!cid){ if(err) err.textContent = '请先选择 Companion'; return; }
+      if(!root){ if(err) err.textContent = '请填写工作目录'; return; }
+      if(hint) hint.style.display = 'block';
+      try{
+        const r = await fetch('/api/tasks/' + encodeURIComponent(pid) + '/agent_space', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companion_id: Number(cid), root_path: root, agent_type: agent })
+        });
+        if(!r.ok){
+          const txt = await r.text().catch(()=> '');
+          throw new Error(txt || ('HTTP ' + r.status));
+        }
+        // 创建成功后跳转到 AgentSpace 页面
+        location.href = '/tasks/' + encodeURIComponent(pid) + '/agent_space';
+      }catch(e){
+        if(err) err.textContent = String(e && e.message ? e.message : e);
+        toast('创建失败');
+      }finally{
+        if(hint) hint.style.display = 'none';
+      }
+    }
+
+    document.getElementById('agent-space-pick')?.addEventListener('click', _pickAgentSpaceDir);
+    document.getElementById('agent-space-companion-refresh')?.addEventListener('click', refreshCompanionsForAgentSpace);
+    document.getElementById('agent-space-companion')?.addEventListener('change', (e)=>{
+      const v = String(e?.target?.value || '').trim();
+      AGENT_SPACE_STATE.companionId = v;
+    });
+    document.getElementById('agent-space-create')?.addEventListener('click', _createAgentSpace);
 
     function _refreshNotifyButton(){
       const btn = document.getElementById('notify-toggle');
