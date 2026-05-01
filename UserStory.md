@@ -95,12 +95,22 @@ task指定一个工作目录并创建一个agent，目前支持的agent包括：
 **视觉与交互**
 1. 在Task详情页点击“创建工作区”来新建一个AgentSpace，点击后弹出一个对话框用于选择一个本地目录作为工作目录、选择一个agent类型、选择一个
    Companion环境。在AgentSpace创建成功后，自动跳转到AgentSpace页面。对于已经有工作区的task，点击“进入工作区”来跳转AgentSpace页面。
-2. AgentSpace页面和trae、cursor的页面布局一致，左侧是目录导航+文件内容预览（只能预览不能编辑），右侧是agent对话框。
-3. 用户在agent对话框中发布命令，命令要转发给底层agent并将底层agent的输出展示在agent对话框中。用户的提示词要自动被拼接上“openfocus”提示词，
-   即“任务期间进展要通知给openfocus”、“openfocus skills”、“当前taskId”等。
-4. 在AgentSpace中，用户可以点击“new session”释放当前agent并启动一个新agent（可选新agent类型），也可以释放掉当前AgentSpace。
-5. 使用Companion机制实现AgentSpace。
+2. AgentSpace页面和trae、cursor的页面布局一致，左侧是目录导航+文件内容预览（只能预览不能编辑），右侧是一个远程终端（Remote Terminal）。
+3. 远程终端支持选项卡：
+   - 点击右侧终端区的 `+` 创建一个新的终端 tab（每个 tab 对应一个独立的 PTY/session）。
+   - 点击 tab 右上角的 `x` 关闭该终端（关闭后该 session 不再保留）。
+   - 若该 AgentSpace 下没有任何终端且 Companion 在线，页面应自动创建一个默认终端。
+4. 终端交互逻辑：
+   - 用户在终端中输入命令，输入/输出以流式方式实时回显。
+   - 终端默认以 AgentSpace 的工作目录作为启动目录（cwd=root_path）。
+   - 终端 session 在 AgentSpace 生命周期内保留；若 Companion 重启/崩溃，允许终端 session 丢失。
+5. 释放工作区：
+   - 点击“释放工作区”会释放该 AgentSpace，并清理该空间下的所有远程终端（以及 OpenFocus 侧的终端记录）。
+   - 若 Companion 离线，允许清理仅发生在 OpenFocus 侧（终端可能在 Companion 上残留，但不影响 OpenFocus 侧继续使用）。
+6. 使用Companion机制实现AgentSpace。
 
+待定
+1. 点击tui中的文件路径&行号能在FILES和PREVIEW里头跳转。
 
 ### PlanMode
 

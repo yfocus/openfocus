@@ -50,9 +50,11 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
         from openfocus.companion import run_companion
-        from openfocus.db import session_scope
+        from openfocus.db import get_engine, session_scope
         from openfocus.main import COMPANION_GRPC, app
-        from openfocus.models import Goal, Task
+        from openfocus.models import Base, Event, Goal, Task
+
+        Base.metadata.create_all(bind=get_engine())
 
         await COMPANION_GRPC.start()
         assert COMPANION_GRPC.bound_addr
@@ -81,9 +83,20 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 assert r.status_code == 200
                 assert r.json().get("expires_at")
 
+                # 申请配对码事件应落库
+                with session_scope() as s:
+                    assert (
+                        s.query(Event).filter(Event.kind == "companion.pairing_code.requested").count() >= 1
+                    )
+
                 # pair (OpenFocus -> gRPC -> Companion)
                 r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
                 assert r.status_code == 200
+
+                # 配对尝试 + 配对成功事件应落库
+                with session_scope() as s:
+                    assert s.query(Event).filter(Event.kind == "companion.pair.attempted").count() >= 1
+                    assert s.query(Event).filter(Event.kind == "companion.paired").count() >= 1
 
                 # choose directory (OpenFocus -> gRPC -> Companion)
                 r = await client.post(f"/api/companions/{cid}/choose_directory")
@@ -258,8 +271,217 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
     asyncio.run(_run())
 
 
+def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
+    async def _run() -> None:
+        os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "openfocus_test.db")
+        from openfocus.db import reset_engine
+
+        reset_engine()
+
+        os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
+        os.environ["OPENFOCUS_TEST_PAIRING_CODE"] = "A1B2C3D4E5"
+        os.environ["OPENFOCUS_TEST_AGENT_ECHO"] = "1"
+
+        os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
+        os.environ["OPENFOCUS_GRPC_PORT"] = "0"
+
+        from openfocus.companion import run_companion
+        from openfocus.db import get_engine, session_scope
+        from openfocus.main import COMPANION_GRPC, app
+        from openfocus.models import Base, Goal, Task
+
+        Base.metadata.create_all(bind=get_engine())
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        await COMPANION_GRPC.start()
+        assert COMPANION_GRPC.bound_addr
+
+        stop = asyncio.Event()
+        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        try:
+            with session_scope() as s:
+                g = Goal(content="g", description="d", due_date=dt.date.today())
+                s.add(g)
+                s.flush()
+                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                s.add(t)
+                s.flush()
+                pid = t.public_id
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                comp = await _wait_until_companion_ready(client)
+                cid = comp["id"]
+
+                # pairing
+                r = await client.post(f"/api/companions/{cid}/pairing_code")
+                assert r.status_code == 200
+                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                assert r.status_code == 200
+
+                # create agent space
+                r = await client.post(
+                    f"/api/tasks/{pid}/agent_space",
+                    json={"companion_id": cid, "root_path": str(ws), "agent_type": "trae-cli"},
+                )
+                assert r.status_code == 200
+                space_id = r.json()["space_id"]
+
+                # new session
+                r = await client.post(f"/api/agent_spaces/{space_id}/agent/sessions/new")
+                assert r.status_code == 200
+                sid = r.json()["session"]["session_id"]
+                assert sid
+
+                # send message
+                r = await client.post(
+                    f"/api/agent_spaces/{space_id}/agent/sessions/{sid}/send",
+                    json={"text": "hello"},
+                )
+                assert r.status_code == 200
+                rid = r.json().get("request_id")
+                assert rid
+
+                # wait until assistant message is persisted (AgentChunk -> DB)
+                deadline = asyncio.get_running_loop().time() + 2.0
+                content = ""
+                while asyncio.get_running_loop().time() < deadline:
+                    rr = await client.get(f"/api/agent_spaces/{space_id}/agent/sessions/{sid}/messages")
+                    assert rr.status_code == 200
+                    msgs = rr.json().get("messages") or []
+                    hit = [m for m in msgs if m.get("role") == "assistant" and m.get("request_id") == rid]
+                    if hit:
+                        m = hit[-1]
+                        content = m.get("content") or ""
+                        if m.get("done") is True and content:
+                            break
+                    await asyncio.sleep(0.02)
+
+                # persist: assistant message should contain injected header and user prompt
+                assert content
+                assert "taskId=" in content
+                assert pid in content
+                assert "hello" in content
+        finally:
+            stop.set()
+            await asyncio.wait_for(comp_task, timeout=5.0)
+            await COMPANION_GRPC.stop()
+
+    asyncio.run(_run())
+
+
+def test_agent_space_agent_offline_returns_502(tmp_path):
+    async def _run() -> None:
+        os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "openfocus_test.db")
+        from openfocus.db import reset_engine
+
+        reset_engine()
+        os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
+
+        from openfocus.db import session_scope
+        from openfocus.main import app
+        from openfocus.db import get_engine
+        from openfocus.models import Base, Companion, Goal, Task
+
+        Base.metadata.create_all(bind=get_engine())
+
+        # create a goal/task + a fake active companion (but no online gRPC connection)
+        with session_scope() as s:
+            g = Goal(content="g", description="d", due_date=dt.date.today())
+            s.add(g)
+            s.flush()
+            t = Task(goal_id=g.id, title="t", description="d", status="todo")
+            s.add(t)
+            s.flush()
+            pid = t.public_id
+            c = Companion(
+                device_id="dev_test_offline",
+                name="offline",
+                base_url="grpc://",
+                status="active",
+                auth_token="tok",
+                last_seen_at=dt.datetime.now(dt.timezone.utc),
+            )
+            s.add(c)
+            s.flush()
+            cid = c.id
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/tasks/{pid}/agent_space",
+                json={"companion_id": cid, "root_path": str(tmp_path), "agent_type": "trae-cli"},
+            )
+            assert r.status_code == 200
+            space_id = r.json()["space_id"]
+
+            r = await client.post(f"/api/agent_spaces/{space_id}/agent/sessions/new")
+            assert r.status_code == 502
+
+    asyncio.run(_run())
+
+
+def test_companion_delete_unbinds_agent_spaces_and_removes_companion(tmp_path):
+    async def _run() -> None:
+        os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "openfocus_test.db")
+        from openfocus.db import reset_engine
+
+        reset_engine()
+        os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
+
+        from openfocus.db import get_engine, session_scope
+        from openfocus.main import app
+        from openfocus.models import AgentSpace, Base, Companion
+
+        Base.metadata.create_all(bind=get_engine())
+
+        with session_scope() as s:
+            c = Companion(
+                device_id="dev_test_delete",
+                name="to_delete",
+                base_url="grpc://",
+                status="active",
+                auth_token="tok",
+                last_seen_at=dt.datetime.now(dt.timezone.utc),
+            )
+            s.add(c)
+            s.flush()
+            cid = c.id
+
+            sp = AgentSpace(
+                task_public_id="31b8ef3d-cb5d-4074-8bb3-5144e01e04d9",
+                companion_id=cid,
+                root_path=str(tmp_path),
+                agent_type="trae-cli",
+            )
+            s.add(sp)
+            s.flush()
+            space_id = sp.id
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.delete(f"/api/companions/{cid}")
+            assert r.status_code == 200
+            assert r.json().get("ok") is True
+            assert int(r.json().get("unbound_spaces") or 0) == 1
+
+        with session_scope() as s:
+            assert s.get(Companion, cid) is None
+            sp2 = s.get(AgentSpace, space_id)
+            assert sp2 is not None
+            assert sp2.companion_id is None
+
+    asyncio.run(_run())
+
+
 def test_companion_restart_reuses_server_companion_id(tmp_path):
     async def _run() -> None:
+        os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "openfocus_test.db")
+        from openfocus.db import reset_engine
+
+        reset_engine()
         os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
         os.environ["OPENFOCUS_TEST_PAIRING_CODE"] = "A1B2C3D4E5"
 
@@ -267,7 +489,13 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
         from openfocus.companion import run_companion
+        from openfocus.db import get_engine
         from openfocus.main import COMPANION_GRPC, app
+        from openfocus.models import Base
+
+        Base.metadata.create_all(bind=get_engine())
+        from openfocus.db import session_scope
+        from openfocus.models import Event
 
         await COMPANION_GRPC.start()
         assert COMPANION_GRPC.bound_addr
@@ -281,6 +509,10 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
             cid1 = comp1["id"]
             stop1.set()
             await asyncio.wait_for(t1, timeout=5.0)
+
+            # gRPC 断开应落库事件
+            with session_scope() as s:
+                assert s.query(Event).filter(Event.kind == "companion.disconnected").count() >= 1
 
             # 第二次启动（复用同一份 state）
             stop2 = asyncio.Event()

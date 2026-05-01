@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 import os
 import mimetypes
 import secrets
@@ -12,11 +13,31 @@ import sys
 import threading
 import time
 from pathlib import Path
+import uuid
+import contextlib
+
+import fcntl
+import pty
+import struct
+import termios
 
 import grpc
 
 from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
+
+
+LOG = logging.getLogger("openfocus.companion")
+
+
+def _setup_logging() -> None:
+    level_s = str(os.environ.get("OPENFOCUS_COMPANION_LOG_LEVEL") or "INFO").upper().strip()
+    level = getattr(logging, level_s, logging.INFO)
+    # Companion 通常作为独立进程运行：直接输出到 stdout，便于用户排查。
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [companion] %(message)s",
+    )
 
 
 def _utcnow() -> dt.datetime:
@@ -142,6 +163,10 @@ class _CompanionRuntime:
             else:
                 self._rotate_code(force=False)
             exp = self._pair_code_expire_at or (_utcnow() + dt.timedelta(minutes=10))
+            try:
+                LOG.info("生成/返回配对码 force_new=%s expires_at=%s", bool(force_new), exp.isoformat())
+            except Exception:
+                pass
             return self._pair_code, exp
 
     def confirm_pair(self, code: str) -> str:
@@ -158,15 +183,24 @@ class _CompanionRuntime:
             # 每尝试一次都轮换认证码（无论成功/失败）
             self._rotate_code(force=True)
             if not ok:
+                try:
+                    LOG.warning("配对失败：认证码错误")
+                except Exception:
+                    pass
                 raise ValueError("认证码错误")
 
             if not self.auth_token:
                 self.auth_token = _gen_token()
                 self._persist()
+            try:
+                LOG.info("配对成功：已生成/复用 auth_token（长度=%s）", len(self.auth_token or ""))
+            except Exception:
+                pass
             return self.auth_token
 
 
 RUNTIME = _CompanionRuntime()
+_setup_logging()
 
 
 def _openfocus_grpc_addr() -> str:
@@ -175,7 +209,509 @@ def _openfocus_grpc_addr() -> str:
 
 def _capabilities() -> list[str]:
     # MVP：先声明已实现的能力
-    return ["pairing", "choose_directory"]
+    return ["pairing", "choose_directory", "agent", "terminal"]
+
+
+def _coco_bin() -> str:
+    return str(os.environ.get("OPENFOCUS_COCO_BIN") or "coco").strip() or "coco"
+
+
+class _AgentSessionRuntime:
+    def __init__(self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str) -> None:
+        self.session_id = session_id
+        self.root_path = root_path
+        self.agent_type = agent_type
+        self.task_public_id = task_public_id
+        self.created_at = _utcnow()
+        self._running: asyncio.Task | None = None
+
+
+class _AgentManager:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._sessions: dict[str, _AgentSessionRuntime] = {}
+
+    async def start(self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str) -> str:
+        sid = (session_id or "").strip() or str(uuid.uuid4())
+        async with self._lock:
+            self._sessions[sid] = _AgentSessionRuntime(
+                session_id=sid,
+                root_path=str(root_path or ""),
+                agent_type=str(agent_type or "trae-cli"),
+                task_public_id=str(task_public_id or ""),
+            )
+        return sid
+
+    async def terminate(self, *, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        async with self._lock:
+            rt = self._sessions.pop(sid, None)
+        if rt and rt._running and not rt._running.done():
+            rt._running.cancel()
+
+    async def list_sessions(self) -> list[pb2.AgentSessionInfo]:
+        async with self._lock:
+            items = list(self._sessions.values())
+        out: list[pb2.AgentSessionInfo] = []
+        for rt in items:
+            out.append(
+                pb2.AgentSessionInfo(
+                    session_id=rt.session_id,
+                    agent_type=rt.agent_type,
+                    root_path=rt.root_path,
+                    task_public_id=rt.task_public_id,
+                    created_at=float(rt.created_at.timestamp()),
+                )
+            )
+        return out
+
+    async def send(self, *, request_id: str, session_id: str, prompt: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+        rid = (request_id or "").strip()
+        if not rid:
+            rid = str(uuid.uuid4())
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+
+        async with self._lock:
+            rt = self._sessions.get(sid)
+            if rt is None:
+                raise ValueError("session not found")
+            if rt._running and not rt._running.done():
+                raise RuntimeError("session is busy")
+
+            try:
+                LOG.info(
+                    "准备执行 agent：session_id=%s agent_type=%s root_path=%s task=%s",
+                    rt.session_id,
+                    rt.agent_type,
+                    rt.root_path,
+                    rt.task_public_id,
+                )
+            except Exception:
+                pass
+
+            rt._running = asyncio.create_task(
+                self._run_print(rid=rid, rt=rt, prompt=str(prompt or ""), out_q=out_q),
+                name=f"agent-send:{sid}",
+            )
+
+    async def _run_print(
+        self,
+        *,
+        rid: str,
+        rt: _AgentSessionRuntime,
+        prompt: str,
+        out_q: asyncio.Queue[pb2.ClientToServer],
+    ) -> None:
+        # 测试兜底：不依赖 coco，直接回显 prompt。
+        if (os.environ.get("OPENFOCUS_TEST_AGENT_ECHO") or "").strip() == "1":
+            await out_q.put(
+                pb2.ClientToServer(
+                    agent_chunk=pb2.AgentChunk(request_id=rid, session_id=rt.session_id, ok=True, text=prompt, done=True)
+                )
+            )
+            return
+
+        cmd = [
+            _coco_bin(),
+            "--print",
+            "--query-timeout",
+            str(os.environ.get("OPENFOCUS_COCO_QUERY_TIMEOUT") or "300s"),
+            "--session-id",
+            rt.session_id,
+            "-w",
+            rt.root_path,
+            prompt,
+        ]
+
+        # coco/底层 gRPC 可能会输出一些 info 级别的内部日志到 stderr（例如 ev_poll_posix.cc）。
+        # 这里尽量压低噪音，避免污染对话回显。
+        env = os.environ.copy()
+        env.setdefault("GRPC_VERBOSITY", "ERROR")
+        env.setdefault("ABSL_MIN_LOG_LEVEL", "2")
+        env.setdefault("GLOG_minloglevel", "2")
+
+        try:
+            LOG.info("启动命令：%s", " ".join([str(x) for x in cmd[:6]]) + " ...")
+        except Exception:
+            pass
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError:
+            try:
+                LOG.error("coco 不存在：%s", _coco_bin())
+            except Exception:
+                pass
+            await out_q.put(
+                pb2.ClientToServer(
+                    agent_chunk=pb2.AgentChunk(
+                        request_id=rid,
+                        session_id=rt.session_id,
+                        ok=False,
+                        done=True,
+                        error=f"coco not found: {_coco_bin()}",
+                    )
+                )
+            )
+            return
+        except Exception as e:
+            try:
+                LOG.exception("启动命令失败：%s", e)
+            except Exception:
+                pass
+            await out_q.put(
+                pb2.ClientToServer(
+                    agent_chunk=pb2.AgentChunk(
+                        request_id=rid,
+                        session_id=rt.session_id,
+                        ok=False,
+                        done=True,
+                        error=str(e),
+                    )
+                )
+            )
+            return
+
+        def _is_noise_line(line: str) -> bool:
+            s = (line or "").strip()
+            if not s:
+                return True
+            # gRPC C-core fork/poll 提示：常见于 fork 后仍保留旧 fd 的 info 日志。
+            if "ev_poll_posix.cc" in s and "FD from fork parent" in s:
+                return True
+            if "FD from fork parent still in poll list" in s:
+                return True
+            return False
+
+        async def _pump(stream: asyncio.StreamReader | None) -> None:
+            if stream is None:
+                return
+            buf = ""
+            while True:
+                chunk = await stream.read(1024)
+                if not chunk:
+                    # flush remaining
+                    if buf and not _is_noise_line(buf):
+                        await out_q.put(
+                            pb2.ClientToServer(
+                                agent_chunk=pb2.AgentChunk(
+                                    request_id=rid,
+                                    session_id=rt.session_id,
+                                    ok=True,
+                                    text=buf,
+                                    done=False,
+                                )
+                            )
+                        )
+                    return
+                try:
+                    text = chunk.decode("utf-8")
+                except Exception:
+                    text = chunk.decode("utf-8", errors="replace")
+
+                if not text:
+                    continue
+
+                buf += text
+                # 按行过滤噪音（保留换行）
+                while True:
+                    i = buf.find("\n")
+                    if i < 0:
+                        break
+                    line = buf[: i + 1]
+                    buf = buf[i + 1 :]
+                    if _is_noise_line(line):
+                        continue
+                    await out_q.put(
+                        pb2.ClientToServer(
+                            agent_chunk=pb2.AgentChunk(
+                                request_id=rid,
+                                session_id=rt.session_id,
+                                ok=True,
+                                text=line,
+                                done=False,
+                            )
+                        )
+                    )
+
+        # stdout/stderr 都作为可见文本 chunk 上报（便于排查）
+        pump_out = asyncio.create_task(_pump(proc.stdout), name=f"agent-stdout:{rt.session_id}")
+        pump_err = asyncio.create_task(_pump(proc.stderr), name=f"agent-stderr:{rt.session_id}")
+
+        try:
+            timeout_s = int(os.environ.get("OPENFOCUS_AGENT_TIMEOUT_SECONDS") or "600")
+            timeout_s = max(10, min(timeout_s, 3600))
+            try:
+                rc = await asyncio.wait_for(proc.wait(), timeout=float(timeout_s))
+            except asyncio.TimeoutError:
+                try:
+                    LOG.error("agent 超时：timeout_s=%s session_id=%s", timeout_s, rt.session_id)
+                except Exception:
+                    pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                # 尽量等待 pump 结束，避免任务泄露
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.gather(pump_out, pump_err), timeout=1.0)
+                await out_q.put(
+                    pb2.ClientToServer(
+                        agent_chunk=pb2.AgentChunk(
+                            request_id=rid,
+                            session_id=rt.session_id,
+                            ok=False,
+                            done=True,
+                            error=f"agent timeout after {timeout_s}s",
+                        )
+                    )
+                )
+                return
+
+            await asyncio.gather(pump_out, pump_err)
+        except asyncio.CancelledError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+
+        try:
+            LOG.info("命令结束：exit_code=%s session_id=%s", rc, rt.session_id)
+        except Exception:
+            pass
+
+        if rc == 0:
+            await out_q.put(
+                pb2.ClientToServer(
+                    agent_chunk=pb2.AgentChunk(
+                        request_id=rid,
+                        session_id=rt.session_id,
+                        ok=True,
+                        done=True,
+                    )
+                )
+            )
+        else:
+            await out_q.put(
+                pb2.ClientToServer(
+                    agent_chunk=pb2.AgentChunk(
+                        request_id=rid,
+                        session_id=rt.session_id,
+                        ok=False,
+                        done=True,
+                        error=f"coco exit code: {rc}",
+                    )
+                )
+            )
+
+
+class _TerminalSession:
+    def __init__(self, *, terminal_id: str, root_path: str) -> None:
+        self.terminal_id = terminal_id
+        self.root_path = root_path
+        self.created_at = _utcnow()
+        self.pid: int | None = None
+        self.master_fd: int | None = None
+        self.closed = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.master_fd is not None:
+                os.close(self.master_fd)
+        except Exception:
+            pass
+        self.master_fd = None
+
+
+class _TerminalManager:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._sessions: dict[str, _TerminalSession] = {}
+
+    async def list_sessions(self) -> list[pb2.TerminalSessionInfo]:
+        async with self._lock:
+            items = list(self._sessions.values())
+        return [
+            pb2.TerminalSessionInfo(
+                terminal_id=s.terminal_id,
+                root_path=s.root_path,
+                created_at=float(s.created_at.timestamp()),
+            )
+            for s in items
+        ]
+
+    async def start(self, *, terminal_id: str, root_path: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> str:
+        tid = (terminal_id or "").strip() or str(uuid.uuid4())
+        rp = str(root_path or "").strip()
+        if not rp:
+            raise ValueError("root_path is required")
+
+        try:
+            LOG.info("启动 terminal：terminal_id=%s root_path=%s", tid, rp)
+        except Exception:
+            pass
+
+        async with self._lock:
+            if tid in self._sessions:
+                return tid
+            sess = _TerminalSession(terminal_id=tid, root_path=rp)
+            self._sessions[tid] = sess
+
+        # 测试兜底：不依赖 PTY，回显输入（OpenFocus 可通过 input 接口触发 output）。
+        if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            await out_q.put(
+                pb2.ClientToServer(
+                    terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"terminal-ready\n", closed=False)
+                )
+            )
+            return tid
+
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(rp)
+            except Exception:
+                pass
+            shell = os.environ.get("SHELL") or "/bin/zsh"
+            os.execvp(shell, [shell])
+
+        sess.pid = int(pid)
+        sess.master_fd = int(fd)
+        os.set_blocking(fd, False)
+
+        loop = asyncio.get_running_loop()
+
+        def _emit(data: bytes, *, closed: bool, error: str = "") -> None:
+            loop.create_task(
+                out_q.put(
+                    pb2.ClientToServer(
+                        terminal_output=pb2.TerminalOutput(
+                            terminal_id=tid,
+                            data=bytes(data or b""),
+                            closed=bool(closed),
+                            error=str(error or ""),
+                        )
+                    )
+                )
+            )
+
+        def _on_readable() -> None:
+            if sess.master_fd is None:
+                return
+            try:
+                data = os.read(sess.master_fd, 4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                try:
+                    loop.remove_reader(sess.master_fd)
+                except Exception:
+                    pass
+                sess.close()
+                _emit(b"", closed=True)
+                return
+            if not data:
+                return
+            _emit(data, closed=False)
+
+        loop.add_reader(fd, _on_readable)
+        return tid
+
+    async def stop(self, *, terminal_id: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+        tid = (terminal_id or "").strip()
+        if not tid:
+            raise ValueError("terminal_id is required")
+        try:
+            LOG.info("停止 terminal：terminal_id=%s", tid)
+        except Exception:
+            pass
+        async with self._lock:
+            sess = self._sessions.pop(tid, None)
+        if sess is None:
+            return
+
+        if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            await out_q.put(pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"", closed=True)))
+            return
+
+        try:
+            if sess.master_fd is not None:
+                asyncio.get_running_loop().remove_reader(sess.master_fd)
+        except Exception:
+            pass
+        try:
+            if sess.pid:
+                os.kill(sess.pid, 15)
+        except Exception:
+            pass
+        sess.close()
+        await out_q.put(pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"", closed=True)))
+
+    async def input(self, *, terminal_id: str, data: bytes, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+        tid = (terminal_id or "").strip()
+        if not tid:
+            raise ValueError("terminal_id is required")
+        async with self._lock:
+            sess = self._sessions.get(tid)
+        if sess is None:
+            raise ValueError("terminal not found")
+        raw = bytes(data or b"")
+
+        # 输入频率可能很高，这里只在 debug 时输出，避免日志爆炸。
+        if LOG.isEnabledFor(logging.DEBUG):
+            try:
+                LOG.debug("terminal_input：terminal_id=%s nbytes=%s", tid, len(raw))
+            except Exception:
+                pass
+
+        if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            # echo：直接把输入回传
+            await out_q.put(
+                pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=raw, closed=False))
+            )
+            return
+
+        if sess.master_fd is None:
+            raise ValueError("terminal closed")
+        os.write(sess.master_fd, raw)
+
+    async def resize(self, *, terminal_id: str, cols: int, rows: int) -> None:
+        tid = (terminal_id or "").strip()
+        if not tid:
+            raise ValueError("terminal_id is required")
+        async with self._lock:
+            sess = self._sessions.get(tid)
+        if sess is None:
+            raise ValueError("terminal not found")
+        if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            return
+        if sess.master_fd is None:
+            raise ValueError("terminal closed")
+
+        cols = int(cols or 0)
+        rows = int(rows or 0)
+        if cols <= 0 or rows <= 0:
+            return
+        if LOG.isEnabledFor(logging.DEBUG):
+            try:
+                LOG.debug("terminal_resize：terminal_id=%s cols=%s rows=%s", tid, cols, rows)
+            except Exception:
+                pass
+        winsz = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(sess.master_fd, termios.TIOCSWINSZ, winsz)
 
 
 def _choose_directory() -> str:
@@ -324,11 +860,21 @@ async def run_companion(*, grpc_addr: str | None = None, stop_event: asyncio.Eve
 
     while not stop_event.is_set():
         try:
+            LOG.info(
+                "连接 OpenFocus gRPC：addr=%s device_id=%s companion_id=%s",
+                addr,
+                RUNTIME.device_id,
+                int(getattr(RUNTIME, "server_companion_id", 0) or 0) or "—",
+            )
             await _connect_once(addr, stop_event)
             backoff = 0.2
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:
+            try:
+                LOG.exception("连接异常，将重试：%s", e)
+            except Exception:
+                pass
             # 断线/失败：指数退避重连
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 5.0)
@@ -336,6 +882,8 @@ async def run_companion(*, grpc_addr: str | None = None, stop_event: asyncio.Eve
 
 async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
     out_q: asyncio.Queue[pb2.ClientToServer] = asyncio.Queue()
+    agent_mgr = _AgentManager()
+    term_mgr = _TerminalManager()
 
     hello = pb2.Hello(
         device_id=RUNTIME.device_id,
@@ -345,6 +893,15 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
         server_companion_id=int(getattr(RUNTIME, "server_companion_id", 0) or 0),
     )
     await out_q.put(pb2.ClientToServer(hello=hello))
+    try:
+        LOG.info(
+            "发送 hello：name=%s capabilities=%s has_token=%s",
+            RUNTIME.name,
+            ",".join(_capabilities()),
+            bool((RUNTIME.auth_token or "").strip()),
+        )
+    except Exception:
+        pass
 
     async def _outgoing() -> AsyncIterator[pb2.ClientToServer]:
         # 允许 stop_event 在 out_q 空时也能打断等待，避免测试/退出时只能靠取消任务。
@@ -382,10 +939,15 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                     if cid > 0 and cid != RUNTIME.server_companion_id:
                         RUNTIME.server_companion_id = cid
                         RUNTIME._persist()
+                    try:
+                        LOG.info("已连接：welcome companion_id=%s", cid or "—")
+                    except Exception:
+                        pass
                     continue
                 if which == "pairing_code":
                     req = msg.pairing_code
                     try:
+                        LOG.info("收到 pairing_code 请求：force_new=%s", bool(req.force_new))
                         code, exp = RUNTIME.current_code(force_new=bool(req.force_new))
                         resp = pb2.PairingCodeResponse(
                             request_id=req.request_id,
@@ -394,6 +956,10 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             expires_at=exp.isoformat(),
                         )
                     except Exception as e:
+                        try:
+                            LOG.exception("pairing_code 处理失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.PairingCodeResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(pairing_code_resp=resp))
                     continue
@@ -409,9 +975,14 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "pair":
                     req = msg.pair
                     try:
+                        LOG.info("收到 pair 请求")
                         token = RUNTIME.confirm_pair(req.code)
                         resp = pb2.PairResponse(request_id=req.request_id, ok=True, auth_token=token)
                     except Exception as e:
+                        try:
+                            LOG.exception("pair 处理失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.PairResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(pair_resp=resp))
                     continue
@@ -419,11 +990,16 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "choose_directory":
                     req = msg.choose_directory
                     try:
+                        LOG.info("收到 choose_directory 请求")
                         if not (RUNTIME.auth_token or "").strip():
                             raise RuntimeError("Companion 尚未配对")
                         path = _choose_directory()
                         resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=True, path=path)
                     except Exception as e:
+                        try:
+                            LOG.exception("choose_directory 处理失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(choose_directory_resp=resp))
                     continue
@@ -431,9 +1007,14 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "files_list":
                     req = msg.files_list
                     try:
+                        LOG.info("收到 files_list：rel_path=%s", str(req.rel_path or ""))
                         path, entries = _list_dir(root_path=req.root_path, rel_path=req.rel_path)
                         resp = pb2.FilesListResponse(request_id=req.request_id, ok=True, path=path, entries=entries)
                     except Exception as e:
+                        try:
+                            LOG.exception("files_list 失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.FilesListResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(files_list_resp=resp))
                     continue
@@ -441,6 +1022,7 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "files_read":
                     req = msg.files_read
                     try:
+                        LOG.info("收到 files_read：rel_path=%s", str(req.rel_path or ""))
                         path, content, truncated, mime = _read_text(
                             root_path=req.root_path,
                             rel_path=req.rel_path,
@@ -455,6 +1037,10 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             mime=mime,
                         )
                     except Exception as e:
+                        try:
+                            LOG.exception("files_read 失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.FilesReadResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(files_read_resp=resp))
                     continue
@@ -462,6 +1048,7 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "files_raw":
                     req = msg.files_raw
                     try:
+                        LOG.info("收到 files_raw：rel_path=%s", str(req.rel_path or ""))
                         path, data, mime = _read_raw(
                             root_path=req.root_path,
                             rel_path=req.rel_path,
@@ -475,13 +1062,176 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             mime=mime,
                         )
                     except Exception as e:
+                        try:
+                            LOG.exception("files_raw 失败：%s", e)
+                        except Exception:
+                            pass
                         resp = pb2.FilesRawResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(files_raw_resp=resp))
                     continue
+
+                if which == "agent_start":
+                    req = msg.agent_start
+                    try:
+                        LOG.info(
+                            "agent_start: session_id=%s agent_type=%s task=%s",
+                            str(req.session_id or ""),
+                            str(req.agent_type or ""),
+                            str(req.task_public_id or ""),
+                        )
+                        sid = await agent_mgr.start(
+                            session_id=req.session_id,
+                            root_path=req.root_path,
+                            agent_type=req.agent_type,
+                            task_public_id=req.task_public_id,
+                        )
+                        resp = pb2.AgentStartResponse(request_id=req.request_id, ok=True, session_id=sid)
+                    except Exception as e:
+                        try:
+                            LOG.exception("agent_start 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.AgentStartResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(agent_start_resp=resp))
+                    continue
+
+                if which == "agent_terminate":
+                    req = msg.agent_terminate
+                    try:
+                        LOG.info("agent_terminate: session_id=%s", str(req.session_id or ""))
+                        await agent_mgr.terminate(session_id=req.session_id)
+                        resp = pb2.AgentTerminateResponse(request_id=req.request_id, ok=True)
+                    except Exception as e:
+                        try:
+                            LOG.exception("agent_terminate 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.AgentTerminateResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(agent_terminate_resp=resp))
+                    continue
+
+                if which == "agent_list_sessions":
+                    req = msg.agent_list_sessions
+                    try:
+                        sessions = await agent_mgr.list_sessions()
+                        resp = pb2.AgentListSessionsResponse(request_id=req.request_id, ok=True, sessions=sessions)
+                    except Exception as e:
+                        try:
+                            LOG.exception("agent_list_sessions 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.AgentListSessionsResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(agent_list_sessions_resp=resp))
+                    continue
+
+                if which == "agent_send":
+                    req = msg.agent_send
+                    try:
+                        LOG.info("agent_send: request_id=%s session_id=%s", str(req.request_id or ""), str(req.session_id or ""))
+                        if not (RUNTIME.auth_token or "").strip():
+                            raise RuntimeError("Companion 尚未配对")
+                        # 先 ACK，再异步跑 agent 并通过 AgentChunk 回传
+                        await agent_mgr.send(request_id=req.request_id, session_id=req.session_id, prompt=req.prompt, out_q=out_q)
+                        resp = pb2.AgentSendResponse(request_id=req.request_id, ok=True)
+                    except Exception as e:
+                        try:
+                            LOG.exception("agent_send 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.AgentSendResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(agent_send_resp=resp))
+                    continue
+
+                if which == "terminal_list_sessions":
+                    req = msg.terminal_list_sessions
+                    try:
+                        sessions = await term_mgr.list_sessions()
+                        resp = pb2.TerminalListSessionsResponse(request_id=req.request_id, ok=True, sessions=sessions)
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_list_sessions 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalListSessionsResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(terminal_list_sessions_resp=resp))
+                    continue
+
+                if which == "terminal_start":
+                    req = msg.terminal_start
+                    try:
+                        LOG.info("terminal_start: terminal_id=%s", str(req.terminal_id or ""))
+                        if not (RUNTIME.auth_token or "").strip():
+                            raise RuntimeError("Companion 尚未配对")
+                        tid = await term_mgr.start(terminal_id=req.terminal_id, root_path=req.root_path, out_q=out_q)
+                        resp = pb2.TerminalStartResponse(request_id=req.request_id, ok=True, terminal_id=tid)
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_start 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalStartResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(terminal_start_resp=resp))
+                    continue
+
+                if which == "terminal_stop":
+                    req = msg.terminal_stop
+                    try:
+                        LOG.info("terminal_stop: terminal_id=%s", str(req.terminal_id or ""))
+                        await term_mgr.stop(terminal_id=req.terminal_id, out_q=out_q)
+                        resp = pb2.TerminalStopResponse(request_id=req.request_id, ok=True)
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_stop 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalStopResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(terminal_stop_resp=resp))
+                    continue
+
+                if which == "terminal_input":
+                    req = msg.terminal_input
+                    try:
+                        await term_mgr.input(terminal_id=req.terminal_id, data=bytes(req.data), out_q=out_q)
+                        resp = pb2.TerminalInputResponse(request_id=req.request_id, ok=True)
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_input 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalInputResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(terminal_input_resp=resp))
+                    continue
+
+                if which == "terminal_resize":
+                    req = msg.terminal_resize
+                    try:
+                        await term_mgr.resize(terminal_id=req.terminal_id, cols=req.cols, rows=req.rows)
+                        resp = pb2.TerminalResizeResponse(request_id=req.request_id, ok=True)
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_resize 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalResizeResponse(request_id=req.request_id, ok=False, error=str(e))
+                    await out_q.put(pb2.ClientToServer(terminal_resize_resp=resp))
+                    continue
+        except grpc.aio.AioRpcError as e:
+            # 连接断开/服务端关闭
+            try:
+                LOG.warning("gRPC 连接断开：code=%s detail=%s", getattr(e, "code", lambda: None)(), getattr(e, "details", lambda: "")())
+            except Exception:
+                pass
+            return
         except asyncio.CancelledError:
             # stop_event 触发的 call.cancel() 会导致本地 CANCELLED，这里视为正常退出。
             if stop_event.is_set():
                 return
+            raise
+        except Exception as e:
+            try:
+                LOG.exception("gRPC 循环异常：%s", e)
+            except Exception:
+                pass
             raise
         finally:
             cancel_task.cancel()

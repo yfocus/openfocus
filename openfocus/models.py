@@ -4,7 +4,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -131,6 +131,110 @@ class AgentSpace(Base):
         DateTime(timezone=True),
         default=lambda: dt.datetime.now(dt.timezone.utc),
         onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class AgentSession(Base):
+    """AgentSpace 下的对话会话（OpenFocus 侧持久化）。
+
+    说明：Companion 侧 session 可丢失，但 OpenFocus 侧对话应在服务重启后仍可回放。
+    """
+
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 稳定会话 ID（用于 OpenFocus <-> Companion 对齐；避免泄漏自增 id）
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
+    agent_type: Mapped[str] = mapped_column(String(64), nullable=False, default="trae-cli")
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")  # active/terminated
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class AgentMessage(Base):
+    """会话内消息。
+
+    assistant 消息支持按 request_id 增量追加（用于 SSE chunk 持久化）。
+    """
+
+    __tablename__ = "agent_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 一次 agent 调用的 request_id（assistant chunk 用；user 消息为空）
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    role: Mapped[str] = mapped_column(String(32), nullable=False)  # user/assistant
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class RemoteTerminalSession(Base):
+    """AgentSpace 下的远程终端会话（仅存元信息，用于 tab 管理与释放清理）。"""
+
+    __tablename__ = "remote_terminal_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
+
+    # 展示名（用于 UI tab）。要求：同一 space 下不重复。
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+
+    terminal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")  # active/closed
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class RemoteTerminalOutput(Base):
+    """远程终端输出日志（用于刷新/重进页面时回放）。
+
+    说明：只持久化输出流（包含用户输入的回显 + 程序输出），避免重复记录 keypress。
+    """
+
+    __tablename__ = "remote_terminal_outputs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    terminal_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # base64 编码后的 bytes（避免 SQLite BLOB / JSON 序列化差异）
+    data_b64: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    nbytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
 
 

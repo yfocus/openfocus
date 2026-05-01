@@ -124,6 +124,149 @@ message FilesRawResponse {
   string error = 6;
 }
 
+// Agent 管理（AgentSpace 的 AGENT 栏）。
+
+message AgentSessionInfo {
+  string session_id = 1;
+  string agent_type = 2;
+  string root_path = 3;
+  string task_public_id = 4;
+  double created_at = 5;
+}
+
+message AgentStartRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string root_path = 3;
+  string agent_type = 4;
+  string task_public_id = 5;
+}
+
+message AgentStartResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string session_id = 3;
+  string error = 4;
+}
+
+message AgentTerminateRequest {
+  string request_id = 1;
+  string session_id = 2;
+}
+
+message AgentTerminateResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message AgentSendRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string prompt = 3; // OpenFocus 已注入后的完整 prompt
+}
+
+message AgentSendResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message AgentChunk {
+  string request_id = 1;
+  string session_id = 2;
+  bool ok = 3;
+  string text = 4;
+  bool done = 5;
+  string error = 6;
+}
+
+message AgentListSessionsRequest {
+  string request_id = 1;
+}
+
+message AgentListSessionsResponse {
+  string request_id = 1;
+  bool ok = 2;
+  repeated AgentSessionInfo sessions = 3;
+  string error = 4;
+}
+
+// Remote Terminal（AgentSpace 的 AGENT 栏替换为远程终端）
+
+message TerminalSessionInfo {
+  string terminal_id = 1;
+  string root_path = 2;
+  double created_at = 3;
+}
+
+message TerminalStartRequest {
+  string request_id = 1;
+  string terminal_id = 2;
+  string root_path = 3;
+}
+
+message TerminalStartResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string terminal_id = 3;
+  string error = 4;
+}
+
+message TerminalStopRequest {
+  string request_id = 1;
+  string terminal_id = 2;
+}
+
+message TerminalStopResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message TerminalInputRequest {
+  string request_id = 1;
+  string terminal_id = 2;
+  bytes data = 3;
+}
+
+message TerminalInputResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message TerminalResizeRequest {
+  string request_id = 1;
+  string terminal_id = 2;
+  int32 cols = 3;
+  int32 rows = 4;
+}
+
+message TerminalResizeResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message TerminalOutput {
+  string terminal_id = 1;
+  bytes data = 2;
+  bool closed = 3;
+  string error = 4;
+}
+
+message TerminalListSessionsRequest {
+  string request_id = 1;
+}
+
+message TerminalListSessionsResponse {
+  string request_id = 1;
+  bool ok = 2;
+  repeated TerminalSessionInfo sessions = 3;
+  string error = 4;
+}
+
 message ServerToClient {
   oneof msg {
     Welcome welcome = 10;
@@ -134,6 +277,17 @@ message ServerToClient {
     FilesListRequest files_list = 11;
     FilesReadRequest files_read = 12;
     FilesRawRequest files_raw = 13;
+
+    AgentStartRequest agent_start = 20;
+    AgentTerminateRequest agent_terminate = 21;
+    AgentSendRequest agent_send = 22;
+    AgentListSessionsRequest agent_list_sessions = 23;
+
+    TerminalStartRequest terminal_start = 30;
+    TerminalStopRequest terminal_stop = 31;
+    TerminalInputRequest terminal_input = 32;
+    TerminalResizeRequest terminal_resize = 33;
+    TerminalListSessionsRequest terminal_list_sessions = 34;
   }
 }
 
@@ -147,6 +301,19 @@ message ClientToServer {
     FilesListResponse files_list_resp = 11;
     FilesReadResponse files_read_resp = 12;
     FilesRawResponse files_raw_resp = 13;
+
+    AgentStartResponse agent_start_resp = 20;
+    AgentTerminateResponse agent_terminate_resp = 21;
+    AgentSendResponse agent_send_resp = 22;
+    AgentChunk agent_chunk = 23;
+    AgentListSessionsResponse agent_list_sessions_resp = 24;
+
+    TerminalStartResponse terminal_start_resp = 30;
+    TerminalStopResponse terminal_stop_resp = 31;
+    TerminalInputResponse terminal_input_resp = 32;
+    TerminalResizeResponse terminal_resize_resp = 33;
+    TerminalOutput terminal_output = 34;
+    TerminalListSessionsResponse terminal_list_sessions_resp = 35;
   }
 }
 

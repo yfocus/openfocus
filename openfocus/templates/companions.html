@@ -52,6 +52,18 @@
       return '<span class="pill" style="border-color: rgba(255,59,92,0.35);">pending certification</span>';
     }
 
+    async function deleteCompanion(id){
+      const cid = String(id||'').trim();
+      if(!cid) return;
+      if(!confirm('确认删除 Companion #' + cid + '？\n\n- 会解绑关联的 AgentSpace\n- 删除后需要 Companion 重新注册/重新配对')) return;
+      const r = await fetch('/api/companions/' + encodeURIComponent(cid), { method: 'DELETE' });
+      if(!r.ok){
+        const t = await r.text().catch(()=> '');
+        throw new Error(t || ('HTTP ' + r.status));
+      }
+      return await r.json().catch(()=> ({}));
+    }
+
     async function refresh(){
       const box = document.getElementById('comp-list');
       const btn = document.getElementById('comp-refresh');
@@ -74,10 +86,11 @@
                     <div class="muted" style="margin-top: 6px;">base_url: ${esc(it.base_url || '')}</div>
                     <div class="muted" style="margin-top: 6px;">device_id: ${esc(it.device_id || '')}</div>
                   </div>
-                  <div style="display:flex; gap: 10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
-                    ${badge(it.status)}
-                    ${(it.status === 'pending_certification') ? `<button type="button" class="btn-ghost js-pair" data-id="${esc(it.id)}">认证</button>` : ''}
-                  </div>
+                <div style="display:flex; gap: 10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                  ${badge(it.status)}
+                  ${(it.status === 'pending_certification') ? `<button type="button" class="btn-ghost js-pair" data-id="${esc(it.id)}">认证</button>` : ''}
+                  <button type="button" class="btn-ghost js-del" data-id="${esc(it.id)}" style="border-color: rgba(255,59,92,0.35);">删除</button>
+                </div>
                 </div>
 
                 <div class="divider"></div>
@@ -125,6 +138,21 @@
     document.addEventListener('click', (e)=>{
       const t = e.target;
       if(!(t instanceof HTMLElement)) return;
+      const d = t.closest('.js-del');
+      if(d){
+        const id = d.getAttribute('data-id');
+        (async ()=>{
+          try{
+            await deleteCompanion(id);
+            toast('已删除');
+            await refresh();
+          }catch(err){
+            toast('删除失败');
+            alert('删除失败：' + String(err && err.message ? err.message : err));
+          }
+        })();
+        return;
+      }
       const b = t.closest('.js-pair');
       if(!b) return;
       const id = b.getAttribute('data-id');

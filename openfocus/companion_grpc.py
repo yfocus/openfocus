@@ -10,7 +10,7 @@ from typing import AsyncIterator, Callable
 import grpc
 
 from .db import session_scope
-from .models import Companion
+from .models import Companion, Event
 
 
 # 由 grpc_tools.protoc 生成
@@ -28,6 +28,19 @@ def _now_ms() -> int:
 
 class CompanionGrpcError(RuntimeError):
     pass
+
+
+# Agent 输出（AgentChunk）为流式事件：通过监听器回调转发到 HTTP/SSE 层。
+_AGENT_CHUNK_LISTENERS: list[Callable[[pb2.AgentChunk], None]] = []
+_TERMINAL_OUTPUT_LISTENERS: list[Callable[[pb2.TerminalOutput], None]] = []
+
+
+def add_agent_chunk_listener(listener: Callable[[pb2.AgentChunk], None]) -> None:
+    _AGENT_CHUNK_LISTENERS.append(listener)
+
+
+def add_terminal_output_listener(listener: Callable[[pb2.TerminalOutput], None]) -> None:
+    _TERMINAL_OUTPUT_LISTENERS.append(listener)
 
 
 @dataclass
@@ -204,6 +217,204 @@ class CompanionConnection:
             raise CompanionGrpcError(res.error or "files_raw failed")
         return res
 
+    async def request_agent_start(
+        self,
+        *,
+        session_id: str,
+        root_path: str,
+        agent_type: str,
+        task_public_id: str,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.AgentStartResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="agent_start")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                agent_start=pb2.AgentStartRequest(
+                    request_id=rid,
+                    session_id=str(session_id or ""),
+                    root_path=str(root_path or ""),
+                    agent_type=str(agent_type or ""),
+                    task_public_id=str(task_public_id or ""),
+                )
+            )
+        )
+        try:
+            res: pb2.AgentStartResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "agent_start failed")
+        return res
+
+    async def request_agent_terminate(
+        self, *, session_id: str, timeout_seconds: float = 10.0
+    ) -> pb2.AgentTerminateResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="agent_terminate")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                agent_terminate=pb2.AgentTerminateRequest(request_id=rid, session_id=str(session_id or ""))
+            )
+        )
+        try:
+            res: pb2.AgentTerminateResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "agent_terminate failed")
+        return res
+
+    async def request_agent_send(
+        self, *, request_id: str, session_id: str, prompt: str, timeout_seconds: float = 10.0
+    ) -> pb2.AgentSendResponse:
+        # request_id 由上层生成（用于 chunk 聚合），此处作为 AgentSendRequest.request_id 下发。
+        rid = str(request_id or uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="agent_send")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                agent_send=pb2.AgentSendRequest(
+                    request_id=rid,
+                    session_id=str(session_id or ""),
+                    prompt=str(prompt or ""),
+                )
+            )
+        )
+        try:
+            res: pb2.AgentSendResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "agent_send failed")
+        return res
+
+    async def request_agent_list_sessions(self, *, timeout_seconds: float = 10.0) -> pb2.AgentListSessionsResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="agent_list_sessions")
+        await self._out_q.put(pb2.ServerToClient(agent_list_sessions=pb2.AgentListSessionsRequest(request_id=rid)))
+        try:
+            res: pb2.AgentListSessionsResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "agent_list_sessions failed")
+        return res
+
+    async def request_terminal_start(
+        self, *, terminal_id: str, root_path: str, timeout_seconds: float = 10.0
+    ) -> pb2.TerminalStartResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_start")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                terminal_start=pb2.TerminalStartRequest(
+                    request_id=rid,
+                    terminal_id=str(terminal_id or ""),
+                    root_path=str(root_path or ""),
+                )
+            )
+        )
+        try:
+            res: pb2.TerminalStartResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_start failed")
+        return res
+
+    async def request_terminal_stop(self, *, terminal_id: str, timeout_seconds: float = 10.0) -> pb2.TerminalStopResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_stop")
+        await self._out_q.put(
+            pb2.ServerToClient(terminal_stop=pb2.TerminalStopRequest(request_id=rid, terminal_id=str(terminal_id or "")))
+        )
+        try:
+            res: pb2.TerminalStopResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_stop failed")
+        return res
+
+    async def request_terminal_input(
+        self,
+        *,
+        terminal_id: str,
+        data: bytes,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.TerminalInputResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_input")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                terminal_input=pb2.TerminalInputRequest(
+                    request_id=rid,
+                    terminal_id=str(terminal_id or ""),
+                    data=bytes(data or b""),
+                )
+            )
+        )
+        try:
+            res: pb2.TerminalInputResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_input failed")
+        return res
+
+    async def request_terminal_resize(
+        self,
+        *,
+        terminal_id: str,
+        cols: int,
+        rows: int,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.TerminalResizeResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_resize")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                terminal_resize=pb2.TerminalResizeRequest(
+                    request_id=rid,
+                    terminal_id=str(terminal_id or ""),
+                    cols=int(cols or 0),
+                    rows=int(rows or 0),
+                )
+            )
+        )
+        try:
+            res: pb2.TerminalResizeResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_resize failed")
+        return res
+
+    async def request_terminal_list_sessions(
+        self, *, timeout_seconds: float = 10.0
+    ) -> pb2.TerminalListSessionsResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_list_sessions")
+        await self._out_q.put(
+            pb2.ServerToClient(terminal_list_sessions=pb2.TerminalListSessionsRequest(request_id=rid))
+        )
+        try:
+            res: pb2.TerminalListSessionsResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_list_sessions failed")
+        return res
+
     def handle_incoming(self, msg: pb2.ClientToServer) -> None:
         self.mark_seen()
         which = msg.WhichOneof("msg")
@@ -252,6 +463,79 @@ class CompanionConnection:
                 p.fut.set_result(r)
             return
 
+        if which == "agent_start_resp":
+            r: pb2.AgentStartResponse = msg.agent_start_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "agent_start" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "agent_terminate_resp":
+            r: pb2.AgentTerminateResponse = msg.agent_terminate_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "agent_terminate" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "agent_send_resp":
+            r: pb2.AgentSendResponse = msg.agent_send_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "agent_send" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "agent_list_sessions_resp":
+            r: pb2.AgentListSessionsResponse = msg.agent_list_sessions_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "agent_list_sessions" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "agent_chunk":
+            ch: pb2.AgentChunk = msg.agent_chunk
+            # best-effort 通知监听器（不要在这里阻塞）。
+            for cb in list(_AGENT_CHUNK_LISTENERS):
+                try:
+                    cb(ch)
+                except Exception:
+                    pass
+            return
+
+        if which == "terminal_start_resp":
+            r: pb2.TerminalStartResponse = msg.terminal_start_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_start" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_stop_resp":
+            r: pb2.TerminalStopResponse = msg.terminal_stop_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_stop" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_input_resp":
+            r: pb2.TerminalInputResponse = msg.terminal_input_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_input" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_resize_resp":
+            r: pb2.TerminalResizeResponse = msg.terminal_resize_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_resize" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_list_sessions_resp":
+            r: pb2.TerminalListSessionsResponse = msg.terminal_list_sessions_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_list_sessions" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_output":
+            out: pb2.TerminalOutput = msg.terminal_output
+            for cb in list(_TERMINAL_OUTPUT_LISTENERS):
+                try:
+                    cb(out)
+                except Exception:
+                    pass
+            return
+
 
 class CompanionRegistry:
     """在内存中维护在线连接；落库更新 last_seen/status。"""
@@ -274,10 +558,30 @@ class CompanionRegistry:
 
     async def set_disconnected(self, companion_id: int, conn: CompanionConnection) -> None:
         cid = int(companion_id)
+        removed = False
         async with self._lock:
             cur = self._by_companion_id.get(cid)
             if cur is conn:
                 self._by_companion_id.pop(cid, None)
+                removed = True
+
+        # 记录“失去连接”事件（仅当确实从 registry 移除）
+        if removed:
+            try:
+                with session_scope() as s:
+                    c = s.get(Companion, cid)
+                    device_id = (c.device_id if c is not None else (conn.device_id or ""))
+                    s.add(
+                        Event(
+                            kind="companion.disconnected",
+                            agent="openfocus/grpc",
+                            task_id=None,
+                            payload={"companion_id": cid, "device_id": device_id},
+                        )
+                    )
+            except Exception:
+                # best-effort: 不影响连接清理
+                pass
 
 
 class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
@@ -337,6 +641,28 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
         conn = CompanionConnection(companion_id=assigned_id, device_id=device_id)
         conn.handle_incoming(first)
         await self.registry.set_connected(assigned_id, conn)
+
+        # 记录“连接成功”事件（best-effort，不影响连接建立）
+        try:
+            with session_scope() as s:
+                c = s.get(Companion, assigned_id)
+                device_id_out = (c.device_id if c is not None else (conn.device_id or ""))
+                s.add(
+                    Event(
+                        kind="companion.connected",
+                        agent="openfocus/grpc",
+                        task_id=None,
+                        payload={
+                            "companion_id": int(assigned_id),
+                            "device_id": device_id_out,
+                            "name": (conn.name or "").strip(),
+                            "capabilities": list(conn.capabilities or []),
+                        },
+                    )
+                )
+        except Exception:
+            pass
+
         await conn._out_q.put(pb2.ServerToClient(welcome=pb2.Welcome(companion_id=assigned_id)))
         await conn.start_ping_loop()
 

@@ -4,15 +4,32 @@ import datetime as dt
 import json
 import os
 import mimetypes
+import asyncio
+import uuid
+import base64
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
 from .db import get_engine, session_scope
-from .models import AgentSpace, Base, Companion, Event, Goal, GoalPlanMessage, GoalPlanSession, Task
+from .models import (
+    AgentMessage,
+    AgentSession,
+    AgentSpace,
+    Base,
+    Companion,
+    Event,
+    Goal,
+    GoalPlanMessage,
+    GoalPlanSession,
+    RemoteTerminalSession,
+    RemoteTerminalOutput,
+    Task,
+)
 from .schemas import (
     AgentEventIn,
     AgentSpaceCreateIn,
@@ -22,7 +39,12 @@ from .schemas import (
 from .agent.llm.openai_compat import OpenAICompatibleProvider
 from .agent.agents.task_prompt_recommender import TaskPromptRecommenderAgent
 
-from .companion_grpc import CompanionGrpcError, CompanionGrpcServer
+from .companion_grpc import (
+    CompanionGrpcError,
+    CompanionGrpcServer,
+    add_agent_chunk_listener,
+    add_terminal_output_listener,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -31,8 +53,269 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 app = FastAPI(title="OpenFocus", version="0.1.0")
 
 
+# 静态资源：远程终端前端（remote-terminal/）
+_REMOTE_TERMINAL_DIR = (APP_DIR.parent / "remote-terminal").resolve()
+if _REMOTE_TERMINAL_DIR.exists() and _REMOTE_TERMINAL_DIR.is_dir():
+    app.mount("/remote-terminal", StaticFiles(directory=str(_REMOTE_TERMINAL_DIR)), name="remote-terminal")
+
+
 # OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
 COMPANION_GRPC = CompanionGrpcServer()
+
+
+# Agent SSE hub（按 session_id 组织）。
+_AGENT_SSE_LOCK = asyncio.Lock()
+_AGENT_SSE_SUBS: dict[str, set[asyncio.Queue[dict]]]
+_AGENT_SSE_SUBS = {}
+_AGENT_LISTENER_INSTALLED = False
+
+
+async def _agent_sse_subscribe(session_id: str) -> asyncio.Queue[dict]:
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=200)
+    sid = str(session_id or "").strip()
+    async with _AGENT_SSE_LOCK:
+        _AGENT_SSE_SUBS.setdefault(sid, set()).add(q)
+    return q
+
+
+async def _agent_sse_unsubscribe(session_id: str, q: asyncio.Queue[dict]) -> None:
+    sid = str(session_id or "").strip()
+    async with _AGENT_SSE_LOCK:
+        subs = _AGENT_SSE_SUBS.get(sid)
+        if not subs:
+            return
+        subs.discard(q)
+        if not subs:
+            _AGENT_SSE_SUBS.pop(sid, None)
+
+
+def _agent_sse_publish(session_id: str, ev: dict) -> None:
+    sid = str(session_id or "").strip()
+    subs = _AGENT_SSE_SUBS.get(sid)
+    if not subs:
+        return
+    for q in list(subs):
+        try:
+            q.put_nowait(ev)
+        except Exception:
+            # 队列满/关闭：丢弃即可（前端可用 history 兜底）。
+            pass
+
+
+async def _persist_and_publish_agent_chunk(ch) -> None:
+    # 1) SSE
+    _agent_sse_publish(
+        ch.session_id,
+        {
+            "type": "chunk",
+            "request_id": ch.request_id,
+            "session_id": ch.session_id,
+            "ok": bool(ch.ok),
+            "text": ch.text,
+            "done": bool(ch.done),
+            "error": ch.error,
+        },
+    )
+
+    # 2) DB 持久化（assistant 消息按 request_id 增量追加）
+    with session_scope() as s:
+        msg = (
+            s.query(AgentMessage)
+            .filter(AgentMessage.session_id == ch.session_id)
+            .filter(AgentMessage.request_id == ch.request_id)
+            .filter(AgentMessage.role == "assistant")
+            .order_by(AgentMessage.id.desc())
+            .first()
+        )
+        if msg is None:
+            msg = AgentMessage(
+                session_id=ch.session_id,
+                request_id=ch.request_id,
+                role="assistant",
+                content="",
+                done=False,
+                error="",
+            )
+            s.add(msg)
+            s.flush()
+
+        if ch.text:
+            msg.content = (msg.content or "") + str(ch.text)
+        if ch.error:
+            msg.error = str(ch.error)
+        if bool(ch.done) or (not bool(ch.ok)):
+            msg.done = True
+        s.add(msg)
+
+        sess = s.query(AgentSession).filter(AgentSession.session_id == ch.session_id).one_or_none()
+        if sess is not None:
+            sess.updated_at = _utcnow()
+            s.add(sess)
+
+
+def _install_agent_chunk_listener_once() -> None:
+    global _AGENT_LISTENER_INSTALLED
+    if _AGENT_LISTENER_INSTALLED:
+        return
+
+    def _on_chunk(ch) -> None:
+        try:
+            asyncio.get_running_loop().create_task(_persist_and_publish_agent_chunk(ch))
+        except RuntimeError:
+            # 没有 event loop 时直接忽略（正常情况下不会发生）
+            pass
+
+    add_agent_chunk_listener(_on_chunk)
+    _AGENT_LISTENER_INSTALLED = True
+
+
+# 在模块加载时即安装监听器：即便测试/部署选择手动启动 gRPC server，AgentChunk 也能被持久化与 SSE 转发。
+_install_agent_chunk_listener_once()
+
+
+# Remote Terminal WS hub（按 terminal_id 组织）。
+_TERM_LOCK = asyncio.Lock()
+_TERM_SUBS: dict[str, set[asyncio.Queue[dict]]]
+_TERM_SUBS = {}
+_TERM_LISTENER_INSTALLED = False
+
+
+async def _term_subscribe(terminal_id: str) -> asyncio.Queue[dict]:
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
+    tid = str(terminal_id or "").strip()
+    async with _TERM_LOCK:
+        _TERM_SUBS.setdefault(tid, set()).add(q)
+    return q
+
+
+async def _term_unsubscribe(terminal_id: str, q: asyncio.Queue[dict]) -> None:
+    tid = str(terminal_id or "").strip()
+    async with _TERM_LOCK:
+        subs = _TERM_SUBS.get(tid)
+        if not subs:
+            return
+        subs.discard(q)
+        if not subs:
+            _TERM_SUBS.pop(tid, None)
+
+
+def _term_publish(terminal_id: str, ev: dict) -> None:
+    tid = str(terminal_id or "").strip()
+    subs = _TERM_SUBS.get(tid)
+    if not subs:
+        return
+    for q in list(subs):
+        try:
+            q.put_nowait(ev)
+        except Exception:
+            pass
+
+
+async def _handle_terminal_output(out) -> None:
+    raw = bytes(out.data or b"")
+    data_b64 = base64.b64encode(raw).decode("ascii") if raw else ""
+
+    _term_publish(
+        out.terminal_id,
+        {
+            "type": "output",
+            "terminal_id": out.terminal_id,
+            "data_b64": data_b64,
+            "closed": bool(out.closed),
+            "error": out.error,
+        },
+    )
+
+    # 持久化输出（用于刷新/重进页面回放）。
+    if raw:
+        try:
+            with session_scope() as s:
+                ts = (
+                    s.query(RemoteTerminalSession)
+                    .filter(RemoteTerminalSession.terminal_id == out.terminal_id)
+                    .one_or_none()
+                )
+                if ts is not None:
+                    s.add(
+                        RemoteTerminalOutput(
+                            space_id=int(ts.space_id),
+                            terminal_id=str(out.terminal_id or ""),
+                            data_b64=data_b64,
+                            nbytes=int(len(raw)),
+                        )
+                    )
+                    s.flush()
+
+                    # 控制体积：每个 terminal 最多保留最近 1MB。
+                    total = (
+                        s.query(text("COALESCE(SUM(nbytes), 0)"))
+                        .select_from(RemoteTerminalOutput)
+                        .filter(RemoteTerminalOutput.terminal_id == out.terminal_id)
+                        .scalar()
+                    )
+                    try:
+                        total = int(total or 0)
+                    except Exception:
+                        total = 0
+
+                    if total > _TERM_HISTORY_MAX_BYTES:
+                        need = int(total - _TERM_HISTORY_MAX_BYTES)
+                        rows = (
+                            s.query(RemoteTerminalOutput.id, RemoteTerminalOutput.nbytes)
+                            .filter(RemoteTerminalOutput.terminal_id == out.terminal_id)
+                            .order_by(RemoteTerminalOutput.id.asc())
+                            .all()
+                        )
+                        del_ids: list[int] = []
+                        freed = 0
+                        for rid, nb in rows:
+                            del_ids.append(int(rid))
+                            freed += int(nb or 0)
+                            if freed >= need:
+                                break
+                        if del_ids:
+                            s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.id.in_(del_ids)).delete(
+                                synchronize_session=False
+                            )
+        except Exception:
+            pass
+
+    if bool(out.closed) or (out.error or ""):
+        with session_scope() as s:
+            ts = (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == out.terminal_id)
+                .one_or_none()
+            )
+            if ts is not None:
+                ts.status = "closed"
+                s.add(ts)
+
+
+def _install_terminal_listener_once() -> None:
+    global _TERM_LISTENER_INSTALLED
+    if _TERM_LISTENER_INSTALLED:
+        return
+
+    def _on_out(out) -> None:
+        try:
+            asyncio.get_running_loop().create_task(_handle_terminal_output(out))
+        except RuntimeError:
+            pass
+
+    add_terminal_output_listener(_on_out)
+    _TERM_LISTENER_INSTALLED = True
+
+
+_install_terminal_listener_once()
+
+
+# Remote Terminal：每个 terminal 最多保留最近 1GB 历史（用于刷新/重进页面回放）。
+# 注意：该值会影响 SQLite 持久化体积与清理频率。
+_TERM_HISTORY_MAX_BYTES = 1024 * 1024 * 1024
+
+# 回放接口单次返回的最大体积（避免把 1GB 直接塞给浏览器/WS）。
+_TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _utcnow() -> dt.datetime:
@@ -125,9 +408,22 @@ def _startup() -> None:
         if "companion_id" not in space_cols:
             conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
 
+        # remote_terminal_sessions 补字段（terminal tab rename）
+        try:
+            term_cols = [
+                r[1]
+                for r in conn.exec_driver_sql("PRAGMA table_info(remote_terminal_sessions)").fetchall()
+            ]
+            if "name" not in term_cols:
+                conn.execute(text("ALTER TABLE remote_terminal_sessions ADD COLUMN name VARCHAR(128) NOT NULL DEFAULT ''"))
+        except Exception:
+            # 表不存在时忽略（首次启动由 create_all 创建）
+            pass
+
 
 @app.on_event("startup")
 async def _startup_companion_grpc() -> None:
+    _install_agent_chunk_listener_once()
     # 测试里可能希望手动控制启动/端口
     if os.environ.get("OPENFOCUS_GRPC_AUTOSTART", "1") == "0":
         return
@@ -581,6 +877,12 @@ def tasks_delete(task_id: int) -> RedirectResponse:
         # 清理该 task 绑定的 AgentSpace（若存在）
         space = s.query(AgentSpace).filter(AgentSpace.task_public_id == t.public_id).one_or_none()
         if space is not None:
+            # 同时清理 Agent 会话/消息（对话持久化属于 AgentSpace 生命周期）
+            sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
+            sess_ids = [ss.session_id for ss in sessions]
+            if sess_ids:
+                s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(synchronize_session=False)
+                s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(synchronize_session=False)
             s.delete(space)
         s.delete(t)
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
@@ -1048,16 +1350,22 @@ def companions_view(request: Request) -> HTMLResponse:
 
 
 def _companion_display_status(c: Companion, *, now: dt.datetime | None = None) -> str:
-    now = now or _utcnow()
-    if (c.status or "").strip() == "pending_certification":
+    """用于 Web/UI 展示的 Companion 状态。
+
+    约束：配对成功后，以 gRPC 长连接是否存在作为 online/offline 的判定依据。
+    - pending_certification: 未完成配对
+    - active: 已配对 + gRPC 在线
+    - offline: 已配对 + gRPC 不在线
+
+    参数 now 保留仅为兼容旧调用方（当前不再基于心跳时间计算）。
+    """
+
+    if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
         return "pending_certification"
-    last = c.last_seen_at
-    if last is None:
-        return "offline"
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=dt.timezone.utc)
-    # 30 秒无心跳即认为 offline（MVP 简化）
-    return "active" if (now - last).total_seconds() <= 30 else "offline"
+
+    cid = int(getattr(c, "id", 0) or 0)
+    online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
+    return "active" if online else "offline"
 
 
 @app.post("/api/companions/register")
@@ -1104,7 +1412,6 @@ def companion_register(payload: dict) -> dict:
 @app.get("/api/companions")
 def companions_list(limit: int = 50) -> dict:
     limit = max(1, min(int(limit or 50), 200))
-    now = _utcnow()
     with session_scope() as s:
         comps = s.query(Companion).order_by(Companion.id.desc()).limit(limit).all()
         ids = [c.id for c in comps]
@@ -1124,12 +1431,62 @@ def companions_list(limit: int = 50) -> dict:
                 "device_id": c.device_id,
                 "name": c.name,
                 "base_url": c.base_url,
-                "status": _companion_display_status(c, now=now),
+                "status": _companion_display_status(c),
                 "last_seen_at": (c.last_seen_at.isoformat() if c.last_seen_at else None),
                 "agent_spaces": spaces_by_comp.get(c.id, []),
             }
         )
     return {"ok": True, "items": items}
+
+
+@app.delete("/api/companions/{companion_id:int}")
+def companion_delete(companion_id: int) -> dict:
+    """删除 Companion。
+
+    行为：
+    - best-effort 断开 gRPC 连接（若在线）
+    - 将关联的 AgentSpace 解绑（companion_id=NULL），避免脏引用
+    - 删除 Companion 记录
+    - 记录事件
+    """
+
+    cid = int(companion_id)
+    if cid <= 0:
+        raise HTTPException(status_code=400, detail="invalid companion_id")
+
+    # 先 best-effort 断开在线连接（真正从 registry 移除由 gRPC stream finally 处理）
+    try:
+        conn = COMPANION_GRPC.registry.get(cid)
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+    unbound = 0
+    device_id = ""
+    with session_scope() as s:
+        c = s.get(Companion, cid)
+        if c is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        device_id = str(c.device_id or "")
+
+        spaces = s.query(AgentSpace).filter(AgentSpace.companion_id == cid).all()
+        unbound = len(spaces)
+        for sp in spaces:
+            sp.companion_id = None
+            s.add(sp)
+
+        s.delete(c)
+        s.add(
+            Event(
+                kind="companion.deleted",
+                agent="openfocus/ui",
+                task_id=None,
+                payload={"companion_id": cid, "device_id": device_id, "unbound_spaces": unbound},
+            )
+        )
+
+    return {"ok": True, "companion_id": cid, "unbound_spaces": unbound}
 
 
 @app.post("/api/companions/{companion_id:int}/pair")
@@ -1159,6 +1516,16 @@ async def companion_pair(companion_id: int, payload: dict) -> dict:
         s.add(c)
 
         device_id = c.device_id
+
+        # 记录一次“提交认证码”的尝试（不落具体 code，避免泄露）
+        s.add(
+            Event(
+                kind="companion.pair.attempted",
+                agent="openfocus/ui",
+                task_id=None,
+                payload={"companion_id": companion_id, "device_id": device_id},
+            )
+        )
 
     # 通过 gRPC 长连接下发配对确认
     conn = COMPANION_GRPC.registry.get(companion_id)
@@ -1200,6 +1567,18 @@ async def companion_pairing_code(companion_id: int) -> dict:
         c = s.get(Companion, companion_id)
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
+        device_id = c.device_id
+
+        # 记录一次“申请配对码”（用户点击认证）
+        s.add(
+            Event(
+                kind="companion.pairing_code.requested",
+                agent="openfocus/ui",
+                task_id=None,
+                payload={"companion_id": companion_id, "device_id": device_id},
+            )
+        )
+
         if _companion_display_status(c) == "offline":
             raise HTTPException(status_code=400, detail="Companion offline")
 
@@ -1222,7 +1601,7 @@ async def companion_choose_directory_proxy(companion_id: int) -> dict:
         c = s.get(Companion, companion_id)
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
         device_id = c.device_id
 
@@ -1344,6 +1723,17 @@ def _event_summary(kind: str, payload: object) -> str:
     if kind == "task.reopened":
         return "已重新打开（从完成状态恢复）"
 
+    if kind == "companion.pairing_code.requested":
+        return "申请配对码"
+    if kind == "companion.pair.attempted":
+        return "提交认证码"
+    if kind == "companion.paired":
+        return "配对成功"
+    if kind == "companion.disconnected":
+        return "失去连接"
+    if kind == "companion.deleted":
+        return "已删除 Companion"
+
     if isinstance(payload, dict):
         msg = payload.get("message")
         if isinstance(msg, str) and msg.strip():
@@ -1417,6 +1807,16 @@ def _event_kind_label(kind: str, payload: object) -> str:
         return "人工确认完成"
     if kind == "task.recommended_prompt.generated":
         return "生成推荐提示词"
+    if kind == "companion.pairing_code.requested":
+        return "Companion 配对"
+    if kind == "companion.pair.attempted":
+        return "Companion 配对"
+    if kind == "companion.paired":
+        return "Companion 配对"
+    if kind == "companion.disconnected":
+        return "Companion 连接"
+    if kind == "companion.deleted":
+        return "Companion 管理"
     return kind
 
 
@@ -1577,12 +1977,50 @@ def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict
 
 
 @app.delete("/api/tasks/{task_public_id}/agent_space")
-def delete_agent_space(task_public_id: str) -> dict:
+async def delete_agent_space(task_public_id: str) -> dict:
+    # 释放 AgentSpace 时：尽力清理所有远端资源（Remote Terminal），并删除 OpenFocus 侧记录。
     with session_scope() as s:
         space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
         if space is None:
             return {"ok": True}
+
+        comp = None
+        if getattr(space, "companion_id", None):
+            comp = s.get(Companion, int(space.companion_id))
+
+        sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
+        sess_ids = [ss.session_id for ss in sessions]
+
+        terms = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.space_id == space.id).all()
+        term_ids = [t.terminal_id for t in terms]
+
+    # best-effort stop on Companion
+    cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
+    conn = COMPANION_GRPC.registry.get(cid) if cid else None
+    if conn is not None and term_ids:
+        async def _stop_one(tid: str) -> None:
+            try:
+                await conn.request_terminal_stop(terminal_id=str(tid), timeout_seconds=5.0)
+            except Exception:
+                # Companion 离线/失败时允许终端丢失；OpenFocus 侧仍清理记录。
+                pass
+
+        await asyncio.gather(*[_stop_one(tid) for tid in term_ids], return_exceptions=True)
+
+    with session_scope() as s:
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        if space is None:
+            return {"ok": True}
+
+        if sess_ids:
+            s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(synchronize_session=False)
+            s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(synchronize_session=False)
+
+        # 先清理终端输出日志，再清理 session 元信息
+        s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.space_id == space.id).delete(synchronize_session=False)
+        s.query(RemoteTerminalSession).filter(RemoteTerminalSession.space_id == space.id).delete(synchronize_session=False)
         s.delete(space)
+
     return {"ok": True}
 
 
@@ -1599,7 +2037,7 @@ async def agent_space_files_list(space_id: int, path: str = "") -> dict:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -1639,7 +2077,7 @@ async def agent_space_files_read(space_id: int, path: str) -> dict:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -1675,7 +2113,7 @@ async def agent_space_files_raw(space_id: int, path: str) -> Response:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if _companion_display_status(c) != "active" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -1691,3 +2129,605 @@ async def agent_space_files_raw(space_id: int, path: str) -> Response:
         raise _map_companion_files_error(e)
 
     return Response(content=bytes(res.data), media_type=(res.mime or "application/octet-stream"))
+
+
+def _openfocus_base_url(request: Request) -> str:
+    try:
+        return str(request.base_url).rstrip("/")
+    except Exception:
+        return "http://127.0.0.1:8001"
+
+
+def _inject_openfocus_prompt(*, base_url: str, task_public_id: str, session_id: str, user_prompt: str) -> str:
+    # 轻量注入：每次 send 时拼接，避免依赖 agent 侧的“系统 prompt”能力。
+    head = (
+        "你在 OpenFocus 的 AgentSpace 中工作。\n"
+        f"taskId={task_public_id}\n"
+        f"agentSessionId={session_id}\n"
+        f"openfocusBaseUrl={base_url}\n"
+        "执行过程中请持续上报进度：POST /api/agent/events；最终结果可用 POST /api/skills/focus_report。\n"
+        "若你支持 OpenFocus 的 focus_report skill，请优先使用 skill 上报。\n"
+        "---\n"
+    )
+    return head + str(user_prompt or "")
+
+
+def _load_space_and_optional_companion(space_id: int) -> tuple[AgentSpace, Companion | None]:
+    with session_scope() as s:
+        sp = s.get(AgentSpace, int(space_id))
+        if sp is None:
+            raise HTTPException(status_code=404, detail="AgentSpace not found")
+        comp = None
+        if getattr(sp, "companion_id", None):
+            comp = s.get(Companion, int(sp.companion_id))
+        return sp, comp
+
+
+def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
+    if comp is None:
+        raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
+    if (comp.status or "").strip() == "pending_certification" or not (comp.auth_token or "").strip():
+        raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+    conn = COMPANION_GRPC.registry.get(int(comp.id))
+    if conn is None:
+        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+    return conn
+
+
+@app.get("/api/agent_spaces/{space_id}/terminals")
+def terminals_list(space_id: int) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    with session_scope() as s:
+        terms = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == int(sp.id))
+            .filter(RemoteTerminalSession.status != "closed")
+            .order_by(RemoteTerminalSession.id.asc())
+            .all()
+        )
+
+    cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
+    online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
+    return {
+        "ok": True,
+        "companion": {
+            "id": cid or None,
+            "status": _companion_display_status(comp) if comp is not None else None,
+            "online": online,
+        },
+        "terminals": [
+            {
+                "terminal_id": t.terminal_id,
+                "name": (t.name or ""),
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if hasattr(t.created_at, "isoformat") else str(t.created_at),
+            }
+            for t in terms
+        ],
+    }
+
+
+@app.post("/api/agent_spaces/{space_id}/terminals/new")
+async def terminals_new(space_id: int) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+
+    terminal_id = str(uuid.uuid4())
+    try:
+        res = await conn.request_terminal_start(terminal_id=terminal_id, root_path=str(sp.root_path or ""), timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+
+    real_tid = (res.terminal_id or "").strip() or terminal_id
+
+    # 默认 name：terminal / terminal-2 / terminal-3 ...（同一 space 下不重复）
+    with session_scope() as s:
+        existing = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == int(sp.id))
+            .all()
+        )
+        used = {str((t.name or "").strip()) for t in existing if str((t.name or "").strip())}
+        base = "terminal"
+        name = base
+        if name in used:
+            i = 2
+            while True:
+                cand = f"{base}-{i}"
+                if cand not in used:
+                    name = cand
+                    break
+                i += 1
+
+    with session_scope() as s:
+        t = RemoteTerminalSession(
+            space_id=int(sp.id),
+            task_public_id=str(sp.task_public_id or ""),
+            companion_id=int(getattr(comp, "id", 0) or 0) if comp is not None else None,
+            root_path=str(sp.root_path or ""),
+            name=name,
+            terminal_id=real_tid,
+            status="active",
+        )
+        s.add(t)
+        s.flush()
+
+    return {"ok": True, "terminal": {"terminal_id": real_tid, "name": name}}
+
+
+@app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/rename")
+async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> dict:
+    sp, _ = _load_space_and_optional_companion(space_id)
+
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+
+    raw_name = str((payload or {}).get("name") or "").strip()
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="name 不能为空")
+    if len(raw_name) > 128:
+        raise HTTPException(status_code=400, detail="name 过长（<=128）")
+
+    with session_scope() as s:
+        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+
+        dup = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == int(sp.id))
+            .filter(RemoteTerminalSession.terminal_id != tid)
+            .filter(RemoteTerminalSession.name == raw_name)
+            .one_or_none()
+        )
+        if dup is not None:
+            raise HTTPException(status_code=400, detail="name 已存在")
+
+        t.name = raw_name
+        s.add(t)
+
+    return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
+
+
+@app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/close")
+async def terminals_close(space_id: int, terminal_id: str) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+
+    with session_scope() as s:
+        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+
+    # best-effort stop on Companion (offline 也允许 close：只保证 OpenFocus 侧不再展示)
+    cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
+    conn = COMPANION_GRPC.registry.get(cid) if cid else None
+    if conn is not None:
+        try:
+            await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
+        except Exception:
+            pass
+
+    with session_scope() as s:
+        # 关闭即删除记录（避免刷新后重新出现 tab）
+        s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).delete(
+            synchronize_session=False
+        )
+        s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.terminal_id == tid).delete(
+            synchronize_session=False
+        )
+
+    return {"ok": True}
+
+
+@app.get("/api/agent_spaces/{space_id}/terminals/{terminal_id}/history")
+def terminals_history(space_id: int, terminal_id: str, max_bytes: int = _TERM_HISTORY_PUBLIC_MAX_BYTES) -> dict:
+    sp, _ = _load_space_and_optional_companion(space_id)
+
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+
+    # 对外回放要限流：最多允许回放 _TERM_HISTORY_PUBLIC_MAX_BYTES。
+    max_bytes = max(1024, min(int(max_bytes or 0), _TERM_HISTORY_PUBLIC_MAX_BYTES))
+
+    with session_scope() as s:
+        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+
+        rows = (
+            s.query(RemoteTerminalOutput)
+            .filter(RemoteTerminalOutput.terminal_id == tid)
+            .order_by(RemoteTerminalOutput.id.desc())
+            .all()
+        )
+
+    def _slice_from_last_sync_point(data: bytes) -> tuple[bytes, bool, str]:
+        """尽量从“可重建屏幕”的同步点开始回放。
+
+        主要面向 TUI（例如 coco）：如果回放从半截控制序列/半截屏幕状态开始，xterm 很容易出现光标错位/残留字符。
+        这里在最后一段历史里，找最后一次进入 alternate screen/清屏/重置的位置，从那里开始截取。
+        """
+
+        b = bytes(data or b"")
+        if not b:
+            return b, False, ""
+
+        markers: list[tuple[bytes, str]] = [
+            (b"\x1b[?1049h", "alt_screen"),
+            (b"\x1b[?1047h", "alt_screen"),
+            (b"\x1b[?47h", "alt_screen"),
+            (b"\x1bc", "reset"),
+            (b"\x1b[2J", "clear"),
+        ]
+        best = -1
+        why = ""
+        for pat, tag in markers:
+            i = b.rfind(pat)
+            if i > best:
+                best = i
+                why = tag
+        if best <= 0:
+            return b, False, ""
+        return b[best:], True, why
+
+    buf: list[bytes] = []
+    total = 0
+    truncated = False
+    for r in rows:
+        try:
+            b = base64.b64decode(str(r.data_b64 or ""))
+        except Exception:
+            b = b""
+        if not b:
+            continue
+        if total + len(b) > max_bytes:
+            truncated = True
+            break
+        buf.append(b)
+        total += len(b)
+    buf.reverse()
+    raw = b"".join(buf) if buf else b""
+
+    sliced, sliced_ok, sliced_reason = _slice_from_last_sync_point(raw)
+    if sliced_ok:
+        raw = sliced
+
+    out_b64 = base64.b64encode(raw).decode("ascii") if raw else ""
+    return {
+        "ok": True,
+        "terminal_id": tid,
+        "data_b64": out_b64,
+        "truncated": truncated,
+        "sync_sliced": bool(sliced_ok),
+        "sync_reason": str(sliced_reason or ""),
+    }
+
+
+@app.websocket("/api/agent_spaces/{space_id}/terminals/{terminal_id}/ws")
+async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) -> None:
+    await websocket.accept()
+    sp, comp = _load_space_and_optional_companion(int(space_id))
+    try:
+        conn = _require_companion_online(sp=sp, comp=comp)
+    except HTTPException:
+        # Companion 不可用：提示客户端稍后重试（避免前端误判为“已连接可用”）。
+        await websocket.close(code=1013)
+        return
+
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        await websocket.close(code=1008)
+        return
+
+    with session_scope() as s:
+        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        if t is None or int(t.space_id) != int(sp.id):
+            await websocket.close(code=1008)
+            return
+
+    q = await _term_subscribe(tid)
+
+    async def _sender() -> None:
+        while True:
+            ev = await q.get()
+            await websocket.send_json(ev)
+
+    async def _receiver() -> None:
+        while True:
+            msg = await websocket.receive_json()
+            if not isinstance(msg, dict):
+                continue
+            typ = str(msg.get("type") or "")
+            if typ == "ping":
+                # keepalive
+                try:
+                    await websocket.send_json({"type": "pong", "ts": int(msg.get("ts") or 0)})
+                except Exception:
+                    pass
+                continue
+            if typ == "input":
+                raw = b""
+                if isinstance(msg.get("data_b64"), str):
+                    try:
+                        raw = base64.b64decode(msg.get("data_b64"))
+                    except Exception:
+                        raw = b""
+                elif isinstance(msg.get("data"), str):
+                    raw = msg.get("data").encode("utf-8")
+                if raw:
+                    try:
+                        await conn.request_terminal_input(terminal_id=tid, data=raw, timeout_seconds=10.0)
+                    except Exception as e:
+                        # Companion 侧 session 可能已丢失（例如 Companion 重启），避免前端进入“立刻断开-重连”死循环。
+                        await websocket.send_json({"type": "error", "error": f"terminal unavailable: {e}"})
+                        await websocket.close(code=4404)
+                        return
+            elif typ == "resize":
+                cols = int(msg.get("cols") or 0)
+                rows = int(msg.get("rows") or 0)
+                if cols > 0 and rows > 0:
+                    try:
+                        await conn.request_terminal_resize(terminal_id=tid, cols=cols, rows=rows, timeout_seconds=10.0)
+                    except Exception as e:
+                        await websocket.send_json({"type": "error", "error": f"terminal unavailable: {e}"})
+                        await websocket.close(code=4404)
+                        return
+
+    sender = asyncio.create_task(_sender(), name=f"term-ws-send:{tid}")
+    receiver = asyncio.create_task(_receiver(), name=f"term-ws-recv:{tid}")
+    try:
+        done, pending = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_EXCEPTION)
+        for tsk in pending:
+            tsk.cancel()
+        for tsk in done:
+            _ = tsk.exception() if tsk.done() else None
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender.cancel()
+        receiver.cancel()
+        await _term_unsubscribe(tid, q)
+
+
+@app.get("/api/agent_spaces/{space_id}/agent/sessions")
+def agent_sessions_list(space_id: int) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    with session_scope() as s:
+        sessions = (
+            s.query(AgentSession)
+            .filter(AgentSession.space_id == int(sp.id))
+            .order_by(AgentSession.id.desc())
+            .all()
+        )
+    cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
+    online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
+    return {
+        "ok": True,
+        "companion": {
+            "id": cid or None,
+            "status": _companion_display_status(comp) if comp is not None else None,
+            "online": online,
+        },
+        "sessions": [
+            {
+                "session_id": ss.session_id,
+                "status": ss.status,
+                "agent_type": ss.agent_type,
+                "created_at": ss.created_at.isoformat() if hasattr(ss.created_at, "isoformat") else str(ss.created_at),
+                "updated_at": ss.updated_at.isoformat() if hasattr(ss.updated_at, "isoformat") else str(ss.updated_at),
+            }
+            for ss in sessions
+        ],
+    }
+
+
+@app.post("/api/agent_spaces/{space_id}/agent/sessions/new")
+async def agent_sessions_new(space_id: int) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+
+    session_id = str(uuid.uuid4())
+    try:
+        res = await conn.request_agent_start(
+            session_id=session_id,
+            root_path=str(sp.root_path or ""),
+            agent_type=str(sp.agent_type or "trae-cli"),
+            task_public_id=str(sp.task_public_id or ""),
+            timeout_seconds=10.0,
+        )
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion Agent 启动失败：{e}")
+
+    real_sid = (res.session_id or "").strip() or session_id
+    with session_scope() as s:
+        ss = AgentSession(
+            session_id=real_sid,
+            space_id=int(sp.id),
+            task_public_id=str(sp.task_public_id or ""),
+            companion_id=int(getattr(comp, "id", 0) or 0) if comp is not None else None,
+            root_path=str(sp.root_path or ""),
+            agent_type=str(sp.agent_type or "trae-cli"),
+            status="active",
+        )
+        s.add(ss)
+        s.flush()
+    return {"ok": True, "session": {"session_id": real_sid}}
+
+
+@app.get("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/messages")
+def agent_session_messages(space_id: int, session_id: str) -> dict:
+    sp, _comp = _load_space_and_optional_companion(space_id)
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    with session_scope() as s:
+        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        if sess is None or int(sess.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Agent session not found")
+        msgs = (
+            s.query(AgentMessage)
+            .filter(AgentMessage.session_id == sid)
+            .order_by(AgentMessage.id.asc())
+            .all()
+        )
+
+    return {
+        "ok": True,
+        "session": {"session_id": sid, "status": sess.status},
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "request_id": m.request_id,
+                "content": m.content,
+                "done": bool(m.done),
+                "error": m.error,
+                "created_at": m.created_at.isoformat() if hasattr(m.created_at, "isoformat") else str(m.created_at),
+            }
+            for m in msgs
+        ],
+    }
+
+
+@app.post("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/terminate")
+async def agent_session_terminate(space_id: int, session_id: str) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    with session_scope() as s:
+        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        if sess is None or int(sess.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Agent session not found")
+
+    try:
+        await conn.request_agent_terminate(session_id=sid, timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion Agent 终止失败：{e}")
+
+    with session_scope() as s:
+        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        if sess is not None:
+            sess.status = "terminated"
+            s.add(sess)
+    return {"ok": True}
+
+
+@app.post("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/send")
+async def agent_session_send(request: Request, space_id: int, session_id: str) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    payload = await request.json()
+    text_in = ""
+    if isinstance(payload, dict):
+        if isinstance(payload.get("text"), str):
+            text_in = payload.get("text")
+        elif isinstance(payload.get("prompt"), str):
+            text_in = payload.get("prompt")
+    user_text = str(text_in or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # 校验 session 归属
+    with session_scope() as s:
+        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        if sess is None or int(sess.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Agent session not found")
+
+        user_msg = AgentMessage(session_id=sid, role="user", content=user_text, request_id="", done=True)
+        s.add(user_msg)
+
+        rid = str(uuid.uuid4())
+        asst_msg = AgentMessage(session_id=sid, role="assistant", content="", request_id=rid, done=False)
+        s.add(asst_msg)
+        s.flush()
+
+    injected = _inject_openfocus_prompt(
+        base_url=_openfocus_base_url(request),
+        task_public_id=str(sp.task_public_id or ""),
+        session_id=sid,
+        user_prompt=user_text,
+    )
+
+    try:
+        await conn.request_agent_send(request_id=rid, session_id=sid, prompt=injected, timeout_seconds=10.0)
+    except CompanionGrpcError as e:
+        # 标记 assistant 消息失败并通过 SSE 通知
+        with session_scope() as s:
+            m = (
+                s.query(AgentMessage)
+                .filter(AgentMessage.session_id == sid)
+                .filter(AgentMessage.request_id == rid)
+                .filter(AgentMessage.role == "assistant")
+                .order_by(AgentMessage.id.desc())
+                .first()
+            )
+            if m is not None:
+                m.done = True
+                m.error = str(e)
+                s.add(m)
+        _agent_sse_publish(
+            sid,
+            {
+                "type": "chunk",
+                "request_id": rid,
+                "session_id": sid,
+                "ok": False,
+                "text": "",
+                "done": True,
+                "error": str(e),
+            },
+        )
+        raise HTTPException(status_code=502, detail=f"Companion Agent 发送失败：{e}")
+
+    return {"ok": True, "request_id": rid}
+
+
+@app.get("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/sse")
+async def agent_session_sse(space_id: int, session_id: str) -> StreamingResponse:
+    sp, _comp = _load_space_and_optional_companion(space_id)
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    with session_scope() as s:
+        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        if sess is None or int(sess.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Agent session not found")
+
+    async def _gen():
+        q = await _agent_sse_subscribe(sid)
+        try:
+            yield "event: hello\n" + "data: " + json.dumps({"session_id": sid}, ensure_ascii=False) + "\n\n"
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                et = str(ev.get("type") or "message")
+                yield "event: " + et + "\n" + "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
+        finally:
+            await _agent_sse_unsubscribe(sid, q)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

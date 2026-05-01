@@ -1,5 +1,58 @@
 {% extends "base.html" %}
 {% block content %}
+  <link rel="stylesheet" href="https://unpkg.com/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=4">
+  <style>
+    .codebox { font-family: var(--mono); font-size: 12px; white-space: pre; overflow: auto; }
+    .code-line { display: flex; gap: 12px; }
+    .code-line:hover { background: rgba(0,229,255,0.05); }
+    .code-ln { width: 5ch; text-align: right; color: rgba(215,255,233,0.40); user-select: none; }
+    .code-tx { flex: 1 1 auto; min-width: 0; }
+
+    /* AgentSpace: resizable 3-column layout (FILES / PREVIEW / TERMINAL) */
+    .agent-space-split {
+      --files-w: 420px;
+      --term-w: 360px;
+      display: grid;
+      grid-template-columns: minmax(220px, var(--files-w)) 10px minmax(320px, 1fr) 10px minmax(320px, var(--term-w));
+      gap: 0;
+      margin-top: 14px;
+      height: calc(100% - 14px);
+      min-height: 0;
+      align-items: stretch;
+    }
+    .agent-space-split > .panel { min-height: 0; }
+    .agent-space-splitter {
+      position: relative;
+      cursor: col-resize;
+      user-select: none;
+      touch-action: none;
+    }
+    .agent-space-splitter::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 2px;
+      transform: translateX(-50%);
+      background: rgba(0,229,255,0.16);
+      border-radius: 999px;
+    }
+    .agent-space-splitter:hover::before {
+      background: rgba(0,229,255,0.55);
+      box-shadow: 0 0 0 3px rgba(0,229,255,0.10);
+    }
+    .agent-space-splitter.dragging::before {
+      background: rgba(0,229,255,0.85);
+      box-shadow: 0 0 0 4px rgba(0,229,255,0.14);
+    }
+    /* Keep original responsive behavior: stack on narrow screens */
+    @media (max-width: 1100px) {
+      .agent-space-split { grid-template-columns: 1fr; height: auto; }
+      .agent-space-splitter { display: none; }
+    }
+  </style>
   <div style="height: 100%; min-height: 0; display: flex; flex-direction: column;">
   <div class="panel pad" style="margin-top: 14px;">
     <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
@@ -18,16 +71,18 @@
     <div class="divider"></div>
 
     {% if space %}
-      <div class="muted">Companion：{% if companion %}{{ companion.name or companion.device_id }}{% else %}{{ space.companion_id }}{% endif %}</div>
-      <div class="muted" style="margin-top: 6px;">工作目录：{{ space.root_path }}</div>
-      <div class="muted" style="margin-top: 6px;">agent：{{ space.agent_type }}</div>
+      <div class="muted" style="display:flex; flex-wrap:wrap; gap: 10px; font-size: 12px; line-height: 1.2;">
+        <span>Companion：{% if companion %}{{ companion.name or companion.device_id }}{% else %}{{ space.companion_id }}{% endif %}</span>
+        <span title="{{ space.root_path|e }}">目录：{{ space.root_path }}</span>
+        <span>agent：{{ space.agent_type }}</span>
+      </div>
     {% else %}
       <div class="muted">尚未创建工作区。请回到任务详情点击“创建工作区”。</div>
     {% endif %}
   </div>
 
   {% if space %}
-  <div class="layout-3" style="flex: 1 1 0; min-height: 0; height: auto; margin-top: 14px;">
+  <div id="agent-space-split" class="agent-space-split" style="flex: 1 1 0; min-height: 0; height: auto;">
     <!-- Col 1: files tree -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
@@ -43,6 +98,8 @@
         </div>
       </div>
     </div>
+
+    <div class="agent-space-splitter" data-split="left" title="拖拽调整 FILES / PREVIEW 宽度"></div>
 
     <!-- Col 2: preview -->
     <div class="panel" style="height:100%; padding:0;">
@@ -60,30 +117,226 @@
       </div>
     </div>
 
-    <!-- Col 3: agent placeholder -->
+    <div class="agent-space-splitter" data-split="right" title="拖拽调整 PREVIEW / TERMINAL 宽度"></div>
+
+    <!-- Col 3: remote terminal -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
         <div class="pad" style="padding: 14px; flex: 0 0 auto;">
           <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <div class="k">AGENT</div>
-            <div class="muted" style="font-size: 12px;">—</div>
+            <div class="k">TERMINAL</div>
+            <div class="muted" style="font-size: 12px;">Remote Terminal</div>
           </div>
         </div>
         <div class="divider"></div>
-        <div class="col-scroll pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
-          <div class="muted">AGENT 对话流将在后续迭代实现。</div>
+
+        <div class="pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
+          <div id="remote-terminal" style="height:100%; min-height:0;"></div>
         </div>
       </div>
     </div>
   </div>
 
+  <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://unpkg.com/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=4"></script>
   <script>
     const SPACE_ID = {{ space.id }};
     const TASK_PUBLIC_ID = "{{ task.public_id|e }}";
 
+    function _layoutStateKey(){
+      return `openfocus.agent_space.layout.${String(SPACE_ID)}`;
+    }
+
+    function _loadLayoutState(){
+      try{
+        const raw = localStorage.getItem(_layoutStateKey());
+        if(!raw) return null;
+        const obj = JSON.parse(raw);
+        return (obj && typeof obj === 'object') ? obj : null;
+      }catch(_){
+        return null;
+      }
+    }
+
+    function _saveLayoutState(st){
+      try{
+        localStorage.setItem(_layoutStateKey(), JSON.stringify(st || {}));
+      }catch(_){ }
+    }
+
+    function _clamp(n, minV, maxV){
+      const x = Number(n);
+      const mn = Number(minV);
+      const mx = Number(maxV);
+      if(!Number.isFinite(x)) return mn;
+      if(x < mn) return mn;
+      if(x > mx) return mx;
+      return x;
+    }
+
+    function _applyLayoutState(st){
+      const root = document.getElementById('agent-space-split');
+      if(!root) return;
+      const filesW = st && Number.isFinite(Number(st.filesW)) ? Number(st.filesW) : null;
+      const termW = st && Number.isFinite(Number(st.termW)) ? Number(st.termW) : null;
+      if(filesW) root.style.setProperty('--files-w', Math.floor(filesW) + 'px');
+      if(termW) root.style.setProperty('--term-w', Math.floor(termW) + 'px');
+    }
+
+    function _currentPxVar(el, name, fallback){
+      try{
+        const v = getComputedStyle(el).getPropertyValue(name).trim();
+        if(v && v.endsWith('px')) return Number(v.slice(0, -2)) || fallback;
+        const x = Number(v);
+        return Number.isFinite(x) ? x : fallback;
+      }catch(_){
+        return fallback;
+      }
+    }
+
+    function attachSplitters(){
+      const root = document.getElementById('agent-space-split');
+      if(!root) return;
+      const splitters = Array.from(root.querySelectorAll('.agent-space-splitter'));
+      if(!splitters.length) return;
+
+      // restore last layout
+      _applyLayoutState(_loadLayoutState());
+
+      const MIN_FILES = 220;
+      const MIN_PREVIEW = 320;
+      const MIN_TERM = 320;
+
+      let dragging = null; // { side, startX, startFilesW, startTermW }
+
+      const onMove = (ev)=>{
+        if(!dragging) return;
+        const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : (ev.touches && ev.touches[0] ? ev.touches[0].clientX : 0);
+        const dx = x - dragging.startX;
+
+        // 移动端拖拽时阻止页面滚动
+        try{ if(ev && ev.cancelable) ev.preventDefault(); }catch(_){ }
+
+        const rootRect = root.getBoundingClientRect();
+        const total = Math.floor(rootRect.width || 0);
+        if(!(total > 0)) return;
+        // total = files + split(10) + preview + split(10) + term
+        const available = total - 20;
+        if(available <= (MIN_FILES + MIN_PREVIEW + MIN_TERM)){
+          return;
+        }
+        const maxFiles = available - MIN_PREVIEW - MIN_TERM;
+        const maxTerm = available - MIN_PREVIEW - MIN_FILES;
+
+        let nextFiles = dragging.startFilesW;
+        let nextTerm = dragging.startTermW;
+        if(dragging.side === 'left'){
+          nextFiles = _clamp(dragging.startFilesW + dx, MIN_FILES, maxFiles);
+        }else{
+          // dragging right splitter: increase term => preview shrinks (dx to left increases term)
+          nextTerm = _clamp(dragging.startTermW - dx, MIN_TERM, maxTerm);
+        }
+        root.style.setProperty('--files-w', Math.floor(nextFiles) + 'px');
+        root.style.setProperty('--term-w', Math.floor(nextTerm) + 'px');
+      };
+
+      const endDrag = ()=>{
+        if(!dragging) return;
+        for(const s of splitters) s.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        try{ document.removeEventListener('mousemove', onMove); }catch(_){ }
+        try{ document.removeEventListener('mouseup', endDrag); }catch(_){ }
+        try{ document.removeEventListener('touchmove', onMove, false); }catch(_){ }
+        try{ document.removeEventListener('touchend', endDrag); }catch(_){ }
+
+        // persist
+        const st = {
+          filesW: _currentPxVar(root, '--files-w', dragging.startFilesW),
+          termW: _currentPxVar(root, '--term-w', dragging.startTermW),
+          ts: Date.now(),
+        };
+        _saveLayoutState(st);
+        dragging = null;
+      };
+
+      const startDrag = (side, ev)=>{
+        // narrow screens: stacked layout, do nothing
+        if(window.matchMedia && window.matchMedia('(max-width: 1100px)').matches) return;
+
+        const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : (ev.touches && ev.touches[0] ? ev.touches[0].clientX : 0);
+        const startFilesW = _currentPxVar(root, '--files-w', 420);
+        const startTermW = _currentPxVar(root, '--term-w', 360);
+        dragging = { side, startX: x, startFilesW, startTermW };
+
+        for(const s of splitters) s.classList.toggle('dragging', String(s.dataset.split||'') === String(side));
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+
+        try{ document.addEventListener('mousemove', onMove); }catch(_){ }
+        try{ document.addEventListener('mouseup', endDrag); }catch(_){ }
+        try{ document.addEventListener('touchmove', onMove, { passive: false }); }catch(_){ }
+        try{ document.addEventListener('touchend', endDrag); }catch(_){ }
+        try{ ev.preventDefault(); }catch(_){ }
+      };
+
+      for(const s of splitters){
+        const side = String(s.dataset.split||'');
+        s.addEventListener('mousedown', (ev)=> startDrag(side, ev));
+        s.addEventListener('touchstart', (ev)=> startDrag(side, ev), { passive: false });
+        // double click to reset
+        s.addEventListener('dblclick', ()=>{
+          root.style.setProperty('--files-w', '420px');
+          root.style.setProperty('--term-w', '360px');
+          _saveLayoutState({ filesW: 420, termW: 360, ts: Date.now() });
+        });
+      }
+    }
+
+    function _previewStateKey(){
+      return `openfocus.agent_space.preview.${String(SPACE_ID)}`;
+    }
+
+    function _loadPreviewState(){
+      try{
+        const raw = localStorage.getItem(_previewStateKey());
+        if(!raw) return null;
+        const obj = JSON.parse(raw);
+        return (obj && typeof obj === 'object') ? obj : null;
+      }catch(_){
+        return null;
+      }
+    }
+
+    function _savePreviewState(st){
+      try{
+        localStorage.setItem(_previewStateKey(), JSON.stringify(st || {}));
+      }catch(_){ }
+    }
+
+    function _guessNameFromPath(relPath){
+      const p = String(relPath||'');
+      const i = p.lastIndexOf('/');
+      return (i >= 0) ? p.slice(i+1) : p;
+    }
+
     function esc(s){
       const x = String(s ?? '');
       return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
+    }
+
+    function renderCodeWithLineNumbers(text){
+      const lines = String(text||'').split(/\r?\n/);
+      let out = '<div class="codebox">';
+      for(let i=0;i<lines.length;i++){
+        out += '<div class="code-line">'
+          + '<span class="code-ln">' + String(i+1) + '</span>'
+          + '<span class="code-tx">' + esc(lines[i]) + '</span>'
+          + '</div>';
+      }
+      out += '</div>';
+      return out;
     }
 
     function isLikelyImage(name){
@@ -189,25 +442,95 @@
     async function openPreview(relPath, name){
       const p = document.getElementById('preview');
       const label = document.getElementById('preview-path');
+      const sc = (p && p.parentElement) ? p.parentElement : null;
+
+      // 记录当前预览文件（用于返回页面时恢复）
+      const _prev = _loadPreviewState();
+      const _same = _prev && String(_prev.path||'') === String(relPath||'');
+      _savePreviewState({
+        path: String(relPath||''),
+        name: String(name||''),
+        scrollTop: _same ? Number(_prev.scrollTop || 0) : 0,
+        topLine: _same ? Number(_prev.topLine || 1) : 1,
+        ts: Date.now(),
+      });
+
       if(label) label.textContent = relPath;
       if(p) p.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
       try{
         if(isLikelyImage(name)){
           const url = `/api/agent_spaces/${SPACE_ID}/files/raw?path=${encodeURIComponent(relPath)}`;
           p.innerHTML = `<img src="${url}" style="max-width:100%; height:auto;" />`;
+          try{ if(sc) sc.scrollTop = 0; }catch(_){ }
           return;
         }
         const data = await fetchJson(`/api/agent_spaces/${SPACE_ID}/files/read?path=${encodeURIComponent(relPath)}`);
         const content = String(data.content || '');
-        if(isLikelyMarkdown(name)){
-          p.innerHTML = '<div class="md">' + renderMarkdownLite(content) + '</div>';
-        }else{
-          p.innerHTML = '<pre style="white-space:pre; overflow:auto;">' + esc(content) + '</pre>';
+        // 预览统一显示行号（包括 Markdown）
+        p.innerHTML = renderCodeWithLineNumbers(content);
+
+        // 若是“恢复同一个文件”，则尽量恢复到之前看到的行号/滚动位置。
+        const st = _loadPreviewState();
+        if(st && String(st.path||'') === String(relPath||'')){
+          const apply = ()=>{
+            try{
+              if(!sc) return;
+              const box = p.querySelector('.codebox');
+              const line0 = box ? box.querySelector('.code-line') : null;
+              const lh = line0 ? (line0.getBoundingClientRect().height || line0.offsetHeight || 0) : 0;
+              const topLine = Number(st.topLine || 0);
+              if(lh > 0 && topLine > 1){
+                sc.scrollTop = Math.max(0, Math.floor((topLine - 1) * lh));
+              }else if(typeof st.scrollTop === 'number' && st.scrollTop > 0){
+                sc.scrollTop = Math.max(0, Math.floor(st.scrollTop));
+              }
+            }catch(_){ }
+          };
+          requestAnimationFrame(()=> requestAnimationFrame(apply));
+          setTimeout(apply, 120);
         }
       }catch(e){
         if(p) p.textContent = '预览失败：' + String(e && e.message ? e.message : e);
       }
     }
+
+    // 监听预览滚动：记住用户看到的行号/位置（用于返回页面恢复）
+    (function attachPreviewScrollRemember(){
+      const p = document.getElementById('preview');
+      const sc = (p && p.parentElement) ? p.parentElement : null;
+      if(!p || !sc) return;
+      let t = null;
+      const handler = ()=>{
+        if(t) return;
+        t = setTimeout(()=>{
+          t = null;
+          const st = _loadPreviewState() || {};
+          const path = String(st.path||'');
+          if(!path) return;
+          let topLine = Number(st.topLine || 1);
+          try{
+            const box = p.querySelector('.codebox');
+            const line0 = box ? box.querySelector('.code-line') : null;
+            const lh = line0 ? (line0.getBoundingClientRect().height || line0.offsetHeight || 0) : 0;
+            if(lh > 0){
+              topLine = Math.max(1, Math.floor(sc.scrollTop / lh) + 1);
+            }
+          }catch(_){ }
+          _savePreviewState({
+            path,
+            name: String(st.name||''),
+            scrollTop: Number(sc.scrollTop || 0),
+            topLine,
+            ts: Date.now(),
+          });
+        }, 180);
+      };
+      sc.addEventListener('scroll', handler, { passive: true });
+      window.addEventListener('pageshow', handler);
+      document.addEventListener('visibilitychange', ()=>{
+        if(document.visibilityState === 'hidden') handler();
+      });
+    })();
 
     async function initTree(){
       const root = document.getElementById('file-tree');
@@ -242,7 +565,28 @@
 
     document.getElementById('tree-refresh')?.addEventListener('click', initTree);
     document.getElementById('space-release')?.addEventListener('click', releaseSpace);
+    attachSplitters();
     initTree();
+
+    // 恢复上次预览的文件与位置
+    (function restorePreview(){
+      const st = _loadPreviewState();
+      if(!st || !st.path) return;
+      const relPath = String(st.path||'');
+      const name = String(st.name||'') || _guessNameFromPath(relPath);
+      // openPreview 内部会在渲染后尝试应用滚动位置
+      openPreview(relPath, name);
+    })();
+
+    try{
+      const el = document.getElementById('remote-terminal');
+      if(el && window.OpenFocusRemoteTerminal && typeof window.OpenFocusRemoteTerminal.mount === 'function'){
+        window.OpenFocusRemoteTerminal.mount(el, { spaceId: SPACE_ID, taskPublicId: TASK_PUBLIC_ID });
+      }
+    }catch(e){
+      console.error(e);
+      try{ alert('终端初始化失败：' + String(e && e.message ? e.message : e)); }catch(_){ }
+    }
   </script>
   {% endif %}
   </div>
