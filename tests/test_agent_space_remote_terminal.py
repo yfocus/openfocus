@@ -75,7 +75,7 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
 
                 r = await client.post(
                     f"/api/tasks/{task_pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(ws), "agent_type": "trae-cli"},
+                    json={"companion_id": cid, "root_path": str(ws)},
                 )
                 assert r.status_code == 200
                 space_id = int(r.json()["space_id"])

@@ -55,6 +55,37 @@ def test_llm_provider_env_openai_takes_precedence(monkeypatch):
     assert p.cfg.model == "gpt-test"
 
 
+def test_llm_provider_can_load_from_dotenv(monkeypatch, tmp_path):
+    # 验证：支持从启动目录（cwd）下的 .env 加载 LLM 配置（不会覆盖已存在 env）。
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "OPENFOCUS_OPENAI_API_KEY=dotenv-key\nOPENFOCUS_OPENAI_MODEL=dotenv-model\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENFOCUS_OPENAI_MODEL", raising=False)
+    # Under pytest, cwd/.env is not auto-loaded; force it via OPENFOCUS_ENV_FILE.
+    monkeypatch.setenv("OPENFOCUS_ENV_FILE", str(tmp_path / ".env"))
+
+    import openfocus.main as m
+
+    # Reset the one-time guard for this test.
+    monkeypatch.setattr(m, "_DOTENV_LOADED", False)
+
+    p, err = m._get_llm_provider_or_error()
+    assert err is None
+    assert p is not None
+    assert p.cfg.api_key == "dotenv-key"
+    assert p.cfg.model == "dotenv-model"
+
+    # Cleanup: avoid leaking env to other tests.
+    os.environ.pop("OPENFOCUS_OPENAI_API_KEY", None)
+    os.environ.pop("OPENFOCUS_OPENAI_MODEL", None)
+
+
 def test_openai_compat_fallback_on_400_removes_tools_and_response_format(monkeypatch):
     import io
     import json

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
   <link rel="stylesheet" href="https://unpkg.com/xterm@5.3.0/css/xterm.css">
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=4">
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=7">
   <style>
     .codebox { font-family: var(--mono); font-size: 12px; white-space: pre; overflow: auto; }
     .code-line { display: flex; gap: 12px; }
@@ -11,13 +11,13 @@
 
     /* AgentSpace: resizable 3-column layout (FILES / PREVIEW / TERMINAL) */
     .agent-space-split {
-      --files-w: 420px;
-      --term-w: 360px;
+      --files-w: 340px;
+      --term-w: 420px;
       display: grid;
       grid-template-columns: minmax(220px, var(--files-w)) 10px minmax(320px, 1fr) 10px minmax(320px, var(--term-w));
       gap: 0;
-      margin-top: 14px;
-      height: calc(100% - 14px);
+      margin-top: 10px;
+      height: calc(100% - 10px);
       min-height: 0;
       align-items: stretch;
     }
@@ -52,45 +52,61 @@
       .agent-space-split { grid-template-columns: 1fr; height: auto; }
       .agent-space-splitter { display: none; }
     }
+
+    .space-actions{ display:flex; gap: 8px; align-items:center; justify-content:flex-end; }
+    .space-btn{
+      padding: 2px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      text-decoration:none;
+      font-size: 14px;
+      line-height: 1.2;
+      background: transparent;
+    }
+    .space-btn:hover{ text-decoration:none; }
+    .space-btn.ok{ border-color: rgba(43,255,183,0.38); background: rgba(43,255,183,0.12); color: rgba(43,255,183,0.92); }
+    .space-btn.ok:hover{ background: rgba(43,255,183,0.16); }
+    .space-btn.danger{ border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); color: rgba(255,59,92,0.92); }
+    .space-btn.danger:hover{ background: rgba(255,59,92,0.14); }
   </style>
   <div style="height: 100%; min-height: 0; display: flex; flex-direction: column;">
-  <div class="panel pad" style="margin-top: 14px;">
+  <div class="panel pad" style="margin-top: 10px; padding: 10px 12px;">
     <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
-      <div>
-        <div class="k">AGENT SPACE</div>
-        <div style="margin-top: 6px; font-size: 14px;">{{ task.title }}</div>
-        <div class="muted" style="margin-top: 6px;">taskId {{ task.public_id }}{% if goal %} · goal {{ goal.content }}{% endif %}</div>
+      {% set _companion_name = (companion.name or companion.device_id) if companion else (space.companion_id if space else '') %}
+      <div style="min-width: 0;">
+        <div style="font-size: 14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+          {% if goal %}
+            <a href="/goals?goal={{ goal.id }}" class="btn-ghost" role="button" style="padding: 0;">{{ goal.content }}</a>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+          | <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button" style="padding: 0;">{{ task.title }}</a>
+          | <span id="space-task-id">{{ task.public_id }}</span>
+          <button type="button" class="btn-ghost" id="space-copy-task" title="复制 Task ID" style="padding: 2px 8px;">copy</button>
+          | {{ _companion_name }}
+        </div>
       </div>
-      <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
-        <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button">返回 Dashboard</a>
+      <div class="space-actions">
+        <a href="/goals?task={{ task.public_id }}" class="space-btn ok" role="button">Task</a>
         {% if space %}
-          <button type="button" class="btn-danger" id="space-release">释放工作区</button>
+          <button type="button" class="space-btn danger" id="space-release">Cleanup</button>
         {% endif %}
       </div>
     </div>
     <div class="divider"></div>
 
-    {% if space %}
-      <div class="muted" style="display:flex; flex-wrap:wrap; gap: 10px; font-size: 12px; line-height: 1.2;">
-        <span>Companion：{% if companion %}{{ companion.name or companion.device_id }}{% else %}{{ space.companion_id }}{% endif %}</span>
-        <span title="{{ space.root_path|e }}">目录：{{ space.root_path }}</span>
-        <span>agent：{{ space.agent_type }}</span>
-      </div>
-    {% else %}
+    {% if not space %}
       <div class="muted">尚未创建工作区。请回到任务详情点击“创建工作区”。</div>
     {% endif %}
   </div>
 
   {% if space %}
   <div id="agent-space-split" class="agent-space-split" style="flex: 1 1 0; min-height: 0; height: auto;">
-    <!-- Col 1: files tree -->
+    <!-- Col 1: context/files tree -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
         <div class="pad" style="padding: 14px; flex: 0 0 auto;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <div class="k">FILES</div>
-            <button type="button" class="btn-ghost" id="tree-refresh">刷新</button>
-          </div>
+          <div class="muted" style="font-size: 12px;" title="{{ space.root_path|e }}">{{ space.root_path }}</div>
         </div>
         <div class="divider"></div>
         <div class="col-scroll pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
@@ -101,13 +117,13 @@
 
     <div class="agent-space-splitter" data-split="left" title="拖拽调整 FILES / PREVIEW 宽度"></div>
 
-    <!-- Col 2: preview -->
+    <!-- Col 2: editor/preview -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
         <div class="pad" style="padding: 14px; flex: 0 0 auto;">
           <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
-            <div class="k">PREVIEW</div>
-            <div class="muted" id="preview-path" style="font-size: 12px;"></div>
+            <div class="muted" id="preview-name" style="font-size: 12px;">—</div>
+            <div class="muted" id="preview-path" style="display:none;"></div>
           </div>
         </div>
         <div class="divider"></div>
@@ -119,17 +135,9 @@
 
     <div class="agent-space-splitter" data-split="right" title="拖拽调整 PREVIEW / TERMINAL 宽度"></div>
 
-    <!-- Col 3: remote terminal -->
+    <!-- Col 3: agent/terminal -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
-        <div class="pad" style="padding: 14px; flex: 0 0 auto;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <div class="k">TERMINAL</div>
-            <div class="muted" style="font-size: 12px;">Remote Terminal</div>
-          </div>
-        </div>
-        <div class="divider"></div>
-
         <div class="pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
           <div id="remote-terminal" style="height:100%; min-height:0;"></div>
         </div>
@@ -139,10 +147,20 @@
 
   <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=4"></script>
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=7"></script>
   <script>
     const SPACE_ID = {{ space.id }};
     const TASK_PUBLIC_ID = "{{ task.public_id|e }}";
+
+    // copy task id
+    (function(){
+      const btn = document.getElementById('space-copy-task');
+      if(!btn) return;
+      btn.addEventListener('click', async ()=>{
+        try{ await navigator.clipboard.writeText(String(TASK_PUBLIC_ID||'')); toast('已复制'); }
+        catch(_){ toast('复制失败'); }
+      });
+    })();
 
     function _layoutStateKey(){
       return `openfocus.agent_space.layout.${String(SPACE_ID)}`;
@@ -287,9 +305,9 @@
         s.addEventListener('touchstart', (ev)=> startDrag(side, ev), { passive: false });
         // double click to reset
         s.addEventListener('dblclick', ()=>{
-          root.style.setProperty('--files-w', '420px');
-          root.style.setProperty('--term-w', '360px');
-          _saveLayoutState({ filesW: 420, termW: 360, ts: Date.now() });
+          root.style.setProperty('--files-w', '340px');
+          root.style.setProperty('--term-w', '420px');
+          _saveLayoutState({ filesW: 340, termW: 420, ts: Date.now() });
         });
       }
     }
@@ -442,6 +460,7 @@
     async function openPreview(relPath, name){
       const p = document.getElementById('preview');
       const label = document.getElementById('preview-path');
+      const nameEl = document.getElementById('preview-name');
       const sc = (p && p.parentElement) ? p.parentElement : null;
 
       // 记录当前预览文件（用于返回页面时恢复）
@@ -456,6 +475,7 @@
       });
 
       if(label) label.textContent = relPath;
+      if(nameEl) nameEl.textContent = name ? String(name||'') : _guessNameFromPath(relPath);
       if(p) p.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
       try{
         if(isLikelyImage(name)){

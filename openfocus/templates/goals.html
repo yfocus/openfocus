@@ -1,18 +1,256 @@
 {% extends "base.html" %}
 {% block content %}
   <div class="layout-3" id="dashboard">
+    <style>
+      /* Dashboard layout & style (match whiteboard design) */
+      #dashboard.layout-3{
+        grid-template-columns: 300px 1fr 320px;
+        gap: 16px;
+        margin-top: 10px;
+        height: calc(100% - 10px);
+      }
+      #dashboard .dash-col{
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      #dashboard .panel{
+        border-radius: 10px;
+        border-color: rgba(255,255,255,0.16);
+        background: rgba(0,0,0,1);
+      }
+      #dashboard .divider{ border-color: rgba(255,255,255,0.10); }
+
+      #dashboard .wb-title{
+        font-size: 20px;
+        font-weight: 700;
+        color: rgba(255,191,102,0.95);
+        letter-spacing: 0.2px;
+      }
+      #dashboard .wb-sub{ color: rgba(255,255,255,0.55); font-size: 12px; }
+
+      /* Left list */
+      #dashboard #left-col{ padding: 0 2px; }
+      #dashboard .goal-controls{ display:flex; gap: 8px; align-items:flex-end; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.18); border-radius: 10px; background: transparent; }
+      #dashboard .goal-controls label{ font-size: 10px; color: rgba(215,255,233,0.55); }
+      #dashboard .goal-controls select{ width:auto; padding: 6px 8px; font-size: 12px; border-radius: 10px; }
+      #dashboard #goal-list{ display:flex; flex-direction:column; gap: 12px; }
+      #dashboard .goal-card{ margin: 0; cursor: pointer; border: 1px solid rgba(255,255,255,0.18); background: transparent; }
+      #dashboard .goal-head{ display:flex; align-items:center; gap: 10px; }
+      #dashboard .goal-head .gname{ flex: 1; min-width: 0; color: rgba(255,209,102,0.92); font-size: 13px; }
+      #dashboard .goal-head .gname strong{ font-weight: 700; }
+      #dashboard .goal-card.done .goal-head .gname{ color: rgba(255,255,255,0.55); }
+      #dashboard .goal-card.done:hover .gname{ text-decoration: none; color: rgba(255,255,255,0.55); }
+      #dashboard .goal-head .gmeta{ display:flex; gap: 8px; align-items:center; }
+      #dashboard .goal-head .ratio{ font-size: 12px; color: rgba(255,255,255,0.72); }
+      #dashboard .status-dot{ width: 9px; height: 9px; border-radius: 999px; display:inline-block; border: 1px solid rgba(255,255,255,0.20); }
+      #dashboard .status-dot.green{ background: rgba(71,255,181,0.85); }
+      #dashboard .status-dot.red{ background: rgba(255,59,92,0.85); }
+      #dashboard .status-dot.gray{ background: rgba(255,255,255,0.30); }
+
+      #dashboard .task-bullets{ display:flex; flex-direction:column; gap: 6px; }
+      #dashboard .task-bullet{ display:flex; align-items:center; gap: 10px; padding: 6px 8px; border-radius: 8px; }
+      #dashboard .task-bullet:hover{ background: transparent; }
+      #dashboard .task-mark{ width: 8px; height: 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.24); }
+      #dashboard .task-mark.todo{ background: transparent; }
+      #dashboard .task-mark.in_progress{ background: rgba(255,191,102,0.80); }
+      #dashboard .task-mark.done{ background: rgba(71,255,181,0.85); }
+      #dashboard .task-bullet .tname{ flex:1; min-width:0; text-align:left; padding:0; border:0; background:transparent; color: rgba(255,255,255,0.90); font-size: 12px; }
+      #dashboard .task-bullet:hover .tname,
+      #dashboard .goal-card:hover .gname{ text-decoration: underline; color: rgba(0,229,255,0.92); }
+
+      /* Center detail */
+      #dashboard .detail-wrap{ position: relative; }
+      #dashboard .detail-head{ display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
+      #dashboard .detail-actions{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
+      #dashboard .detail-actions > form{ display:inline-flex; align-items:center; margin:0; }
+      #dashboard .detail-actions > button,
+      #dashboard .detail-actions > a,
+      #dashboard .detail-actions form > button{ display:inline-flex; align-items:center; }
+      #dashboard .detail-actions .btn-danger{ padding: 8px 12px; }
+      #dashboard .detail-meta{ margin-top: 8px; display:flex; gap: 10px; flex-wrap:wrap; color: rgba(255,255,255,0.70); font-size: 12px; }
+      #dashboard .detail-body{ margin-top: 12px; display:grid; grid-template-columns: 1fr 110px; gap: 12px; min-height: 0; }
+      #dashboard .detail-nav{ border-left: 1px solid rgba(255,255,255,0.10); padding-left: 12px; display:flex; flex-direction:column; gap: 10px; }
+      #dashboard .detail-nav button{ width: 100%; text-align:right; padding: 6px 0; border:0; background: transparent; color: rgba(255,255,255,0.70); cursor:pointer; }
+      #dashboard .detail-nav button.active{ color: rgba(255,255,255,0.95); }
+      /* 默认只显示一个区块（避免某些导航/恢复场景下 3 个区块同时出现） */
+      #dashboard .detail-sec{ padding-top: 6px; display: none; }
+      #dashboard .detail-wrap .detail-sec[data-sec="basic"]{ display: block; }
+      #dashboard .detail-sec .sec-title{ color: rgba(255,255,255,0.75); font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; }
+      #dashboard .detail-sec .sec-body{ margin-top: 10px; }
+
+      /* Goal tasks table */
+      #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
+      #dashboard table.wb-table th{ text-align:left; color: rgba(255,191,102,0.85); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); }
+      #dashboard table.wb-table td{ padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.88); }
+      #dashboard table.wb-table tr:hover td{ background: rgba(255,255,255,0.04); }
+      #dashboard .wb-table .tlink{ cursor:pointer; color: rgba(255,255,255,0.92); }
+      #dashboard .wb-table .muted{ color: rgba(255,255,255,0.55); }
+
+      /* Right column */
+      #dashboard .side-title{ display:flex; align-items:center; justify-content:space-between; gap: 10px; }
+      #dashboard .side-title .k{ font-size: 13px; }
+      #dashboard .side-card{
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.18);
+        background: transparent;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #dashboard .side-head{ flex: 0 0 auto; }
+      #dashboard .side-body{ flex: 1 1 auto; min-height: 0; }
+      #dashboard .side-body > .pad{ padding: 12px; }
+
+      /* NextMove (decision panel) */
+      #dashboard .nm-wrap{ display:flex; flex-direction:column; gap: 12px; }
+      #dashboard .nm-card{ border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; background: rgba(255,255,255,0.03); padding: 12px; }
+      #dashboard .nm-k{ color: rgba(255,255,255,0.60); font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; }
+      #dashboard .nm-title{ margin-top: 6px; color: rgba(255,209,102,0.92); font-size: 13px; font-weight: 700; }
+      #dashboard .nm-desc{ margin-top: 8px; color: rgba(215,255,233,0.72); font-size: 12px; white-space: pre-wrap; }
+      #dashboard .nm-actions{ margin-top: 10px; display:flex; gap: 10px; flex-wrap:wrap; }
+      #dashboard .nm-actions .btn-primary{ padding: 8px 12px; border-radius: 10px; }
+      #dashboard .nm-actions .btn-ghost{ padding: 8px 12px; border-radius: 10px; }
+      #dashboard .nm-secondary{ display:flex; gap: 10px; flex-wrap:wrap; margin-top: 8px; }
+
+      /* Events timeline */
+      #dashboard .ev-timeline{ padding: 0; display:flex; flex-direction:column; gap: 12px; }
+      #dashboard .ev-item{
+        display:grid;
+        grid-template-columns: 58px 14px 1fr;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.02);
+      }
+      #dashboard .ev-item:hover{ background: rgba(255,255,255,0.04); }
+      #dashboard .ev-time{ text-align:right; }
+      #dashboard .ev-clock{ font-size: 12px; font-weight: 700; color: rgba(255,209,102,0.92); }
+      #dashboard .ev-ago{ margin-top: 3px; font-size: 11px; color: rgba(215,255,233,0.55); }
+      #dashboard .ev-rail{ position: relative; width: 14px; }
+      #dashboard .ev-rail::before{ content:''; position:absolute; top: 2px; bottom: 2px; left: 6px; width: 2px; background: rgba(255,255,255,0.10); border-radius: 2px; }
+      #dashboard .ev-dot{ position:absolute; top: 10px; left: 3px; width: 8px; height: 8px; border-radius: 999px; background: rgba(255,255,255,0.30); border: 1px solid rgba(255,255,255,0.25); }
+      #dashboard .ev-head{ display:flex; align-items:center; gap: 8px; flex-wrap:wrap; }
+      #dashboard .ev-kind{ color: rgba(255,255,255,0.80); font-size: 12px; }
+      #dashboard .unread-dot{ width: 6px; height: 6px; border-radius: 999px; background: rgba(0,229,255,0.92); display:inline-block; }
+      #dashboard .ev-unread{ box-shadow: inset 0 0 0 1px rgba(0,229,255,0.14); }
+      #dashboard .ev-tone-green .ev-dot{ background: rgba(71,255,181,0.85); border-color: rgba(71,255,181,0.60); }
+      #dashboard .ev-tone-red .ev-dot{ background: rgba(255,59,92,0.85); border-color: rgba(255,59,92,0.60); }
+      #dashboard .ev-tone-yellow .ev-dot{ background: rgba(255,191,102,0.85); border-color: rgba(255,191,102,0.60); }
+      #dashboard .ev-tone-gray .ev-dot{ background: rgba(255,255,255,0.30); border-color: rgba(255,255,255,0.25); }
+
+      #dashboard .side-item{ padding: 10px 12px; border-radius: 10px; }
+      #dashboard .side-item:hover{ background: transparent; }
+      #dashboard .side-item-title{ padding: 0; border: 0; background: transparent; text-align:left; color: rgba(255,209,102,0.92); cursor: pointer; }
+      #dashboard .side-item:hover .side-item-title{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+      #dashboard .md{ margin-top: 6px; white-space: pre-wrap; color: rgba(215,255,233,0.72); font-size: 12px; }
+
+      /* Selection highlight */
+      #dashboard .selected-card{ box-shadow: none; background: rgba(255,255,255,0.04); }
+      #dashboard .nav-item.selected{ border-color: transparent !important; box-shadow: none !important; background: transparent !important; }
+
+      /* Text-only action links (match whiteboard) */
+      #dashboard .action-link{ padding: 0 !important; }
+      #dashboard .detail-actions .btn-ghost{ font-size: 12px; line-height: 1; }
+      #dashboard .detail-actions a.btn-ghost{ font-size: 12px; line-height: 1; }
+      #dashboard .action-link:hover{ text-decoration: underline; }
+      #dashboard .action-danger{ color: rgba(255,59,92,0.92) !important; }
+      #dashboard .action-danger:hover{ color: rgba(255,59,92,1) !important; }
+
+      /* Dialogs (New Goal / New Task / AgentSpace) */
+      dialog.of-dialog{
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 12px;
+        background: rgba(0,0,0,0.70);
+        color: var(--text);
+        box-shadow: 0 22px 70px rgba(0,0,0,0.55);
+      }
+      dialog.of-dialog::backdrop{ background: rgba(0,0,0,0.55); }
+      .dlg-head{ display:flex; align-items:center; justify-content:space-between; gap: 10px; padding: 12px 14px; }
+      .dlg-title{ font-size: 18px; color: rgba(255,209,102,0.92); font-weight: 700; }
+      .dlg-sub{ margin-top: 4px; color: rgba(215,255,233,0.62); font-size: 12px; }
+      .dlg-close{ padding: 0; border: 0; background: transparent; color: rgba(215,255,233,0.72); font-size: 16px; line-height: 1; }
+      .dlg-close:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+      .dlg-body{ padding: 14px; }
+      .dlg-field{ margin-bottom: 12px; }
+      .dlg-label{ display:flex; align-items:center; justify-content:space-between; gap: 10px; color: rgba(215,255,233,0.62); font-size: 12px; margin-bottom: 6px; }
+      .dlg-footer{ display:flex; align-items:center; justify-content:space-between; gap: 10px; flex-wrap:wrap; margin-top: 10px; }
+      .dlg-footer-left{ display:flex; align-items:center; gap: 14px; flex-wrap:wrap; }
+
+      /* Switch (shadcn-like) */
+      .sw{ display:inline-flex; align-items:center; gap: 8px; }
+      .sw-label{ color: rgba(215,255,233,0.72); font-size: 12px; }
+      .sw input{ position:absolute; opacity:0; width:1px; height:1px; }
+      .sw-track{
+        position: relative;
+        width: 40px;
+        height: 22px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.22);
+        background: rgba(255,255,255,0.06);
+        transition: background .15s ease, border-color .15s ease;
+      }
+      .sw-thumb{
+        position:absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.88);
+        transition: transform .15s ease;
+      }
+      .sw input:checked + .sw-track{
+        background: rgba(43,255,183,0.20);
+        border-color: rgba(43,255,183,0.45);
+      }
+      .sw input:checked + .sw-track .sw-thumb{ transform: translateX(18px); background: rgba(43,255,183,0.92); }
+      .sw input:focus-visible + .sw-track{ outline: none; box-shadow: 0 0 0 3px rgba(0,229,255,0.14); }
+      .btn-primary{
+        border: 0;
+        border-radius: 12px;
+        background: rgba(255,209,102,0.92);
+        color: #1b1506;
+        padding: 10px 14px;
+      }
+      .btn-primary:hover{ background: rgba(255,209,102,1); }
+      .toggle-link{ border: 0; background: transparent; padding: 0; color: rgba(215,255,233,0.72); }
+      .toggle-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+    
+    </style>
+
     <!-- Left: goals/tasks tree -->
-    <div class="panel" style="height:100%; padding:0;">
-      <div class="col-scroll pad" id="left-col">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">GOALS</div>
-          <div class="pill">{{ goals|length }}</div>
-        </div>
-        <div class="divider"></div>
+    <div class="dash-col" id="dash-left">
+      <div class="col-scroll" id="left-col">
 
         {% if goals|length == 0 %}
           <div class="muted">还没有目标。</div>
         {% endif %}
+
+        <div class="goal-controls" style="margin-bottom: 12px;"
+          data-init-filter="{{ goal_filter or 'ALL' }}"
+          data-init-sort="{{ goal_sort or 'DDL' }}"
+        >
+          <div style="display:flex; flex-direction:column; gap: 4px;">
+            <label for="goal-filter">Display</label>
+            <select id="goal-filter" aria-label="Goal filter">
+              <option value="ALL">ALL</option>
+              <option value="IN_PROGRESS">IN PROGRESS</option>
+              <option value="EXPIRED">EXPIRED</option>
+              <option value="COMPLETED">COMPLETED</option>
+            </select>
+          </div>
+          <div style="display:flex; flex-direction:column; gap: 4px;">
+            <label for="goal-sort">order</label>
+            <select id="goal-sort" aria-label="Goal sort">
+              <option value="CREATED">create time</option>
+              <option value="COMPLETED_AT">finish time</option>
+              <option value="DDL">DDL</option>
+            </select>
+          </div>
+        </div>
 
         <div id="goal-list" role="tree" aria-label="Goals">
           {% for g in goals %}
@@ -20,115 +258,160 @@
             {% set done_tasks = tasks|selectattr('status','equalto','done')|list %}
             {% set done_n = done_tasks|length %}
             {% set total_n = tasks|length %}
-            {% set pct = ( (done_n * 100) // total_n ) if total_n > 0 else 0 %}
-            {% set goal_status = '已完成' if g.status == 'done' else ('暂停' if g.status == 'paused' else '进行中') %}
+            {% set goal_status = '已完成' if g.status == 'done' else ('已过期' if (today and g.due_date < today) else ('暂停' if g.status == 'paused' else '进行中')) %}
 
-            <div class="panel hint js-goal-card" style="margin: 10px 0;" data-goal-id="{{ g.id }}" role="treeitem" aria-expanded="false">
+            {% set ns = namespace(has_ip=false) %}
+            {% for t0 in tasks %}
+              {% if (task_meta.get(t0.public_id, {}) or {}).get('ui_status') == 'in_progress' %}
+                {% set ns.has_ip = true %}
+              {% endif %}
+            {% endfor %}
+            {% set dot = (
+              'gray' if g.status == 'done'
+              else (
+                'red' if (today and g.due_date < today)
+                else (
+                  'green' if (ns.has_ip or (total_n > 0 and done_n == total_n))
+                  else ('red' if total_n > 0 else 'gray')
+                )
+              )
+            ) %}
+
+            <div class="panel goal-card js-goal-card {{ 'done' if g.status == 'done' else '' }}" data-goal-id="{{ g.id }}" role="treeitem">
               <div class="pad" style="padding: 10px 12px;">
-                <div style="display:flex; align-items:center; gap: 8px;">
-                  <button type="button" class="btn-ghost js-toggle" data-goal="{{ g.id }}" style="padding: 6px 10px;">▸</button>
+                <div class="goal-head">
                   <button
                     type="button"
-                    class="btn-ghost js-select nav-item"
+                    class="js-select nav-item"
                     data-target="goal"
                     data-goal="{{ g.id }}"
                     data-type="goal"
                     data-id="{{ g.id }}"
                     tabindex="-1"
-                    style="text-align:left; padding: 6px 10px; flex:1; min-width: 0;"
+                    style="text-align:left; border:0; background:transparent; padding: 0; flex:1; min-width: 0;"
                   >
-                    {{ goal_display.get(g.id, g.content) }}
+                    <div class="gname" title="{{ g.content }}"><strong>#</strong> {{ goal_display.get(g.id, g.content) }}</div>
                   </button>
-                </div>
-
-                <div style="margin-top: 10px;">
-                  <div class="progress" title="{{ done_n }}/{{ total_n }}">
-                    <i style="--w: {{ pct }}%"></i>
-                  </div>
-                  <div style="margin-top: 8px; display:flex; gap: 8px; flex-wrap:wrap;">
-                    <span class="pill">{{ goal_status }}</span>
-                    <span class="pill">{{ pct }}%</span>
-                    <span class="pill">DDL {{ g.due_date }}</span>
+                  <div class="gmeta">
+                    <span class="ratio">{{ done_n }}/{{ total_n }}</span>
+                    <span class="status-dot {{ dot }}" title="{{ goal_status }}"></span>
                   </div>
                 </div>
-              </div>
-
-              <div class="pad" style="display:none; padding-top: 0;" id="goal-expand-{{ g.id }}" role="group">
-                <div style="display:flex; gap: 8px; flex-wrap:wrap;">
-                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="all">全部</button>
-                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="in_progress">进行中</button>
-                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="todo">待启动</button>
-                  <button type="button" class="btn-ghost js-filter" data-goal="{{ g.id }}" data-filter="done">已完成</button>
-                </div>
-                <div class="divider"></div>
-
-                <div style="display:flex; flex-direction:column; gap: 8px;" data-task-list-for="{{ g.id }}">
-                  {% for t in tasks %}
-                    {% set m = task_meta.get(t.public_id, {}) %}
-                    {% set ui = m.get('ui_status','todo') %}
-                    {% set task_status = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
-                    <div class="panel js-task-card" style="background: rgba(0,0,0,0.18);" data-task-item data-goal="{{ g.id }}" data-task="{{ t.public_id }}" data-status="{{ ui }}">
-                      <div class="pad" style="padding: 10px 12px; display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-                        <button
-                          type="button"
-                          class="btn-ghost js-select nav-item"
-                          data-target="task"
-                          data-task="{{ t.public_id }}"
-                          data-goal="{{ g.id }}"
-                          data-type="task"
-                          data-id="{{ t.public_id }}"
-                          tabindex="-1"
-                          style="text-align:left; padding: 6px 10px; flex:1; min-width: 0;"
-                        >
-                          {{ task_display.get(t.public_id, t.title) }}
-                        </button>
-                        <div style="display:flex; gap: 8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
-                          <span class="dot {{ ui }}" title="{{ task_status }}"></span>
-                        </div>
-                      </div>
-                    </div>
-                  {% endfor %}
-                </div>
-
-                <div class="divider"></div>
               </div>
             </div>
 
             <!-- Detail templates (for center pane) -->
             <template id="detail-goal-{{ g.id }}">
-              <div class="panel pad">
-                <div class="k">目标</div>
-                <div style="font-size: 16px; margin-top: 6px;">{{ g.content }}</div>
-                {% if g.description %}
-                  <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ g.description }}</div>
-                {% endif %}
-
-                <div class="divider"></div>
-                <div style="display:flex; gap: 8px; flex-wrap:wrap;">
-                  <span class="pill">{{ goal_status }}</span>
-                  <span class="pill">DDL {{ g.due_date }}</span>
-                  <span class="pill">已进行 {{ g.created_at|human_since(now=now) }}</span>
+              <div class="pad detail-wrap" data-detail-root>
+                <div class="detail-head">
+                  <div style="min-width:0;">
+                    <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if g.status == 'done' else 'rgba(255,209,102,0.92)' }};">{{ g.content }}</div>
+                    <div class="detail-meta">
+                      <span>DDL {{ g.due_date }}</span>
+                      <span>已进行 {{ g.created_at|human_since(now=now) }}</span>
+                      <span>{{ done_n }}/{{ total_n }}</span>
+                    </div>
+                  </div>
+                  <div class="detail-actions">
+                    {% if g.status != 'done' %}
+                      <button type="button" class="btn-ghost action-link js-open-new-task" data-goal="{{ g.id }}">New Task</button>
+                    {% endif %}
+                    {% if g.status == 'done' %}
+                      <form method="post" action="/goals/{{ g.id }}/reopen" style="margin:0;" class="js-action" data-action="goal_reopen" data-goal="{{ g.id }}">
+                        <button type="submit" class="btn-ghost action-link">Reopen</button>
+                      </form>
+                    {% else %}
+                      <form method="post" action="/goals/{{ g.id }}/done" style="margin:0;" class="js-action" data-action="goal_done" data-goal="{{ g.id }}">
+                        <button type="submit" class="btn-ghost action-link">Finish</button>
+                      </form>
+                    {% endif %}
+                    {% if g.status != 'done' %}
+                      <button type="button" class="btn-ghost action-link js-open-goal-edit"
+                        data-goal="{{ g.id }}"
+                        data-content="{{ g.content }}"
+                        data-description="{{ g.description }}"
+                        data-due="{{ g.due_date }}"
+                      >Edit</button>
+                    {% endif %}
+                    <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
+                      <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
+                    </form>
+                  </div>
                 </div>
-                <div style="margin-top: 12px;" class="progress" title="{{ done_n }}/{{ total_n }}">
-                  <i style="--w: {{ pct }}%"></i>
-                </div>
-                <div class="muted" style="margin-top: 8px;">{{ done_n }}/{{ total_n }}</div>
 
-                <div class="divider"></div>
-                <div style="display:flex; gap: 10px; flex-wrap:wrap;">
-                  <button type="button" class="btn-ghost js-open-new-task" data-goal="{{ g.id }}">新建 Task</button>
-                  <button type="button" class="btn-ghost js-open-goal-edit"
-                    data-goal="{{ g.id }}"
-                    data-content="{{ g.content }}"
-                    data-description="{{ g.description }}"
-                    data-due="{{ g.due_date }}"
-                  >编辑目标</button>
-                  <form method="post" action="/goals/{{ g.id }}/plan/start" style="margin:0;">
-                    <button type="submit" class="btn-ghost">Plan</button>
-                  </form>
-                  <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
-                    <button type="submit" class="btn-danger">删除</button>
-                  </form>
+                <div class="detail-body">
+                  <div style="min-width:0;">
+                    <div class="detail-sec" data-sec="basic">
+                      <div class="sec-title">Basic</div>
+                      <div class="sec-body" style="white-space: pre-wrap;">{{ g.description or '—' }}</div>
+                    </div>
+
+                    <div class="detail-sec" data-sec="tasks">
+                      <div class="sec-title">Tasks</div>
+                      <div class="sec-body">
+                        <table class="wb-table" aria-label="Tasks">
+                          <thead>
+                            <tr>
+                              <th>任务名称</th>
+                              <th>DDL</th>
+                              <th>创建时间</th>
+                              <th>状态</th>
+                              <th>taskId</th>
+                              <th>Agent</th>
+                              <th>Token</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {% for t in tasks %}
+                              {% set m = task_meta.get(t.public_id, {}) %}
+                              {% set ui = m.get('ui_status','todo') %}
+                              {% set st = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
+                              <tr class="js-open-task" data-task="{{ t.public_id }}" data-goal="{{ g.id }}">
+                                <td class="tlink" title="{{ t.title }}">{{ t.title }}</td>
+                                <td class="muted">{{ g.due_date }}</td>
+                                <td class="muted">{{ t.created_at|human_since(now=now) }}</td>
+                                <td>{{ st }}</td>
+                                <td class="muted">{{ t.public_id }}</td>
+                                <td class="muted">—</td>
+                                <td class="muted">—</td>
+                              </tr>
+                            {% endfor %}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div class="detail-sec" data-sec="event">
+                      <div class="sec-title">Event</div>
+                      <div class="sec-body">
+                        {% set gev = (goal_events.get(g.id, []) if goal_events else []) %}
+                        {% if gev|length == 0 %}
+                          <div class="wb-sub">—</div>
+                        {% else %}
+                          <div style="display:flex; flex-direction:column; gap: 10px;">
+                            {% for ev in gev %}
+                              <div class="dash-card">
+                                <div class="pad" style="padding: 10px 12px;">
+                                  <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
+                                    <div class="sec-title" style="text-transform:none; letter-spacing:0;">{{ ev.kind_label or ev.kind }}</div>
+                                    <div class="wb-sub">{{ ev.created_at|human_since(now=now) }}</div>
+                                  </div>
+                                  <div class="wb-sub" style="margin-top: 6px; white-space: pre-wrap;">{{ ev.summary }}</div>
+                                  <div class="wb-sub" style="margin-top: 6px;">{{ ev.source_label or '' }}</div>
+                                </div>
+                              </div>
+                            {% endfor %}
+                          </div>
+                        {% endif %}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="detail-nav" aria-label="Sections">
+                    <button type="button" class="js-detail-tab" data-tab="basic">Basic</button>
+                    <button type="button" class="js-detail-tab" data-tab="tasks">Tasks</button>
+                    <button type="button" class="js-detail-tab" data-tab="event">Event</button>
+                  </div>
                 </div>
               </div>
             </template>
@@ -138,86 +421,99 @@
               {% set ui = m.get('ui_status','todo') %}
               {% set task_status = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
               <template id="detail-task-{{ t.public_id }}">
-                <div class="panel pad">
-                  <div class="k">任务</div>
-                  <div style="font-size: 16px; margin-top: 6px;">{{ t.title }}</div>
-                  {% if t.description %}
-                    <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ t.description }}</div>
-                  {% endif %}
+                <div class="pad detail-wrap" data-detail-root>
+                  <div class="detail-head">
+                    <div style="min-width:0;">
+                      <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if t.status == 'done' else 'rgba(255,255,255,0.92)' }};">{{ t.title }}</div>
+                      <div class="detail-meta">
+                        <span>DDL {{ g.due_date }}</span>
+                        <span>已进行 {{ m.get('elapsed','-') }}</span>
+                        <span>taskId {{ t.public_id }}</span>
+                        <button type="button" class="btn-ghost js-copy-text" data-text="{{ t.public_id }}" style="padding: 2px 6px; font-size: 12px;">copy ⎘</button>
+                      </div>
+                    </div>
 
-                  <div style="margin-top: 10px; display:flex; gap: 8px; flex-wrap:wrap;">
-                    <span class="pill">{{ task_status }}</span>
-                    <span class="pill">DDL {{ g.due_date }}</span>
-                    <span class="pill">已进行 {{ m.get('elapsed','-') }}</span>
-                    <span class="pill">taskId {{ t.public_id }}</span>
-                  </div>
+                  <div class="detail-actions">
+                    <a href="/goals?goal={{ g.id }}" class="btn-ghost action-link" role="button">Goal</a>
+                    {% if t.status != 'done' %}
+                      {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
+                      {% if sp %}
+                          <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost action-link" role="button">Space</a>
+                      {% else %}
+                          <button type="button" class="btn-ghost action-link js-open-agent-space" data-task="{{ t.public_id }}">Create Space</button>
+                      {% endif %}
+                    {% endif %}
 
-                  <div style="margin-top: 12px;" class="progress">
-                    <i style="--w: {{ (m.get('percent', 0) if m.get('percent') is not none else (100 if ui=='done' else 0)) }}%"></i>
-                  </div>
-
-                  <div class="divider"></div>
-                  <div style="display:flex; gap: 10px; flex-wrap:wrap;">
                     {% if t.status != 'done' %}
                       <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;" class="js-action" data-action="done" data-task="{{ t.public_id }}">
-                        <button type="submit">标记完成</button>
+                          <button type="submit" class="btn-ghost action-link">Finish</button>
                       </form>
                     {% else %}
                       <form method="post" action="/tasks/{{ t.id }}/reopen" style="margin:0;" class="js-action" data-action="reopen" data-task="{{ t.public_id }}">
-                        <button type="submit" class="btn-ghost">重新打开</button>
+                          <button type="submit" class="btn-ghost action-link">Reopen</button>
                       </form>
                     {% endif %}
-                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('确认删除该任务？')">
-                      <button type="submit" class="btn-danger">删除</button>
-                    </form>
-                    {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
-                    {% if sp %}
-                      <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost" role="button">进入工作区</a>
-                    {% else %}
-                      <button type="button" class="btn-ghost js-open-agent-space" data-task="{{ t.public_id }}">创建工作区</button>
+
+                    {% if t.status != 'done' %}
+                      <button type="button" class="btn-ghost action-link js-open-task-edit"
+                        data-task-id="{{ t.id }}"
+                        data-task-public-id="{{ t.public_id }}"
+                        data-goal="{{ g.id }}"
+                        data-title="{{ t.title }}"
+                        data-description="{{ t.description }}"
+                      >Edit</button>
                     {% endif %}
-                    <button type="button" class="btn-ghost js-jump-goal" data-goal="{{ g.id }}">查看目标</button>
+
+                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('确认删除该任务？')">
+                      <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
+                    </form>
+                  </div>
                   </div>
 
-                  <div class="divider"></div>
-                  <div class="k">相关事件</div>
-                  {% set evs = (task_events.get(t.public_id, []) if task_events else []) %}
-                  {% if evs|length == 0 %}
-                    <div class="muted" style="margin-top: 8px;">暂无事件上报。</div>
-                  {% else %}
-                    <div style="margin-top: 8px; display:flex; flex-direction:column; gap: 8px;">
-                      {% for ev in evs %}
-                        <div class="panel" style="background: rgba(0,0,0,0.18);">
-                          <div class="pad" style="padding: 10px 12px;">
-                            <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
-                              <div class="k" style="font-size: 12px;">{{ ev.kind_label or ev.kind }}</div>
-                              <div class="muted" style="font-size: 12px;">{{ ev.created_at|human_since(now=now) }}</div>
-                            </div>
-                            <div class="muted" style="margin-top: 6px;">{{ ev.summary }}</div>
-                            <div class="muted" style="margin-top: 6px; font-size: 12px;">{{ ev.source_label or '' }}</div>
-                          </div>
-                        </div>
-                      {% endfor %}
-                    </div>
-                  {% endif %}
-
-                  {% if ui != 'done' %}
-                    <div class="divider"></div>
-                    <details open>
-                      <summary style="cursor:pointer; user-select:none;"><span class="k">RECOMMENDED PROMPT</span></summary>
-                      <div style="height: 10px;"></div>
-                      <textarea id="prompt-{{ t.public_id }}" rows="12" readonly placeholder="点击下方按钮生成推荐提示词。"></textarea>
-                      <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
-                        <button type="button" id="gen-{{ t.public_id }}" class="btn-ghost">生成</button>
-                        <button type="button" class="btn-ghost" id="copy-{{ t.public_id }}">复制</button>
+                  <div class="detail-body">
+                    <div style="min-width:0;">
+                      <div class="detail-sec" data-sec="basic">
+                        <div class="sec-title">Basic</div>
+                        <div class="sec-body" style="white-space: pre-wrap;">{{ t.description or '—' }}</div>
                       </div>
-                      <div id="prompt-err-{{ t.public_id }}" class="muted" style="margin-top: 6px; color: var(--danger);"></div>
 
-                      <div class="divider"></div>
-                      <div class="k">HISTORY</div>
-                      <div id="prompt-history-{{ t.public_id }}" class="muted" style="margin-top: 8px;">—</div>
-                    </details>
-                  {% endif %}
+                      <div class="detail-sec" data-sec="detail">
+                        <div class="sec-title">Detail</div>
+                        <div class="sec-body" style="color: rgba(255,255,255,0.55);">Add text…</div>
+                      </div>
+
+                      <div class="detail-sec" data-sec="event">
+                        <div class="sec-title">Event</div>
+                        <div class="sec-body">
+                          {% set evs = (task_events.get(t.public_id, []) if task_events else []) %}
+                          {% if evs|length == 0 %}
+                            <div class="wb-sub">—</div>
+                          {% else %}
+                            <div style="display:flex; flex-direction:column; gap: 10px;">
+                              {% for ev in evs %}
+                                <div class="dash-card">
+                                  <div class="pad" style="padding: 10px 12px;">
+                                    <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px;">
+                                      <div class="sec-title" style="text-transform:none; letter-spacing:0;">{{ ev.kind_label or ev.kind }}</div>
+                                      <div class="wb-sub">{{ ev.created_at|human_since(now=now) }}</div>
+                                    </div>
+                                    <div class="wb-sub" style="margin-top: 6px; white-space: pre-wrap;">{{ ev.summary }}</div>
+                                    <div class="wb-sub" style="margin-top: 6px;">{{ ev.source_label or '' }}</div>
+                                  </div>
+                                </div>
+                              {% endfor %}
+                            </div>
+                          {% endif %}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="detail-nav" aria-label="Sections">
+                      <button type="button" class="js-detail-tab" data-tab="basic">Basic</button>
+                      <button type="button" class="js-detail-tab" data-tab="detail">Detail</button>
+                      <button type="button" class="js-detail-tab" data-tab="event">Event</button>
+                    </div>
+                  </div>
                 </div>
               </template>
             {% endfor %}
@@ -230,7 +526,7 @@
     <div class="panel" style="height:100%; padding:0;">
       <div class="col-scroll pad" id="detail-col">
         <div id="detail">
-          <div class="panel pad">
+          <div class="pad">
             <div class="k">DETAIL</div>
             <div class="muted" style="margin-top: 8px;">从左侧选择一个目标或任务。</div>
           </div>
@@ -239,108 +535,125 @@
     </div>
 
     <!-- Right: what's next + recent events -->
-    <div class="panel" style="height:100%; padding:0;">
-      <div style="height:100%; min-height:0; display:flex; flex-direction:column; gap: 12px; padding: 14px;">
-        <div class="panel hint" style="flex: 0 0 42%; overflow:auto; min-height:0;">
+    <div class="dash-col" id="dash-right">
+      <div class="side-card" style="flex: 1 1 0;">
+        <div class="side-head">
           <div class="pad" style="padding: 12px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-              <div class="k">WHAT'S NEXT</div>
-              <button type="button" id="next-refresh" class="btn-ghost">刷新</button>
+            <div class="side-title">
+              <div class="k">Next Move</div>
+              <button type="button" id="next-refresh" class="btn-ghost">ref</button>
             </div>
-            <div class="divider"></div>
-            <div id="next-list" class="muted">加载中…</div>
           </div>
         </div>
+        <div class="divider"></div>
+        <div class="side-body col-scroll">
+          <div class="pad muted" id="next-list">loading...</div>
+        </div>
+      </div>
 
-        <div class="panel hint" style="flex: 1 1 auto; overflow:auto; min-height:0;">
+      <div class="side-card" style="flex: 1 1 0;">
+        <div class="side-head">
           <div class="pad" style="padding: 12px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-              <div class="k">RECENT EVENTS</div>
+            <div class="side-title">
+              <div class="k">Events</div>
               <div style="display:flex; gap: 8px; flex-wrap:wrap; justify-content:flex-end;">
-                <button type="button" id="notify-toggle" class="btn-ghost" title="系统通知（浏览器授权后会出现在右上角）">启用系统通知</button>
-                <button type="button" id="ev-refresh" class="btn-ghost">刷新</button>
+                <label class="sw" title="System notification">
+                  <span class="sw-label">Notify</span>
+                  <input type="checkbox" id="notify-toggle" />
+                  <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
+                </label>
+                <button type="button" id="ev-refresh" class="btn-ghost">ref</button>
               </div>
             </div>
-            <div class="divider"></div>
-            <div id="ev-list" class="muted">加载中…</div>
           </div>
+        </div>
+        <div class="divider"></div>
+        <div class="side-body col-scroll">
+          <div class="pad muted" id="ev-list">loading...</div>
         </div>
       </div>
     </div>
   </div>
 
   <!-- New Goal dialog (opened from topbar) -->
-  <dialog id="new-goal-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+  <dialog id="new-goal-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
     <form method="dialog" style="margin:0;">
-      <div class="pad" style="padding: 14px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">NEW GOAL</div>
-          <button type="submit" class="btn-ghost">关闭</button>
+      <div class="dlg-head">
+        <div>
+          <div class="dlg-title">Goal</div>
         </div>
+        <button type="submit" class="dlg-close" aria-label="Close">x</button>
       </div>
     </form>
     <div class="divider"></div>
-    <div class="pad" style="padding: 14px;">
+    <div class="dlg-body">
       <form method="post" action="/goals" id="new-goal-form">
-        <div style="margin-bottom: 10px;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <label class="muted">目标内容（必填）</label>
-            <button type="button" class="btn-ghost" id="goal-gen" title="从详细描述提炼目标">从详细描述生成</button>
+        <div class="dlg-field">
+          <div class="dlg-label">
+            <label for="goal-content">Title</label>
+            <label class="sw" title="Auto generate title from content">
+              <span class="sw-label">Auto</span>
+              <input type="checkbox" id="goal-auto" checked />
+              <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
+            </label>
           </div>
-          <textarea name="content" rows="3" required maxlength="2000" id="goal-content"></textarea>
+          <textarea name="content" rows="2" maxlength="2000" id="goal-content" placeholder="A clear goal title..."></textarea>
         </div>
-        <div style="margin-bottom: 10px;">
-          <label class="muted">详细描述（必填）</label>
-          <textarea name="description" rows="4" required maxlength="4000" id="goal-description"></textarea>
-          <div id="goal-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
-        </div>
-        <div class="row">
-          <div>
-            <label class="muted">DDL</label>
-            <input type="date" name="due_date" value="{{ default_due }}" required />
+        <div class="dlg-field">
+          <div class="dlg-label">
+            <label for="goal-description">Content</label>
           </div>
-          <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
-            <a href="/goals/plan" class="btn-ghost" role="button" style="align-self:center;">用 Plan Mode</a>
-            <button type="submit" id="new-goal-submit">创建</button>
-          </div>
+          <textarea name="description" rows="6" required maxlength="4000" id="goal-description" placeholder="Describe the goal in detail..."></textarea>
         </div>
-        <div id="new-goal-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 创建中…</div>
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="goal-ddl">DDL</label></div>
+          <input id="goal-ddl" type="date" name="due_date" value="{{ default_due }}" required />
+        </div>
+        <div class="dlg-footer">
+          <div class="dlg-footer-left">
+            <label class="sw" title="Use Plan Mode">
+              <span class="sw-label">Plan Mode</span>
+              <input type="checkbox" id="goal-plan-mode" name="plan_mode" value="1" />
+              <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
+            </label>
+          </div>
+          <button type="submit" id="new-goal-submit" class="btn-primary">Save</button>
+        </div>
+        <div id="new-goal-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> <span id="new-goal-hint-text">creating...</span></div>
       </form>
     </div>
   </dialog>
 
   <!-- New Task dialog (opened from goal detail) -->
-  <dialog id="new-task-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+  <dialog id="new-task-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
     <form method="dialog" style="margin:0;">
-      <div class="pad" style="padding: 14px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div>
-            <div class="k">NEW TASK</div>
-            <div class="muted" style="margin-top: 4px;" id="task-goal-hint">请选择一个目标</div>
-          </div>
-          <button type="submit" class="btn-ghost">关闭</button>
+      <div class="dlg-head">
+        <div>
+          <div class="dlg-title">Task</div>
+          <div class="dlg-sub" id="task-goal-hint">Select a goal</div>
         </div>
+        <button type="submit" class="dlg-close" aria-label="Close">x</button>
       </div>
     </form>
     <div class="divider"></div>
-    <div class="pad" style="padding: 14px;">
+    <div class="dlg-body">
       <form method="post" action="" id="new-task-form">
-        <div style="margin-bottom: 10px;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <label class="muted">任务标题（必填）</label>
-            <button type="button" class="btn-ghost" id="task-gen" title="从详细描述提炼任务标题">从详细描述生成</button>
+        <div class="dlg-field">
+          <div class="dlg-label">
+            <label for="task-title">Title</label>
           </div>
-          <textarea name="title" rows="2" required maxlength="512" id="task-title"></textarea>
+          <textarea name="title" rows="2" required maxlength="512" id="task-title" placeholder="A concrete next step..."></textarea>
         </div>
-        <div style="margin-bottom: 10px;">
-          <label class="muted">详细描述（必填）</label>
-          <textarea name="description" rows="5" required maxlength="4000" id="task-description"></textarea>
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="task-description">Content</label></div>
+          <textarea name="description" rows="7" required maxlength="4000" id="task-description" placeholder="What needs to be done, constraints, context..."></textarea>
           <div id="task-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
         </div>
-        <div style="display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
-          <button type="submit" id="new-task-submit">保存</button>
+        <div class="dlg-footer">
+          <span></span>
+          <button type="submit" id="new-task-submit" class="btn-primary">Save</button>
         </div>
-        <div id="new-task-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 保存中…</div>
+        <div id="new-task-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> saving...</div>
       </form>
     </div>
   </dialog>
@@ -386,51 +699,76 @@
     </div>
   </dialog>
 
-  <!-- AgentSpace dialog (create workspace from task detail) -->
-  <dialog id="agent-space-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
+  <!-- Edit Task dialog -->
+  <dialog id="edit-task-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
     <form method="dialog" style="margin:0;">
       <div class="pad" style="padding: 14px;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div>
-            <div class="k">创建工作区</div>
-            <div class="muted" style="margin-top: 4px;" id="agent-space-task-hint">—</div>
-          </div>
+          <div class="k">编辑任务</div>
           <button type="submit" class="btn-ghost">关闭</button>
         </div>
       </div>
     </form>
     <div class="divider"></div>
     <div class="pad" style="padding: 14px;">
-      <div class="muted" style="margin-bottom: 10px;">
-        选择一个本地目录作为该 Task 的工作目录、选择一个 agent 类型，并选择一个 Companion 环境。
+      <form method="post" action="" id="edit-task-form">
+        <div style="margin-bottom: 10px;">
+          <label class="muted" for="task-edit-title">Title（必填）</label>
+          <textarea name="title" rows="2" required maxlength="512" id="task-edit-title"></textarea>
+        </div>
+        <div style="margin-bottom: 10px;">
+          <label class="muted" for="task-edit-description">Content（必填）</label>
+          <textarea name="description" rows="6" required maxlength="4000" id="task-edit-description"></textarea>
+        </div>
+        <div style="display:flex; align-items:center; justify-content:flex-end; gap: 10px;">
+          <button type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- AgentSpace dialog (create workspace from task detail) -->
+  <dialog id="agent-space-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="dlg-head">
+        <div>
+          <div class="dlg-title">Create Space</div>
+          <div class="dlg-sub" id="agent-space-task-hint">—</div>
+        </div>
+        <button type="submit" class="dlg-close" aria-label="Close">x</button>
       </div>
-      <div style="margin-bottom: 10px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <label class="muted">Companion 环境</label>
-          <button type="button" class="btn-ghost" id="agent-space-companion-refresh">刷新</button>
+    </form>
+    <div class="divider"></div>
+    <div class="dlg-body">
+      <div class="muted" style="margin-bottom: 10px;">
+        Pick a local workdir and an online companion.
+      </div>
+
+      <div class="dlg-field">
+        <div class="dlg-label">
+          <label for="agent-space-companion">Companion</label>
+          <button type="button" class="btn-ghost action-link" id="agent-space-companion-refresh">ref</button>
         </div>
         <select id="agent-space-companion" style="width:100%;">
-          <option value="">加载中…</option>
+          <option value="">loading...</option>
         </select>
-        <div class="muted" style="margin-top: 6px; font-size: 12px;">只有“已认证/在线”的 Companion 才能创建工作区。若列表为空或为灰色，请先到 <a href="/companions">Companion</a> 页面完成认证。</div>
+        <div class="muted" style="margin-top: 6px; font-size: 12px;">Only "active" companions can create spaces. Pair one in <a href="/companions">Companion</a>.</div>
       </div>
-      <div style="margin-bottom: 10px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <label class="muted">工作目录（绝对路径）</label>
-          <button type="button" class="btn-ghost" id="agent-space-pick">选择目录</button>
+
+      <div class="dlg-field">
+        <div class="dlg-label">
+          <label for="agent-space-root">Workdir</label>
+          <button type="button" class="btn-ghost action-link" id="agent-space-pick">pick</button>
         </div>
         <input type="text" id="agent-space-root" placeholder="/Users/..." style="width:100%;" />
       </div>
-      <div style="margin-bottom: 10px;">
-        <label class="muted">Agent 类型</label>
-        <select id="agent-space-agent" style="width:100%;">
-          <option value="trae-cli">trae-cli（coco）</option>
-        </select>
+
+      <div class="dlg-footer">
+        <span></span>
+        <button type="button" id="agent-space-create" class="btn-primary">Save</button>
       </div>
-      <div style="display:flex; justify-content:flex-end; gap: 10px; flex-wrap:wrap;">
-        <button type="button" id="agent-space-create">创建并进入</button>
-      </div>
-      <div id="agent-space-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 创建中…</div>
+
+      <div id="agent-space-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> creating...</div>
       <div id="agent-space-err" class="muted" style="margin-top: 10px; color: var(--danger);"></div>
     </div>
   </dialog>
@@ -440,78 +778,42 @@
       selected: { type: null, goalId: null, taskPid: null },
     };
 
+    // Goal list filter/sort (persist + URL)
+    (function(){
+      const box = document.querySelector('.goal-controls');
+      const selFilter = document.getElementById('goal-filter');
+      const selSort = document.getElementById('goal-sort');
+      if(!box || !selFilter || !selSort) return;
+
+      const KEY_F = 'openfocus:dashboard_goal_filter';
+      const KEY_S = 'openfocus:dashboard_goal_sort';
+
+      const initF = String(box.getAttribute('data-init-filter') || 'ALL').trim().toUpperCase();
+      const initS = String(box.getAttribute('data-init-sort') || 'DDL').trim().toUpperCase();
+      selFilter.value = initF;
+      selSort.value = initS;
+      try{ localStorage.setItem(KEY_F, initF); }catch(_){ }
+      try{ localStorage.setItem(KEY_S, initS); }catch(_){ }
+
+      function apply(){
+        const f = String(selFilter.value || 'ALL').trim().toUpperCase();
+        const s = String(selSort.value || 'DDL').trim().toUpperCase();
+        try{ localStorage.setItem(KEY_F, f); }catch(_){ }
+        try{ localStorage.setItem(KEY_S, s); }catch(_){ }
+        const u = new URL(location.href);
+        u.searchParams.set('gfilter', f);
+        u.searchParams.set('gsort', s);
+        // 保留 goal/task 选择态等其它参数
+        try{ location.href = u.toString(); }catch(_){ location.reload(); }
+      }
+
+      selFilter.addEventListener('change', apply);
+      selSort.addEventListener('change', apply);
+    })();
+
     function escapeHtml(s){
       const x = String(s ?? '');
       return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
-    }
-
-    // Recommended Prompt generation state (per task) should survive switching tasks.
-    const PROMPT_STATE = {
-      byTask: {},
-    };
-
-    function _getPromptState(pid){
-      const key = String(pid || '');
-      if(!key) return null;
-      if(!PROMPT_STATE.byTask[key]){
-        PROMPT_STATE.byTask[key] = { status: 'idle', prompt: '', lastError: '' }; // status: idle/loading/done/error
-      }
-      return PROMPT_STATE.byTask[key];
-    }
-
-    function _applyPromptUi(pid){
-      const key = String(pid || '');
-      const st = _getPromptState(key);
-      if(!st) return;
-      const btn = document.getElementById('gen-' + key);
-      const out = document.getElementById('prompt-' + key);
-      if(out && st.prompt && !String(out.value || '').trim()){
-        out.value = String(st.prompt);
-      }
-      if(btn){
-        if(st.status === 'loading'){
-          btn.disabled = true;
-          btn.textContent = '生成中…';
-        }else{
-          btn.disabled = false;
-          btn.textContent = (st.prompt ? '重新生成' : '生成');
-        }
-      }
-      const err = document.getElementById('prompt-err-' + key);
-      if(err){
-        err.textContent = (st.status === 'error' ? (st.lastError || '生成失败') : '');
-      }
-    }
-
-    async function _generatePromptForTask(pid){
-      const key = String(pid || '');
-      const st = _getPromptState(key);
-      if(!st) return;
-      if(st.status === 'loading') return;
-      st.status = 'loading';
-      st.lastError = '';
-      _applyPromptUi(key);
-
-      try{
-        const r = await fetch('/api/tasks/' + encodeURIComponent(key) + '/recommended_prompt');
-        if(!r.ok){
-          const txt = await r.text().catch(()=> '');
-          throw new Error(txt || ('HTTP ' + r.status));
-        }
-        const data = await r.json();
-        const v = (data && data.prompt) ? String(data.prompt) : '';
-        if(!v.trim()) throw new Error('返回为空');
-        st.prompt = v;
-        st.status = 'done';
-        _applyPromptUi(key);
-        toast('已生成');
-        refreshPromptHistory(key, { preferSetCurrent: false });
-      }catch(e){
-        st.status = 'error';
-        st.lastError = String(e && e.message ? e.message : e);
-        _applyPromptUi(key);
-        toast('生成失败');
-      }
     }
 
     function _setTraceBox(box, lines){
@@ -549,15 +851,6 @@
       }finally{
         if(btnEl) btnEl.disabled = false;
       }
-    }
-
-    async function _extractGoalFromDescription(){
-      await _extractGoalFromDescriptionGeneric({
-        descEl: document.getElementById('goal-description'),
-        outEl: document.getElementById('goal-content'),
-        btnEl: document.getElementById('goal-gen'),
-        traceEl: document.getElementById('goal-gen-trace'),
-      });
     }
 
     async function _extractTaskTitleFromDescription(){
@@ -637,6 +930,24 @@
       setTimeout(()=>{ try{ d?.focus(); }catch(_){ } }, 30);
     }
 
+    function _openEditTaskDialog(fromEl){
+      const dlg = document.getElementById('edit-task-dialog');
+      const form = document.getElementById('edit-task-form');
+      const id = String(fromEl?.getAttribute('data-task-id') || '').trim();
+      if(!id){ toast('taskId 缺失'); return; }
+      if(form) form.action = '/tasks/' + encodeURIComponent(id) + '/edit';
+
+      const title = String(fromEl?.getAttribute('data-title') || '');
+      const desc = String(fromEl?.getAttribute('data-description') || '');
+      const t1 = document.getElementById('task-edit-title');
+      const t2 = document.getElementById('task-edit-description');
+      if(t1) t1.value = title;
+      if(t2) t2.value = desc;
+
+      try{ dlg?.showModal(); }catch(_){ }
+      setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
+    }
+
     function setDetail(html){
       const el = document.getElementById('detail');
       if(!el) return;
@@ -648,6 +959,27 @@
       if(!tpl) return false;
       setDetail(tpl.innerHTML);
       return true;
+    }
+
+    function activateDetailTab(root, tab){
+      if(!(root instanceof HTMLElement)) return;
+      const t = String(tab || '').trim();
+      if(!t) return;
+      root.querySelectorAll('.detail-sec').forEach((sec)=>{
+        const k = sec.getAttribute('data-sec') || '';
+        sec.style.display = (k === t) ? 'block' : 'none';
+      });
+      root.querySelectorAll('.js-detail-tab').forEach((btn)=>{
+        const k = btn.getAttribute('data-tab') || '';
+        btn.classList.toggle('active', k === t);
+      });
+    }
+
+    function initDetailTabs(defaultTab){
+      const root = document.querySelector('#detail [data-detail-root]');
+      if(!(root instanceof HTMLElement)) return;
+      // 统一为：只展示一个区块（默认由调用方决定），不再记忆上次 tab。
+      activateDetailTab(root, String(defaultTab || 'basic'));
     }
 
     function updateUrl(params){
@@ -692,6 +1024,7 @@
         setSelectedInList('goal', String(goalId));
         updateUrl({goal: goalId, task: ''});
         try{ localStorage.setItem('openfocus:last_goal', String(goalId)); }catch(_){ }
+        initDetailTabs('tasks');
       }
     }
 
@@ -701,31 +1034,7 @@
         setSelectedInList('task', String(taskPid));
         updateUrl({goal: goalId || '', task: taskPid});
         try{ localStorage.setItem('openfocus:last_task', String(taskPid)); }catch(_){ }
-        _applyPromptUi(String(taskPid));
-        refreshPromptHistory(String(taskPid), { preferSetCurrent: true });
-      }
-    }
-
-    function toggleGoal(goalId){
-      const box = document.getElementById('goal-expand-' + goalId);
-      const btn = document.querySelector('.js-toggle[data-goal="' + goalId + '"]');
-      if(!box || !btn) return;
-      const open = box.style.display !== 'none';
-      box.style.display = open ? 'none' : 'block';
-      btn.textContent = open ? '▸' : '▾';
-      const root = btn.closest('[data-goal-id]');
-      if(root){ root.setAttribute('aria-expanded', open ? 'false' : 'true'); }
-
-      const list = document.querySelector('[data-task-list-for="' + goalId + '"]');
-      if(list){
-        const items = Array.from(list.querySelectorAll('[data-task-item]'));
-        items.sort((a,b)=>{
-          const sa = a.getAttribute('data-status')||'';
-          const sb = b.getAttribute('data-status')||'';
-          const rank = (s)=> s==='in_progress'?0:(s==='todo'?1:(s==='done'?2:3));
-          return rank(sa)-rank(sb);
-        });
-        items.forEach(x=> list.appendChild(x));
+        initDetailTabs('basic');
       }
     }
 
@@ -748,22 +1057,103 @@
       return false;
     }
 
-    function visibleNavItems(){
-      return $$('.nav-item').filter(el => {
+    function _isVisibleEl(el){
+      if(!(el instanceof HTMLElement)) return false;
+      const rects = el.getClientRects();
+      return rects && rects.length > 0;
+    }
+
+    function dashboardFocusableItems(){
+      const root = document.getElementById('dashboard');
+      if(!root) return [];
+      // When dialogs are open, keep arrow keys inside dialog UX.
+      if(document.querySelector('dialog[open]')) return [];
+      const sel = [
+        'a[href]',
+        'button',
+        'input',
+        'textarea',
+        'select',
+        'summary',
+        '[tabindex]',
+      ].join(',');
+      const all = Array.from(root.querySelectorAll(sel));
+      return all.filter((el)=>{
         if(!(el instanceof HTMLElement)) return false;
-        const rect = el.getClientRects();
-        return rect && rect.length > 0;
+        if(el.hasAttribute('disabled')) return false;
+        if(el.getAttribute('aria-disabled') === 'true') return false;
+        if(!_isVisibleEl(el)) return false;
+        return true;
       });
     }
 
-    function currentNavIndex(items){
-      if(STATE.selected.type === 'task' && STATE.selected.taskPid){
-        return items.findIndex(x => x.getAttribute('data-type')==='task' && x.getAttribute('data-id')===STATE.selected.taskPid);
+    function _closestFocusableItem(list, el){
+      if(!el) return null;
+      if(el instanceof HTMLElement){
+        const idx = list.indexOf(el);
+        if(idx >= 0) return el;
+        for(const it of list){
+          if(it && it.contains(el)) return it;
+        }
       }
-      if(STATE.selected.type === 'goal' && STATE.selected.goalId){
-        return items.findIndex(x => x.getAttribute('data-type')==='goal' && x.getAttribute('data-id')===STATE.selected.goalId);
+      return null;
+    }
+
+    function _columnOf(el){
+      if(!(el instanceof HTMLElement)) return 'mid';
+      if(el.closest('#dash-left')) return 'left';
+      if(el.closest('#dash-right')) return 'right';
+      if(el.closest('#detail-col')) return 'mid';
+      return 'mid';
+    }
+
+    function _moveFocusTo(el){
+      if(!(el instanceof HTMLElement)) return;
+      try{ el.focus({preventScroll:true}); }catch(_){ try{ el.focus(); }catch(__){ } }
+      try{ el.scrollIntoView({block:'nearest'}); }catch(_){ }
+      if(el.classList.contains('nav-item') && el.hasAttribute('data-type') && el.hasAttribute('data-id')){
+        selectFromElement(el);
       }
-      return -1;
+    }
+
+    function _moveFocusVertical(dir){
+      const items = dashboardFocusableItems();
+      if(!items.length) return;
+      const active = _closestFocusableItem(items, document.activeElement);
+      let idx = active ? items.indexOf(active) : -1;
+      if(idx < 0){
+        const cur = items.find(x => x.getAttribute && x.getAttribute('tabindex') === '0');
+        idx = cur ? items.indexOf(cur) : -1;
+      }
+      const next = (dir > 0) ? (idx >= 0 ? Math.min(items.length - 1, idx + 1) : 0) : (idx >= 0 ? Math.max(0, idx - 1) : 0);
+      _moveFocusTo(items[next]);
+    }
+
+    function _moveFocusHorizontal(dir){
+      const items = dashboardFocusableItems();
+      if(!items.length) return;
+      const active = _closestFocusableItem(items, document.activeElement);
+      const cur = active || items.find(x => x.getAttribute && x.getAttribute('tabindex') === '0') || items[0];
+      if(!(cur instanceof HTMLElement)) return;
+      const col = _columnOf(cur);
+      const order = ['left','mid','right'];
+      const i = order.indexOf(col);
+      const j = i + (dir > 0 ? 1 : -1);
+      if(j < 0 || j >= order.length) return;
+      const targetCol = order[j];
+      const curRect = cur.getBoundingClientRect();
+      const cy = curRect.top + curRect.height / 2;
+      const cands = items.filter(x => _columnOf(x) === targetCol);
+      if(!cands.length) return;
+      let best = cands[0];
+      let bestD = Infinity;
+      for(const x of cands){
+        const r = x.getBoundingClientRect();
+        const y = r.top + r.height / 2;
+        const d = Math.abs(y - cy);
+        if(d < bestD){ bestD = d; best = x; }
+      }
+      _moveFocusTo(best);
     }
 
     function selectFromElement(el){
@@ -778,46 +1168,27 @@
     document.addEventListener('keydown', (e)=>{
       if(isTypingTarget(e.target)) return;
       if(e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      const items = visibleNavItems();
-      if(!items.length) return;
-      const idx = currentNavIndex(items);
+      if(e.metaKey || e.ctrlKey || e.altKey) return;
 
       if(e.key === 'ArrowDown'){
         e.preventDefault();
-        const n = (idx >= 0 ? Math.min(items.length - 1, idx + 1) : 0);
-        selectFromElement(items[n]);
+        _moveFocusVertical(+1);
         return;
       }
       if(e.key === 'ArrowUp'){
         e.preventDefault();
-        const n = (idx >= 0 ? Math.max(0, idx - 1) : 0);
-        selectFromElement(items[n]);
+        _moveFocusVertical(-1);
         return;
       }
       if(e.key === 'ArrowRight'){
         e.preventDefault();
-        const gid = (STATE.selected.type === 'goal' ? STATE.selected.goalId : STATE.selected.goalId);
-        if(gid){
-          const box = document.getElementById('goal-expand-' + gid);
-          if(box && box.style.display === 'none') toggleGoal(gid);
-        }
+        _moveFocusHorizontal(+1);
         return;
       }
       if(e.key === 'ArrowLeft'){
         e.preventDefault();
-        if(STATE.selected.type === 'goal' && STATE.selected.goalId){
-          const gid = STATE.selected.goalId;
-          const box = document.getElementById('goal-expand-' + gid);
-          if(box && box.style.display !== 'none') toggleGoal(gid);
-          return;
-        }
-        if(STATE.selected.type === 'task' && STATE.selected.goalId){
-          const gid = STATE.selected.goalId;
-          const box = document.getElementById('goal-expand-' + gid);
-          if(box && box.style.display !== 'none') toggleGoal(gid);
-          selectGoal(gid);
-          return;
-        }
+        _moveFocusHorizontal(-1);
+        return;
       }
     });
 
@@ -825,17 +1196,14 @@
       const t = e.target;
       if(!(t instanceof HTMLElement)) return;
 
-      // prompt buttons in detail pane（innerHTML 注入的 <script> 不会执行，所以这里做事件代理）
-      if(t.id && t.id.startsWith('gen-')){
-        const pid = t.id.slice(4);
-        _generatePromptForTask(pid);
-        return;
-      }
-      if(t.id && t.id.startsWith('copy-')){
-        const pid = t.id.slice(5);
-        const out = document.getElementById('prompt-' + pid);
-        const err = document.getElementById('prompt-err-' + pid);
-        copyTextFrom(out, err);
+      const cp = t.closest('.js-copy-text');
+      if(cp){
+        const v = String(cp.getAttribute('data-text') || '').trim();
+        if(!v){ toast('copy failed'); return; }
+        (async ()=>{
+          try{ await navigator.clipboard.writeText(v); toast('copied'); }
+          catch(_){ toast('copy failed'); }
+        })();
         return;
       }
 
@@ -850,9 +1218,14 @@
         return;
       }
 
-      const tg = t.closest('.js-toggle');
-      if(tg){
-        toggleGoal(tg.getAttribute('data-goal'));
+      const dt = t.closest('.js-detail-tab');
+      if(dt){
+        const root = dt.closest('[data-detail-root]');
+        const tab = dt.getAttribute('data-tab') || '';
+        if(root) activateDetailTab(root, tab);
+        const type = String(STATE?.selected?.type || '').trim() || 'detail';
+        const key = 'openfocus:last_detail_tab:' + type;
+        try{ localStorage.setItem(key, String(tab || '')); }catch(_){ }
         return;
       }
 
@@ -860,6 +1233,25 @@
       if(flt){
         applyFilter(flt.getAttribute('data-goal'), flt.getAttribute('data-filter'));
         return;
+      }
+
+      // Click-to-select for whole cards/rows (avoid requiring clicking the text button)
+      const taskRow = t.closest('[data-task-item]');
+      if(taskRow){
+        const pid = taskRow.getAttribute('data-task');
+        const gid = taskRow.getAttribute('data-goal');
+        if(pid){
+          selectTask(pid, gid);
+          return;
+        }
+      }
+      const goalCard = t.closest('.js-goal-card');
+      if(goalCard){
+        const gid = goalCard.getAttribute('data-goal-id');
+        if(gid){
+          selectGoal(gid);
+          return;
+        }
       }
 
       const jump = t.closest('.js-jump-goal');
@@ -874,10 +1266,6 @@
         if(pid && document.getElementById('detail-task-' + pid)){
           const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
           const gid = btn ? btn.getAttribute('data-goal') : '';
-          if(gid){
-            const box = document.getElementById('goal-expand-' + gid);
-            if(box && box.style.display === 'none') toggleGoal(gid);
-          }
           selectTask(pid, gid);
         }
       }
@@ -902,6 +1290,12 @@
         return;
       }
 
+      const openTaskEdit = t.closest('.js-open-task-edit');
+      if(openTaskEdit){
+        _openEditTaskDialog(openTaskEdit);
+        return;
+      }
+
       const openAgentSpace = t.closest('.js-open-agent-space');
       if(openAgentSpace){
         const pid = openAgentSpace.getAttribute('data-task');
@@ -910,7 +1304,7 @@
       }
     });
 
-    // Ajax actions: done/reopen/delete task
+    // Ajax actions: done/reopen/delete task + goal done/reopen
     document.addEventListener('submit', async (e)=>{
       const form = e.target;
       if(!(form instanceof HTMLFormElement)) return;
@@ -918,6 +1312,7 @@
       e.preventDefault();
       const action = form.getAttribute('data-action');
       const pid = form.getAttribute('data-task');
+      const gid = form.getAttribute('data-goal');
       try{
         const btn = form.querySelector('button[type="submit"]');
         if(btn) btn.disabled = true;
@@ -925,8 +1320,18 @@
         if(action==='delete'){
           const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
           if(item) item.remove();
+          // remove task row(s) in goal table if visible
+          document.querySelectorAll('.js-open-task[data-task="' + pid + '"]').forEach((tr)=>{ try{ tr.remove(); }catch(_){ } });
           toast('已删除');
-          setDetail('<div class="panel pad"><div class="k">DETAIL</div><div class="muted" style="margin-top:8px;">已删除该任务。</div></div>');
+          setDetail('<div class="pad"><div class="k">DETAIL</div><div class="muted" style="margin-top:8px;">已删除该任务。</div></div>');
+          // 保持 UI 一致：跳回 Goal（避免残留模板/缓存数据）
+          const nav = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
+          const gid2 = (gid || (nav ? (nav.getAttribute('data-goal') || '') : '') || (STATE?.selected?.goalId || ''));
+          const u = new URL(location.href);
+          u.searchParams.set('goal', String(gid2 || ''));
+          u.searchParams.delete('task');
+          setTimeout(()=>{ try{ location.href = u.toString(); }catch(_){ location.reload(); } }, 30);
+          return;
         }else if(action==='done'){
           const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
           if(item){ item.setAttribute('data-status','done'); }
@@ -944,6 +1349,14 @@
           const gid = btn ? (btn.getAttribute('data-goal') || '') : '';
           setTimeout(()=>{ location.href = '/goals?task=' + encodeURIComponent(pid || '') + (gid ? ('&goal=' + encodeURIComponent(gid)) : ''); }, 30);
           return;
+        }else if(action==='goal_done'){
+          toast('已完成');
+          setTimeout(()=>{ location.href = '/goals?goal=' + encodeURIComponent(gid || ''); }, 30);
+          return;
+        }else if(action==='goal_reopen'){
+          toast('已重新打开');
+          setTimeout(()=>{ location.href = '/goals?goal=' + encodeURIComponent(gid || ''); }, 30);
+          return;
         }
         refreshNext();
         refreshEvents();
@@ -955,18 +1368,18 @@
       }
     });
 
-    async function refreshNext(){
+      async function refreshNext(){
       const box = document.getElementById('next-list');
       const btn = document.getElementById('next-refresh');
       if(!box) return;
       if(btn) btn.disabled = true;
-      box.innerHTML = '<span class="spin"></span> <span class="muted">分析中…</span>';
+      box.innerHTML = '<span class="spin"></span> <span class="muted">thinking...</span>';
       try{
         const r = await fetch('/api/recommendations/next?limit=5');
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const item = (data && data.item) ? data.item : null;
-        if(!item){ box.textContent = '暂无推荐。'; return; }
+        if(!item){ box.textContent = 'no suggestion.'; return; }
         const why = Array.isArray(item.why) ? item.why : [];
         const title = item.title || '';
         const target = item.target || {};
@@ -974,25 +1387,37 @@
         const pid = target.task_public_id || '';
         const sentence = (data && data.sentence) ? String(data.sentence) : '';
 
+        const label = title || (pid ? ('task ' + pid) : (gid ? ('goal ' + gid) : 'next'));
+        const whyLines = [];
+        if(sentence) whyLines.push(String(sentence));
+        if(why.length) whyLines.push(...why.map(x => String(x || '')).filter(Boolean));
+        const whyText = whyLines.filter(Boolean).map(x => '- ' + x).join('\n');
+
+        const primaryBtn = `
+          <button type="button" class="btn-primary js-open-next" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}">Open</button>
+        `;
+
+        box.classList.remove('muted');
         box.innerHTML = `
-          <div class="panel" style="background: rgba(0,0,0,0.18);">
-            <div class="pad" style="padding: 10px 12px;">
-              <div style="white-space: pre-wrap;">${sentence || ('建议下一步去完成「' + title + '」。')}</div>
-              <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap:wrap;">
-                <button type="button" class="btn-ghost js-open-next" data-goal="${gid}" data-task="${pid}">打开</button>
+          <div class="nm-wrap">
+            <div class="nm-card">
+              <div class="nm-k">Decision</div>
+              <div class="nm-title">${escapeHtml(label)}</div>
+              ${whyText ? `<div class="nm-desc">${escapeHtml(whyText)}</div>` : ''}
+              <div class="nm-actions">
+                ${primaryBtn}
               </div>
-              ${why.length ? `<div class="divider"></div><div class="code">${why.map(x=>'- '+x).join('\n')}</div>` : ''}
             </div>
           </div>
         `;
       }catch(e){
-        box.textContent = '推荐引擎不可用/请求失败。';
+        box.textContent = 'failed to load.';
       }finally{
         if(btn) btn.disabled = false;
       }
     }
 
-    function fmtTime(iso){
+    function fmtClock(iso){
       try{
         const d = new Date(iso);
         if(Number.isNaN(d.getTime())) return '';
@@ -1002,18 +1427,45 @@
       }catch(_){ return ''; }
     }
 
+    function fmtAgo(iso){
+      try{
+        const d = new Date(iso);
+        if(Number.isNaN(d.getTime())) return '';
+        const ms = Date.now() - d.getTime();
+        const s = Math.floor(ms / 1000);
+        if(!Number.isFinite(s)) return '';
+        if(s < 30) return 'now';
+        const m = Math.floor(s / 60);
+        if(m < 60) return m + 'm';
+        const h = Math.floor(m / 60);
+        if(h < 48) return h + 'h';
+        const dd = Math.floor(h / 24);
+        return dd + 'd';
+      }catch(_){ return ''; }
+    }
+
+    function evTone(it){
+      const k = String(it?.kind || '').toLowerCase();
+      const l = String(it?.kind_label || '').toLowerCase();
+      const s = (k + ' ' + l);
+      if(/fail|error|timeout|denied|panic/.test(s)) return 'red';
+      if(/success|succeed|done|completed|finish/.test(s)) return 'green';
+      if(/start|running|progress|pending|retry|queue/.test(s)) return 'yellow';
+      return 'gray';
+    }
+
     async function refreshEvents(){
       const box = document.getElementById('ev-list');
       const btn = document.getElementById('ev-refresh');
       if(!box) return;
       if(btn) btn.disabled = true;
-      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      box.innerHTML = '<span class="spin"></span> <span class="muted">loading...</span>';
       try{
         const r = await fetch('/api/events/recent?limit=30');
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const items = (data && data.items) ? data.items : [];
-        if(!items.length){ box.textContent = '暂无事件。'; return; }
+        if(!items.length){ box.textContent = 'no events.'; return; }
 
         // Read/unread state for events (focus touched => read)
         const readKey = 'openfocus:events_read_ids';
@@ -1060,9 +1512,9 @@
             }
             if(Number.isFinite(maxId) && maxId > last){
               const it0 = items[0] || {};
-              const label = String(it0.kind_label || it0.kind || '新事件');
+              const label = String(it0.kind_label || it0.kind || 'new event');
               const msg = String(it0.summary || '');
-              toast('新事件：' + label);
+              toast('new event: ' + label);
               const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
               if(enabled && typeof Notification !== 'undefined'){
                 if(Notification.permission === 'granted'){
@@ -1077,31 +1529,38 @@
         })();
 
         const html = items.map((it)=>{
-          const t = fmtTime(it.created_at);
+          const clock = fmtClock(it.created_at);
+          const ago = fmtAgo(it.created_at);
+          const tone = evTone(it);
           const label = it.kind_label || it.kind || '';
           const msg = it.summary || '';
           const src = it.source_label || '';
           const task = it.task_public_id || '';
           const id = String(it.id || '');
           const unread = id && !readSet.has(id);
+          const lines = [];
+          if(msg) lines.push('- ' + String(msg));
+          if(src) lines.push('- ' + String(src));
+          const md = lines.join('\n');
           return `
-            <div class="panel js-ev-item ${unread ? 'ev-unread' : ''}" data-ev-id="${escapeHtml(id)}" tabindex="0" style="margin: 8px 0; background: rgba(0,0,0,0.18); outline: none;">
-              <div class="pad" style="padding: 10px 12px; display:flex; gap: 10px; align-items:flex-start; justify-content:space-between;">
-                <div style="min-width:0; flex:1;">
-                  <div style="display:flex; gap: 8px; align-items:center; flex-wrap:wrap;">
-                    <span class="k">${t ? t : ''}</span>
-                    <span class="muted">${escapeHtml(label)}</span>
-                    <span class="unread-dot" style="display:${unread ? 'inline-block' : 'none'}" title="未读"></span>
-                  </div>
-                  ${msg ? (`<div class="muted" style="margin-top: 6px; white-space: pre-wrap;">${escapeHtml(msg)}</div>`) : ''}
-                  ${src ? (`<div class="muted" style="margin-top: 6px; font-size: 12px;">${escapeHtml(src)}</div>`) : ''}
+            <div class="ev-item ev-tone-${tone} js-ev-item ${unread ? 'ev-unread' : ''}" data-ev-id="${escapeHtml(id)}" tabindex="0" style="outline:none;">
+              <div class="ev-time">
+                <div class="ev-clock">${escapeHtml(clock || '')}</div>
+                <div class="ev-ago">${escapeHtml(ago || '')}</div>
+              </div>
+              <div class="ev-rail"><span class="ev-dot" aria-hidden="true"></span></div>
+              <div class="ev-body" style="min-width:0;">
+                <div class="ev-head">
+                  ${task ? (`<button type="button" class="btn-ghost side-item-title js-open-task" data-task="${escapeHtml(task)}">${escapeHtml(label)}</button>`) : (`<span class="ev-kind">${escapeHtml(label)}</span>`)}
+                  <span class="unread-dot" style="display:${unread ? 'inline-block' : 'none'}" title="unread"></span>
                 </div>
-                ${task ? `<button type="button" class="btn-ghost js-open-task" data-task="${task}">打开</button>` : ''}
+                ${md ? (`<div class="md">${escapeHtml(md)}</div>`) : ''}
               </div>
             </div>
           `;
         }).join('');
-        box.innerHTML = html;
+        box.classList.remove('muted');
+        box.innerHTML = `<div class="ev-timeline">${html}</div>`;
 
         // mark-as-read on focus/click/hover
         if(!box.__evReadBound){
@@ -1118,64 +1577,14 @@
           box.addEventListener('mouseenter', handler, { capture: true });
         }
       }catch(e){
-        box.textContent = '事件加载失败。';
+        box.textContent = 'failed to load.';
       }finally{
         if(btn) btn.disabled = false;
       }
     }
 
-    async function refreshPromptHistory(taskPid, opts={}){
-      const box = document.getElementById('prompt-history-' + taskPid);
-      if(!box) return;
-      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
-      try{
-        const r = await fetch('/api/tasks/' + encodeURIComponent(taskPid) + '/recommended_prompt_history?limit=10');
-        if(!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
-        const items = (data && data.items) ? data.items : [];
-        if(!items.length){ box.textContent = '暂无历史。'; return; }
-
-        // 如果历史里已有 prompt，且本地还没记录过，则同步到本地状态，保证按钮显示“重新生成”。
-        const st = _getPromptState(String(taskPid));
-        const firstPrompt = (items[0] && items[0].prompt) ? String(items[0].prompt) : '';
-        if(st && st.status !== 'loading' && firstPrompt && !String(st.prompt || '').trim()){
-          st.prompt = firstPrompt;
-          st.status = 'done';
-          _applyPromptUi(String(taskPid));
-        }
-
-        const html = items.map((it, idx)=>{
-          const t = it.created_at || '';
-          const label = t ? (t.replace('T',' ').slice(0,16)) : ('#' + (idx+1));
-          return `
-            <details class="panel" style="margin-top: 8px; background: rgba(0,0,0,0.18);">
-              <summary class="pad" style="padding: 8px 10px; cursor:pointer; user-select:none;">
-                <span class="k">${label}</span>
-              </summary>
-              <div class="pad" style="padding-top: 0;">
-                <textarea rows="10" readonly>${it.prompt || ''}</textarea>
-                <div style="margin-top: 8px; display:flex; gap: 10px;">
-                  <button type="button" class="btn-ghost js-copy-nearest">复制</button>
-                </div>
-              </div>
-            </details>
-          `;
-        }).join('');
-        box.innerHTML = html;
-        if(opts && opts.preferSetCurrent){
-          const out = document.getElementById('prompt-' + taskPid);
-          if(out && !String(out.value||'').trim() && items[0] && items[0].prompt){
-            out.value = String(items[0].prompt);
-          }
-        }
-      }catch(e){
-        box.textContent = '历史加载失败。';
-      }
-    }
-
     document.getElementById('next-refresh')?.addEventListener('click', refreshNext);
     document.getElementById('ev-refresh')?.addEventListener('click', refreshEvents);
-    document.getElementById('goal-gen')?.addEventListener('click', _extractGoalFromDescription);
     document.getElementById('task-gen')?.addEventListener('click', _extractTaskTitleFromDescription);
     document.getElementById('goal-edit-gen')?.addEventListener('click', async ()=>{
       await _extractGoalFromDescriptionGeneric({
@@ -1209,7 +1618,7 @@
       const sel = document.getElementById('agent-space-companion');
       const btn = document.getElementById('agent-space-companion-refresh');
       if(btn) btn.disabled = true;
-      if(sel){ sel.innerHTML = '<option value="">加载中…</option>'; }
+      if(sel){ sel.innerHTML = '<option value="">loading...</option>'; }
       try{
         const r = await fetch('/api/companions?limit=50');
         if(!r.ok) throw new Error('HTTP ' + r.status);
@@ -1225,15 +1634,15 @@
         const active = all.filter(x => x && x.status === 'active');
         if(!sel) return;
         if(!all.length){
-          sel.innerHTML = '<option value="">暂无 Companion</option>';
+          sel.innerHTML = '<option value="">no companion</option>';
           return;
         }
 
         const statusLabel = (st)=>{
           const s = String(st || '');
-          if(s === 'active') return '已认证/在线';
-          if(s === 'pending_certification') return '待认证';
-          if(s === 'offline') return '离线';
+          if(s === 'active') return 'active';
+          if(s === 'pending_certification') return 'pending';
+          if(s === 'offline') return 'offline';
           return s || '未知';
         };
 
@@ -1259,7 +1668,7 @@
           AGENT_SPACE_STATE.companionId = '';
         }
       }catch(e){
-        if(sel) sel.innerHTML = '<option value="">加载失败</option>';
+        if(sel) sel.innerHTML = '<option value="">failed</option>';
       }finally{
         if(btn) btn.disabled = false;
       }
@@ -1271,7 +1680,7 @@
       try{
         const sel = document.getElementById('agent-space-companion');
         const cid = String(sel?.value || AGENT_SPACE_STATE.companionId || '').trim();
-        if(!cid){ throw new Error('请先选择 Companion'); }
+        if(!cid){ throw new Error('select companion first'); }
         AGENT_SPACE_STATE.companionId = cid;
         const r = await fetch('/api/companions/' + encodeURIComponent(cid) + '/choose_directory', { method: 'POST' });
         if(!r.ok){
@@ -1284,7 +1693,7 @@
         const root = document.getElementById('agent-space-root');
         if(root) root.value = p;
       }catch(e){
-        toast('目录选择失败（可手动输入绝对路径）');
+        toast('pick failed (type workdir manually)');
       }finally{
         if(btn) btn.disabled = false;
       }
@@ -1293,20 +1702,19 @@
     async function _createAgentSpace(){
       const pid = String(AGENT_SPACE_STATE.taskPid || '').trim();
       const root = String(document.getElementById('agent-space-root')?.value || '').trim();
-      const agent = String(document.getElementById('agent-space-agent')?.value || 'trae-cli').trim();
       const cid = String(document.getElementById('agent-space-companion')?.value || AGENT_SPACE_STATE.companionId || '').trim();
       const err = document.getElementById('agent-space-err');
       const hint = document.getElementById('agent-space-hint');
       if(err) err.textContent = '';
       if(!pid){ toast('taskId 缺失'); return; }
-      if(!cid){ if(err) err.textContent = '请先选择 Companion'; return; }
-      if(!root){ if(err) err.textContent = '请填写工作目录'; return; }
+      if(!cid){ if(err) err.textContent = 'select companion first'; return; }
+      if(!root){ if(err) err.textContent = 'workdir required'; return; }
       if(hint) hint.style.display = 'block';
       try{
         const r = await fetch('/api/tasks/' + encodeURIComponent(pid) + '/agent_space', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ companion_id: Number(cid), root_path: root, agent_type: agent })
+          body: JSON.stringify({ companion_id: Number(cid), root_path: root })
         });
         if(!r.ok){
           const txt = await r.text().catch(()=> '');
@@ -1316,7 +1724,7 @@
         location.href = '/tasks/' + encodeURIComponent(pid) + '/agent_space';
       }catch(e){
         if(err) err.textContent = String(e && e.message ? e.message : e);
-        toast('创建失败');
+        toast('create failed');
       }finally{
         if(hint) hint.style.display = 'none';
       }
@@ -1331,77 +1739,73 @@
     });
     document.getElementById('agent-space-create')?.addEventListener('click', _createAgentSpace);
 
-    function _refreshNotifyButton(){
-      const btn = document.getElementById('notify-toggle');
-      if(!btn) return;
+    function _refreshNotifySwitch(){
+      const sw = document.getElementById('notify-toggle');
+      if(!(sw instanceof HTMLInputElement)) return;
       const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
       if(typeof Notification === 'undefined'){
-        btn.textContent = '系统通知不可用';
-        btn.disabled = true;
+        sw.checked = false;
+        sw.disabled = true;
         return;
       }
       if(Notification.permission === 'denied'){
-        btn.textContent = '通知已禁用';
-        btn.disabled = false;
+        sw.checked = false;
+        sw.disabled = true;
         return;
       }
-      btn.textContent = enabled ? '关闭系统通知' : '启用系统通知';
-      btn.disabled = false;
+      sw.checked = enabled;
+      sw.disabled = false;
     }
 
-    async function _toggleNotify(){
+    async function _toggleNotifyFromSwitch(e){
+      const sw = e?.target;
+      if(!(sw instanceof HTMLInputElement)) return;
       if(typeof Notification === 'undefined'){
-        toast('当前浏览器不支持系统通知');
+        toast('notify not supported');
+        _refreshNotifySwitch();
         return;
       }
-      const enabled = localStorage.getItem('openfocus:notify_enabled') === '1';
-      if(enabled){
+
+      const wantOn = !!sw.checked;
+      if(!wantOn){
         localStorage.setItem('openfocus:notify_enabled', '0');
-        _refreshNotifyButton();
-        toast('已关闭系统通知');
+        toast('notify off');
+        _refreshNotifySwitch();
         return;
       }
 
       // enable
       if(Notification.permission === 'granted'){
         localStorage.setItem('openfocus:notify_enabled', '1');
-        _refreshNotifyButton();
-        toast('已启用系统通知');
+        toast('notify on');
+        _refreshNotifySwitch();
         return;
       }
       if(Notification.permission === 'denied'){
-        toast('通知权限已被浏览器拒绝，请在浏览器站点设置里改为“允许”。');
-        _refreshNotifyButton();
+        toast('notify denied (check browser site settings)');
+        localStorage.setItem('openfocus:notify_enabled', '0');
+        _refreshNotifySwitch();
         return;
       }
       try{
         const p = await Notification.requestPermission();
         if(p === 'granted'){
           localStorage.setItem('openfocus:notify_enabled', '1');
-          toast('已启用系统通知');
+          toast('notify on');
         }else{
-          toast('未获得通知权限');
+          localStorage.setItem('openfocus:notify_enabled', '0');
+          toast('notify permission not granted');
         }
       }catch(_){
-        toast('通知权限请求失败');
+        localStorage.setItem('openfocus:notify_enabled', '0');
+        toast('notify permission request failed');
       }finally{
-        _refreshNotifyButton();
+        _refreshNotifySwitch();
       }
     }
 
-
-    document.getElementById('notify-toggle')?.addEventListener('click', _toggleNotify);
-    _refreshNotifyButton();
-
-    // Copy buttons in history list
-    document.addEventListener('click', (e)=>{
-      const t = e.target;
-      if(!(t instanceof HTMLElement)) return;
-      const c = t.closest('.js-copy-nearest');
-      if(!c) return;
-      const ta = c.closest('details')?.querySelector('textarea');
-      if(ta) copyTextFrom(ta, null);
-    });
+    document.getElementById('notify-toggle')?.addEventListener('change', _toggleNotifyFromSwitch);
+    _refreshNotifySwitch();
 
     // periodic refresh
     setInterval(refreshNext, 30 * 60 * 1000);
@@ -1423,10 +1827,6 @@
       if(task && document.getElementById('detail-task-' + task)){
         const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + task + '"]');
         const gid = btn ? btn.getAttribute('data-goal') : goal;
-        if(gid){
-          const box = document.getElementById('goal-expand-' + gid);
-          if(box && box.style.display === 'none') toggleGoal(gid);
-        }
         selectTask(task, gid);
         return;
       }
@@ -1439,10 +1839,6 @@
         if(lastTask && document.getElementById('detail-task-' + lastTask)){
           const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + lastTask + '"]');
           const gid = btn ? btn.getAttribute('data-goal') : '';
-          if(gid){
-            const box = document.getElementById('goal-expand-' + gid);
-            if(box && box.style.display === 'none') toggleGoal(gid);
-          }
           selectTask(lastTask, gid);
           return;
         }
@@ -1463,8 +1859,120 @@
       const f = document.getElementById('new-goal-form');
       const b = document.getElementById('new-goal-submit');
       const h = document.getElementById('new-goal-hint');
-      if(!f || !b || !h) return;
-      f.addEventListener('submit', ()=>{ b.disabled = true; h.style.display = 'block'; });
+      const ht = document.getElementById('new-goal-hint-text');
+      if(!f || !b || !h || !ht) return;
+
+      const plan = document.getElementById('goal-plan-mode');
+      const auto = document.getElementById('goal-auto');
+      const titleEl = document.getElementById('goal-content');
+      const descEl = document.getElementById('goal-description');
+      const dueEl = document.getElementById('goal-ddl');
+
+      let _submitting = false;
+      let _manualTitleCache = '';
+
+      function _syncNewGoalPlanUI(){
+        const on = Boolean(plan && plan.checked);
+        if(b) b.textContent = on ? 'Plan' : 'Save';
+      }
+
+      function _syncNewGoalAutoUI(){
+        if(!(auto instanceof HTMLInputElement)) return;
+        if(!(titleEl instanceof HTMLTextAreaElement)) return;
+        const on = !!auto.checked;
+        if(on){
+          // cache current manual title
+          const cur = String(titleEl.value || '').trim();
+          if(cur && cur !== 'Auto generate from content') _manualTitleCache = cur;
+
+          titleEl.readOnly = true;
+          titleEl.placeholder = '';
+          // Auto=ON: always show a fixed hint text in the Title box.
+          titleEl.value = 'Auto generate from content';
+        }else{
+          titleEl.readOnly = false;
+          titleEl.placeholder = 'A clear goal title...';
+          // restore manual title if any
+          if(_manualTitleCache) titleEl.value = _manualTitleCache;
+          else if(String(titleEl.value || '').trim() === 'Auto generate from content') titleEl.value = '';
+        }
+      }
+
+      auto?.addEventListener('change', _syncNewGoalAutoUI);
+      _syncNewGoalAutoUI();
+
+      plan?.addEventListener('change', _syncNewGoalPlanUI);
+      _syncNewGoalPlanUI();
+
+      f.addEventListener('submit', (e)=>{
+        if(_submitting) return;
+
+        const usePlan = Boolean(plan && plan.checked);
+        const useAuto = Boolean(auto && auto.checked);
+
+        const title = String(titleEl?.value || '').trim();
+        const desc = String(descEl?.value || '').trim();
+        const due = String(dueEl?.value || '').trim();
+
+        if(!desc || !due){
+          e.preventDefault();
+          toast('请先把表单填完整');
+          return;
+        }
+
+        // Plan Mode ON: always enter plan flow; do NOT create goal
+        if(usePlan){
+          e.preventDefault();
+          b.disabled = true;
+          h.style.display = 'block';
+          ht.textContent = 'planning...';
+          const raw = useAuto ? desc : ((title && desc) ? (title + '\n\n' + desc) : (title || desc));
+          let draft = f.querySelector('input[name="draft_content"]');
+          if(!(draft instanceof HTMLInputElement)){
+            draft = document.createElement('input');
+            draft.type = 'hidden';
+            draft.name = 'draft_content';
+            f.appendChild(draft);
+          }
+          draft.value = raw;
+
+          // IMPORTANT: plan/start expects due_date; ensure it exists even if form is repointed.
+          let dueHidden = f.querySelector('input[name="due_date"]');
+          if(!(dueHidden instanceof HTMLInputElement)){
+            dueHidden = document.createElement('input');
+            dueHidden.type = 'hidden';
+            dueHidden.name = 'due_date';
+            f.appendChild(dueHidden);
+          }
+          dueHidden.value = String(due || '').trim();
+
+          _submitting = true;
+          f.action = '/goals/plan/start';
+          try{ f.submit(); }catch(_){ }
+          return;
+        }
+
+        // Plan Mode OFF: create goal immediately
+        if(useAuto){
+          // Lightweight auto-title (no LLM): first non-empty line from Content.
+          const lines = String(desc || '').split(/\r?\n/).map(s=> String(s||'').trim()).filter(Boolean);
+          let t = lines.length ? lines[0] : String(desc||'').trim();
+          if(t.length > 2000) t = t.slice(0, 2000);
+          if(titleEl) titleEl.value = t;
+        }
+
+        const submitTitle = String(titleEl?.value || '').trim();
+        if(!submitTitle){
+          e.preventDefault();
+          toast('请填写 Title 或开启 Auto');
+          return;
+        }
+
+        b.disabled = true;
+        h.style.display = 'block';
+        ht.textContent = 'creating...';
+        _submitting = true;
+      });
     })();
   </script>
 {% endblock %}

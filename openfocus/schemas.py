@@ -32,14 +32,12 @@ class FocusReportIn(BaseModel):
 class AgentSpaceCreateIn(BaseModel):
     companion_id: int = Field(description="Companion 环境 ID")
     root_path: str = Field(min_length=1, max_length=4000, description="本地工作目录（绝对路径）")
-    agent_type: str = Field(default="trae-cli", min_length=1, max_length=64)
 
 
 class AgentSpaceOut(BaseModel):
     id: int
     task_public_id: str
     root_path: str
-    agent_type: str
 
 
 class FileEntryOut(BaseModel):

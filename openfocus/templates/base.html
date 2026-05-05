@@ -4,9 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "OpenFocus" }}</title>
+    <link rel="icon" href="/resources/icons/dark.svg" type="image/svg+xml" />
     <style>
       :root {
-        --bg: #060b10;
+        --bg: #000;
         --panel: rgba(9, 17, 26, 0.92);
         --panel2: rgba(7, 14, 21, 0.75);
         --text: #d7ffe9;
@@ -27,11 +28,7 @@
         margin: 0;
         color: var(--text);
         font-family: var(--mono);
-        background:
-          radial-gradient(1200px 800px at 20% 20%, rgba(0,229,255,0.06), transparent 55%),
-          radial-gradient(900px 600px at 80% 10%, rgba(124,77,255,0.05), transparent 55%),
-          linear-gradient(180deg, rgba(0,229,255,0.06) 0%, transparent 18%),
-          var(--bg);
+        background: var(--bg);
       }
 
       body.fullscreen { overflow: hidden; }
@@ -67,11 +64,11 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 12px 14px;
-        border: 1px solid var(--border);
+        padding: 10px 12px;
+        border: 1px solid rgba(255,255,255,0.14);
         border-radius: 12px;
-        background: linear-gradient(180deg, rgba(0,229,255,0.06), rgba(0,0,0,0));
-        box-shadow: 0 0 0 1px rgba(0,229,255,0.06) inset;
+        background: rgba(0,0,0,1);
+        box-shadow: none;
         position: sticky;
         top: 10px;
         backdrop-filter: blur(10px);
@@ -80,24 +77,37 @@
 
       .brand {
         display: flex;
-        align-items: baseline;
+        align-items: center;
         gap: 10px;
       }
-      .brand .name { letter-spacing: 0.6px; }
+      .brand .brand-logo{ width: 36px; height: 36px; display:block; flex: 0 0 auto; }
+      .brand .name { letter-spacing: 0.2px; font-size: 20px; line-height: 1; }
+      .brand .brand-open { color: rgba(120, 165, 186, 0.92); }
+      .brand .brand-focus { color: var(--warn); }
+      .brand .brand-f { color: rgba(255, 59, 92, 0.92); }
       .brand .tag { color: var(--muted); font-size: 12px; }
 
       .nav {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         flex-wrap: wrap;
       }
 
       .nav a {
-        padding: 6px 10px;
-        border: 1px solid rgba(0,229,255,0.16);
-        border-radius: 999px;
-        background: rgba(0,229,255,0.04);
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: rgba(215, 255, 233, 0.82);
+        font-size: 12px;
+      }
+      .nav a:hover { text-decoration: none; color: rgba(0,229,255,0.92); }
+      .nav a:focus-visible { outline: none; text-decoration: underline; color: rgba(0,229,255,0.92); }
+
+      .nav .nav-sep {
+        color: rgba(215, 255, 233, 0.35);
+        user-select: none;
       }
 
       .nav .btn-ghost {
@@ -106,12 +116,10 @@
       }
 
       .panel {
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        background: var(--panel);
-        box-shadow:
-          0 0 0 1px rgba(0,229,255,0.05) inset,
-          0 12px 30px rgba(0,0,0,0.35);
+        border: 0;
+        border-radius: 12px;
+        background: rgba(0,0,0,1);
+        box-shadow: none;
       }
 
       .panel.hint {
@@ -144,25 +152,35 @@
         cursor: pointer;
         font-family: var(--mono);
       }
-      button:hover { border-color: rgba(0,229,255,0.5); background: rgba(0,229,255,0.12); }
+      button:hover { background: rgba(0,229,255,0.10); }
       button:disabled { opacity: 0.55; cursor: not-allowed; }
+      button:focus-visible { outline: none; box-shadow: none; }
 
       .btn-danger { border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); }
-      .btn-danger:hover { border-color: rgba(255,59,92,0.65); background: rgba(255,59,92,0.16); }
-      .btn-ghost { border-color: rgba(0,229,255,0.16); background: rgba(0,0,0,0.0); }
+      .btn-danger:hover { background: rgba(255,59,92,0.14); }
+      .btn-ghost {
+        border-color: transparent;
+        background: transparent;
+        padding: 4px 6px;
+        border-radius: 8px;
+        color: rgba(215, 255, 233, 0.82);
+      }
+      .btn-ghost:hover { background: transparent; color: rgba(0,229,255,0.92); }
+      .btn-ghost:focus-visible { outline: none; text-decoration: underline; color: rgba(0,229,255,0.92); }
 
       a.btn-ghost, a.btn-danger {
         display: inline-block;
         text-decoration: none;
-        border: 1px solid rgba(0,229,255,0.16);
-        border-radius: 12px;
-        padding: 10px 12px;
-        background: rgba(0,0,0,0.0);
-        color: var(--text);
+        border: 0;
+        border-radius: 8px;
+        padding: 4px 6px;
+        background: transparent;
+        color: rgba(215, 255, 233, 0.82);
       }
-      a.btn-ghost:hover { border-color: rgba(0,229,255,0.5); background: rgba(0,229,255,0.12); }
-      a.btn-danger { border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); }
-      a.btn-danger:hover { border-color: rgba(255,59,92,0.65); background: rgba(255,59,92,0.16); }
+      a.btn-ghost:hover { text-decoration: none; background: transparent; color: rgba(0,229,255,0.92); }
+      a.btn-ghost:focus-visible { outline: none; text-decoration: underline; color: rgba(0,229,255,0.92); }
+      a.btn-danger { color: rgba(255, 59, 92, 0.92); }
+      a.btn-danger:hover { background: rgba(255,59,92,0.10); }
 
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
@@ -224,9 +242,11 @@
       }
 
       .nav-item.selected {
-        border-color: rgba(0,229,255,0.75) !important;
-        box-shadow: 0 0 0 3px rgba(0,229,255,0.10);
-        background: rgba(0,229,255,0.10) !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        background: transparent !important;
+        color: rgba(0,229,255,0.92) !important;
+        text-decoration: underline;
       }
 
       .selected-card {
@@ -263,7 +283,7 @@
           0 0 12px rgba(0,229,255,0.55);
       }
 
-      .divider { height: 1px; background: rgba(0,229,255,0.12); margin: 12px 0; }
+      .divider { height: 10px; background: transparent; margin: 10px 0; }
 
       .pill {
         display: inline-flex;
@@ -271,10 +291,10 @@
         gap: 6px;
         padding: 4px 8px;
         border-radius: 999px;
-        border: 1px solid rgba(0,229,255,0.22);
-        background: rgba(0,229,255,0.06);
+        border: 0;
+        background: rgba(255,255,255,0.04);
         font-size: 12px;
-        color: rgba(215, 255, 233, 0.86);
+        color: rgba(215, 255, 233, 0.76);
       }
       .pill.ok { border-color: rgba(43,255,183,0.35); background: rgba(43,255,183,0.10); }
       .pill.warn { border-color: rgba(255,209,102,0.35); background: rgba(255,209,102,0.10); }
@@ -299,8 +319,8 @@
         white-space: pre-wrap;
         padding: 10px 12px;
         border-radius: 12px;
-        border: 1px solid rgba(0,229,255,0.16);
-        background: rgba(0,0,0,0.28);
+        border: 0;
+        background: rgba(255,255,255,0.03);
       }
 
       .spin {
@@ -328,6 +348,66 @@
         display: none;
         z-index: 999;
       }
+
+      /* Calendar dialog */
+      dialog.cal-dialog{
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 14px;
+        background: rgba(0,0,0,0.78);
+        color: var(--text);
+        box-shadow: 0 22px 70px rgba(0,0,0,0.55);
+        width: min(980px, calc(100% - 24px));
+        padding: 0;
+      }
+      dialog.cal-dialog::backdrop{ background: rgba(0,0,0,0.55); }
+      .cal-head{ display:flex; align-items:center; justify-content:space-between; gap: 12px; padding: 12px 14px; }
+      .cal-title{ font-size: 16px; font-weight: 700; color: rgba(255,209,102,0.92); }
+      .cal-sub{ margin-top: 4px; font-size: 12px; color: rgba(215,255,233,0.62); }
+      .cal-actions{ display:flex; gap: 8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+      .cal-seg{ display:flex; gap: 6px; align-items:center; }
+      .cal-seg .btn-ghost{ padding: 4px 8px; border-radius: 999px; }
+      .cal-seg .on{ box-shadow: inset 0 0 0 1px rgba(0,229,255,0.28); color: rgba(0,229,255,0.92); }
+      .cal-divider{ height: 1px; background: rgba(255,255,255,0.10); }
+      .cal-body{ padding: 14px; display:flex; flex-direction:column; gap: 12px; }
+
+      .cal-grid{ display:grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+      .cal-dow{ font-size: 11px; color: rgba(215,255,233,0.60); text-transform: uppercase; letter-spacing: 0.6px; padding: 0 2px; }
+      .cal-cell{ border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; min-height: 62px; padding: 8px; background: rgba(255,255,255,0.02); cursor: pointer; }
+      .cal-cell:hover{ border-color: rgba(0,229,255,0.22); background: rgba(0,229,255,0.04); }
+      .cal-cell.muted{ opacity: 0.45; }
+      .cal-day{ font-size: 12px; color: rgba(215,255,233,0.90); display:flex; align-items:center; justify-content:space-between; gap: 8px; }
+      .cal-dot{ width: 7px; height: 7px; border-radius: 999px; background: rgba(0,229,255,0.72); display:inline-block; }
+      .cal-count{ font-size: 11px; color: rgba(215,255,233,0.62); margin-top: 8px; }
+      .cal-cell.sel{ border-color: rgba(0,229,255,0.60); box-shadow: 0 0 0 3px rgba(0,229,255,0.10); }
+
+      .cal-list{ border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.02); padding: 12px; }
+      .cal-item{ display:flex; justify-content:space-between; gap: 10px; padding: 8px 10px; border-radius: 10px; }
+      .cal-item:hover{ background: rgba(255,255,255,0.04); }
+      .cal-item a{ color: rgba(255,209,102,0.92); }
+      .cal-item a:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+      .cal-item .meta{ font-size: 11px; color: rgba(215,255,233,0.62); }
+
+      .swim{ border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.02); padding: 12px; }
+      .swim-header{ display:grid; grid-template-columns: 260px 1fr; gap: 12px; align-items:end; padding: 2px 6px 10px; }
+      .swim-hlabel{ font-size: 11px; color: rgba(215,255,233,0.62); }
+      .swim-dayhead{ display:flex; gap: 0; user-select:none; font-size: 10px; line-height: 1; color: rgba(215,255,233,0.62); }
+      .swim-dayhead span{ flex: 1 1 0; text-align:center; opacity: 0.85; }
+      .swim-row{ display:grid; grid-template-columns: 260px 1fr; gap: 12px; align-items:center; padding: 10px 6px; border-radius: 10px; }
+      .swim-row:hover{ background: rgba(255,255,255,0.04); }
+      .swim-name{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: rgba(255,209,102,0.92); font-size: 12px; }
+      .swim-track{
+        position: relative;
+        height: 18px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.06);
+        overflow: hidden;
+        /* Day marks: one tick per day of month (set --dim on element) */
+        background-image: linear-gradient(to right, rgba(255,255,255,0.10) 1px, transparent 1px);
+        background-size: calc(100% / var(--dim, 30)) 100%;
+        background-repeat: repeat;
+      }
+      .swim-bar{ position:absolute; top:0; bottom:0; border-radius: 999px; background: rgba(0,229,255,0.35); border: 1px solid rgba(0,229,255,0.55); cursor: pointer; }
+      .swim-bar:hover{ background: rgba(0,229,255,0.45); }
     </style>
   </head>
   {% set _path = (request.url.path if request and request.url else '') %}
@@ -335,14 +415,19 @@
     <div class="app">
       <div class="topbar">
         <div class="brand">
-          <div class="name">OpenFocus</div>
+          <img class="brand-logo" src="/resources/icons/dark.svg" alt="OpenFocus" />
+          <div class="name"><span class="brand-open">Open</span><span class="brand-focus"><span class="brand-f">F</span>ocus</span></div>
         </div>
         <div class="nav">
           <a href="/goals">Dashboard</a>
+          <span class="nav-sep">|</span>
           <a href="/goals?new=1" id="nav-new-goal">New Goal</a>
-          <a href="/goals/plan">Plan Mode</a>
+          <span class="nav-sep">|</span>
           <a href="/memory">Memory</a>
+          <span class="nav-sep">|</span>
           <a href="/companions">Companion</a>
+          <span class="nav-sep">|</span>
+          <a href="javascript:void(0)" id="nav-calendar">Calendar</a>
         </div>
       </div>
 
@@ -352,6 +437,32 @@
     </div>
 
     <div id="toast" class="toast"></div>
+
+    <dialog id="calendar-dialog" class="cal-dialog">
+      <form method="dialog" style="margin:0;">
+        <div class="cal-head">
+          <div>
+            <div class="cal-title" id="cal-title">Calendar</div>
+            <div class="cal-sub" id="cal-sub">—</div>
+          </div>
+          <div class="cal-actions">
+            <div class="cal-seg">
+              <button type="button" class="btn-ghost" id="cal-prev" title="Previous month">‹</button>
+              <button type="button" class="btn-ghost" id="cal-next" title="Next month">›</button>
+            </div>
+            <div class="cal-seg" aria-label="Calendar view">
+              <button type="button" class="btn-ghost on" id="cal-view-grid">Month</button>
+              <button type="button" class="btn-ghost" id="cal-view-swim">Swimlane</button>
+            </div>
+            <button type="submit" class="btn-ghost" aria-label="Close">×</button>
+          </div>
+        </div>
+      </form>
+      <div class="cal-divider"></div>
+      <div class="cal-body">
+        <div id="cal-main"></div>
+      </div>
+    </dialog>
 
     <script>
       const $ = (sel, root=document) => root.querySelector(sel);
@@ -376,35 +487,9 @@
         return r;
       }
 
-      async function generateRecommendedPrompt(taskPublicId, outEl, errEl, btnEl){
-        if(!taskPublicId || !outEl) return;
-        if(errEl) errEl.textContent = '';
-        const btn = btnEl;
-        const old = btn ? btn.textContent : '';
-        if(btn){ btn.disabled = true; btn.textContent = '生成中…'; }
-        try{
-          const r = await fetch('/api/tasks/' + encodeURIComponent(taskPublicId) + '/recommended_prompt');
-          if(!r.ok){
-            const txt = await r.text().catch(()=> '');
-            throw new Error(txt || ('HTTP ' + r.status));
-          }
-          const data = await r.json();
-          const v = (data && data.prompt) ? String(data.prompt) : '';
-          if(!v.trim()) throw new Error('返回为空');
-          outEl.value = v;
-          toast('已生成');
-          return { ok: true, prompt: v };
-        }catch(e){
-          if(errEl) errEl.textContent = String(e && e.message ? e.message : e);
-          return { ok: false, error: String(e && e.message ? e.message : e) };
-        }finally{
-          if(btn){ btn.disabled = false; btn.textContent = old || '生成提示词'; }
-        }
-      }
-
       async function copyTextFrom(el, errEl){
         const v = (el && (el.value || el.textContent) || '').trim();
-        if(!v){ if(errEl) errEl.textContent = '请先生成提示词。'; return; }
+        if(!v){ if(errEl) errEl.textContent = '内容为空。'; return; }
         try{
           await navigator.clipboard.writeText(v);
           if(errEl){ errEl.textContent = '已复制'; setTimeout(()=>{ if(errEl.textContent==='已复制') errEl.textContent=''; }, 900); }
@@ -428,6 +513,313 @@
       }
 
       document.getElementById('nav-new-goal')?.addEventListener('click', openNewGoal);
+
+      // Calendar
+      (function(){
+        const btn = document.getElementById('nav-calendar');
+        const dlg = document.getElementById('calendar-dialog');
+        const titleEl = document.getElementById('cal-title');
+        const subEl = document.getElementById('cal-sub');
+        const main = document.getElementById('cal-main');
+        const prev = document.getElementById('cal-prev');
+        const next = document.getElementById('cal-next');
+        const vGrid = document.getElementById('cal-view-grid');
+        const vSwim = document.getElementById('cal-view-swim');
+        if(!btn || !dlg || !titleEl || !subEl || !main || !prev || !next || !vGrid || !vSwim) return;
+
+        const DOW = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+        const state = { y: 0, m: 0, view: 'grid', selected: '', goalId: 0, data: null };
+
+        function pad2(n){ return String(n).padStart(2,'0'); }
+        function esc(s){
+          const x = String(s ?? '');
+          return x.replace(/[&<>"']/g, (c)=> ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c] || c));
+        }
+        function ym(){ return String(state.y) + '-' + pad2(state.m); }
+        function toISODate(d){
+          const y = d.getFullYear();
+          const m = pad2(d.getMonth()+1);
+          const day = pad2(d.getDate());
+          return y + '-' + m + '-' + day;
+        }
+        function daysInMonth(y, m){
+          return new Date(y, m, 0).getDate();
+        }
+        function firstDowMon0(y, m){
+          // JS: 0=Sun..6=Sat => convert to Mon=0..Sun=6
+          const d = new Date(y, m-1, 1);
+          const js = d.getDay();
+          return (js + 6) % 7;
+        }
+        function parseDateOnly(s){
+          const x = String(s||'').trim();
+          if(!x) return null;
+          const d = new Date(x);
+          if(String(d) === 'Invalid Date') return null;
+          return d;
+        }
+
+        async function load(){
+          main.innerHTML = '<div class="muted"><span class="spin"></span> loading…</div>';
+          try{
+            const r = await fetch('/api/calendar/month?ym=' + encodeURIComponent(ym()));
+            if(!r.ok){
+              const t = await r.text().catch(()=> '');
+              throw new Error(t || ('HTTP ' + r.status));
+            }
+            state.data = await r.json().catch(()=> null);
+          }catch(e){
+            state.data = null;
+            main.innerHTML = '<div class="muted">加载失败：' + String(e && e.message ? e.message : e) + '</div>';
+            return;
+          }
+          render();
+        }
+
+        function setView(v){
+          state.view = v;
+          vGrid.classList.toggle('on', v === 'grid');
+          vSwim.classList.toggle('on', v === 'swim');
+          render();
+        }
+
+        function render(){
+          const y = state.y;
+          const m = state.m;
+          titleEl.textContent = 'Calendar · ' + ym();
+          subEl.textContent = state.view === 'grid' ? 'Tasks completed by day' : 'Goals timeline (created → due)';
+          if(!state.data){
+            main.innerHTML = '<div class="muted">—</div>';
+            return;
+          }
+          if(state.goalId){
+            renderGoalTasks(state.goalId);
+            return;
+          }
+          if(state.view === 'swim') renderSwimlane();
+          else renderGrid();
+        }
+
+        function renderGrid(){
+          const y = state.y;
+          const m = state.m;
+          const dim = daysInMonth(y, m);
+          const offset = firstDowMon0(y, m);
+
+          const monthStart = new Date(y, m-1, 1);
+          const prevDim = daysInMonth(y, m-1 <= 0 ? 12 : (m-1));
+          const dataDays = (state.data && state.data.days) ? state.data.days : {};
+          const goals = (state.data && Array.isArray(state.data.goals)) ? state.data.goals : [];
+          const goalsByDue = {};
+          for(const g of goals){
+            const gid = Number(g.id||0);
+            const title = String(g.title||'');
+            const due = parseDateOnly(g.due_date);
+            if(!gid || !title || !due) continue;
+            const iso = toISODate(due);
+            (goalsByDue[iso] || (goalsByDue[iso] = [])).push({ id: gid, title });
+          }
+
+          let html = '<div class="cal-grid">';
+          for(const d of DOW){ html += '<div class="cal-dow">' + d + '</div>'; }
+
+          const totalCells = 42; // 6 weeks
+          for(let i=0;i<totalCells;i++){
+            const dayNum = i - offset + 1;
+            let cellDate = null;
+            let isMuted = false;
+            if(dayNum < 1){
+              isMuted = true;
+              cellDate = new Date(y, m-2, prevDim + dayNum);
+            }else if(dayNum > dim){
+              isMuted = true;
+              cellDate = new Date(y, m-1, dayNum);
+            }else{
+              cellDate = new Date(y, m-1, dayNum);
+            }
+            const iso = toISODate(cellDate);
+            const items = Array.isArray(dataDays[iso]) ? dataDays[iso] : [];
+            const dueGoals = (!isMuted && Array.isArray(goalsByDue[iso])) ? goalsByDue[iso] : [];
+            const sel = state.selected && state.selected === iso;
+            html += '<div class="cal-cell' + (isMuted ? ' muted' : '') + (sel ? ' sel' : '') + '" data-date="' + iso + '">'
+              + '<div class="cal-day"><span>' + String(cellDate.getDate()) + '</span>'
+              + (items.length ? '<span class="cal-dot" title="' + String(items.length) + ' done"></span>' : '<span></span>')
+              + '</div>'
+              + (dueGoals.length ? ('<div style="margin-top:6px; display:flex; flex-direction:column; gap:4px;">'
+                + dueGoals.slice(0,3).map((gg)=> '<a class="cal-goal" href="/goals?goal=' + encodeURIComponent(String(gg.id)) + '" title="' + esc(gg.title) + '" style="font-size:11px; color: rgba(255,209,102,0.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(gg.title) + '</a>').join('')
+                + (dueGoals.length > 3 ? '<div class="muted" style="font-size:11px;">+' + String(dueGoals.length - 3) + '</div>' : '')
+                + '</div>') : '')
+              + (items.length ? '<div class="cal-count">' + String(items.length) + ' done</div>' : '<div class="cal-count">&nbsp;</div>')
+              + '</div>';
+          }
+          html += '</div>';
+
+          // selected day list
+          const sel = state.selected;
+          const listItems = sel && Array.isArray(dataDays[sel]) ? dataDays[sel] : [];
+          html += '<div class="cal-list">'
+            + '<div class="muted" style="font-size:12px;"></div>';
+          if(sel && listItems.length){
+            for(const it of listItems){
+              const tid = String(it.task_public_id||'');
+              const tt = String(it.task_title||'');
+              const gt = String(it.goal_title||'');
+              html += '<div class="cal-item">'
+                + '<div><a href="/goals?task=' + encodeURIComponent(tid) + '">' + esc(tt ? tt : tid) + '</a><div class="meta">' + esc(gt) + '</div></div>'
+                + '<div class="meta">done</div>'
+                + '</div>';
+            }
+          }
+          html += '</div>';
+
+          main.innerHTML = html;
+          for(const a of $$('.cal-goal', main)){
+            a.addEventListener('click', (ev)=>{ ev.stopPropagation(); });
+          }
+          for(const cell of $$('.cal-cell', main)){
+            cell.addEventListener('click', ()=>{
+              state.selected = String(cell.getAttribute('data-date')||'');
+              render();
+            });
+          }
+        }
+
+        function renderSwimlane(){
+          const y = state.y;
+          const m = state.m;
+          const dim = daysInMonth(y, m);
+          const monthStart = new Date(y, m-1, 1);
+          const monthEnd = new Date(y, m-1, dim);
+          const goals = (state.data && Array.isArray(state.data.goals)) ? state.data.goals : [];
+
+          let html = '<div class="swim">';
+          if(!goals.length){
+            html += '<div class="muted">—</div>';
+            html += '</div>';
+            main.innerHTML = html;
+            return;
+          }
+
+          // day index header row
+          html += '<div class="swim-header">'
+            + '<div class="swim-hlabel"></div>'
+            + '<div class="swim-dayhead">'
+            + Array.from({ length: dim }, (_, i)=> '<span>' + String(i + 1) + '</span>').join('')
+            + '</div>'
+            + '</div>';
+
+          for(const g of goals){
+            const gid = Number(g.id||0);
+            const title = String(g.title||'');
+            const created = parseDateOnly(g.created_at);
+            const due = parseDateOnly(g.due_date);
+            if(!created || !due) continue;
+
+            const start = new Date(Math.max(created.getTime(), monthStart.getTime()));
+            const end = new Date(Math.min(due.getTime(), monthEnd.getTime()));
+            if(end.getTime() < start.getTime()) continue;
+
+            const startDay = start.getDate();
+            const endDay = end.getDate();
+            const leftPct = ((startDay - 1) / dim) * 100;
+            const widthPct = ((endDay - startDay + 1) / dim) * 100;
+            const doneN = Number(g.done_tasks||0);
+            const totalN = Number(g.total_tasks||0);
+
+            html += '<div class="swim-row" data-goal="' + String(gid) + '">' 
+              + '<div class="swim-name" title="' + esc(title) + '">' + esc(title) + ' <span class="muted">' + doneN + '/' + totalN + '</span></div>'
+              + '<div class="swim-track" style="--dim:' + String(dim) + ';">'
+              + '<div class="swim-bar" data-goal="' + String(gid) + '" style="left:' + leftPct.toFixed(2) + '%; width:' + widthPct.toFixed(2) + '%;"></div>'
+              + '</div>'
+              + '</div>';
+          }
+          html += '</div>';
+          main.innerHTML = html;
+          for(const bar of $$('.swim-bar', main)){
+            bar.addEventListener('click', (ev)=>{
+              ev.stopPropagation();
+              state.goalId = Number(bar.getAttribute('data-goal')||0);
+              render();
+            });
+          }
+        }
+
+        function renderGoalTasks(goalId){
+          const goals = (state.data && Array.isArray(state.data.goals)) ? state.data.goals : [];
+          const g = goals.find(x=> Number(x.id||0) === Number(goalId||0));
+          if(!g){
+            state.goalId = 0;
+            render();
+            return;
+          }
+          const title = String(g.title||'');
+          const tasks = Array.isArray(g.tasks) ? g.tasks : [];
+          let html = '';
+          html += '<div class="cal-list">'
+            + '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">'
+            + '<div><div class="cal-title" style="font-size:14px;">' + esc(title) + '</div><div class="muted" style="font-size:12px;">All tasks</div></div>'
+            + '<div style="display:flex; gap:8px; align-items:center;">'
+            + '<button type="button" class="btn-ghost" id="cal-back">Back</button>'
+            + '<a class="btn-ghost" role="button" href="/goals?goal=' + encodeURIComponent(String(goalId)) + '">Open</a>'
+            + '</div>'
+            + '</div>';
+
+          if(!tasks.length){
+            html += '<div class="muted" style="margin-top:10px;">—</div>';
+          }else{
+            for(const t of tasks){
+              const tid = String(t.public_id||'');
+              const tt = String(t.title||'');
+              const st = String(t.status||'');
+              html += '<div class="cal-item">'
+                + '<div><a href="/goals?task=' + encodeURIComponent(tid) + '">' + esc(tt ? tt : tid) + '</a><div class="meta">' + esc(st) + '</div></div>'
+                + '<div class="meta">' + (st === 'done' ? 'done' : '') + '</div>'
+                + '</div>';
+            }
+          }
+          html += '</div>';
+          main.innerHTML = html;
+          document.getElementById('cal-back')?.addEventListener('click', ()=>{
+            state.goalId = 0;
+            render();
+          });
+        }
+
+        function stepMonth(delta){
+          let y = state.y;
+          let m = state.m + delta;
+          if(m <= 0){ m = 12; y -= 1; }
+          if(m >= 13){ m = 1; y += 1; }
+          state.y = y; state.m = m;
+          state.selected = '';
+          state.goalId = 0;
+          void load();
+        }
+
+        btn.addEventListener('click', (e)=>{
+          e.preventDefault();
+          const now = new Date();
+          state.y = now.getFullYear();
+          state.m = now.getMonth() + 1;
+          state.view = 'grid';
+          state.selected = '';
+          state.goalId = 0;
+          vGrid.classList.add('on');
+          vSwim.classList.remove('on');
+          try{ dlg.showModal(); }catch(_){ }
+          void load();
+        });
+        prev.addEventListener('click', ()=> stepMonth(-1));
+        next.addEventListener('click', ()=> stepMonth(1));
+        vGrid.addEventListener('click', ()=> setView('grid'));
+        vSwim.addEventListener('click', ()=> setView('swim'));
+      })();
     </script>
   </body>
 </html>

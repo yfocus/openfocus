@@ -106,7 +106,7 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 # create agent space bound to companion
                 r = await client.post(
                     f"/api/tasks/{task_pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(tmp_path / "ws"), "agent_type": "trae-cli"},
+                    json={"companion_id": cid, "root_path": str(tmp_path / "ws")},
                 )
                 assert r.status_code == 200
 
@@ -172,7 +172,7 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
                 # create agent space
                 r = await client.post(
                     f"/api/tasks/{pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(ws), "agent_type": "trae-cli"},
+                    json={"companion_id": cid, "root_path": str(ws)},
                 )
                 assert r.status_code == 200
                 space_id = r.json()["space_id"]
@@ -250,7 +250,7 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
 
                 r = await client.post(
                     f"/api/tasks/{pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(ws), "agent_type": "trae-cli"},
+                    json={"companion_id": cid, "root_path": str(ws)},
                 )
                 assert r.status_code == 200
                 space_id = r.json()["space_id"]
@@ -324,7 +324,7 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
                 # create agent space
                 r = await client.post(
                     f"/api/tasks/{pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(ws), "agent_type": "trae-cli"},
+                    json={"companion_id": cid, "root_path": str(ws)},
                 )
                 assert r.status_code == 200
                 space_id = r.json()["space_id"]
@@ -412,7 +412,7 @@ def test_agent_space_agent_offline_returns_502(tmp_path):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
                 f"/api/tasks/{pid}/agent_space",
-                json={"companion_id": cid, "root_path": str(tmp_path), "agent_type": "trae-cli"},
+                json={"companion_id": cid, "root_path": str(tmp_path)},
             )
             assert r.status_code == 200
             space_id = r.json()["space_id"]
@@ -509,10 +509,6 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
             cid1 = comp1["id"]
             stop1.set()
             await asyncio.wait_for(t1, timeout=5.0)
-
-            # gRPC 断开应落库事件
-            with session_scope() as s:
-                assert s.query(Event).filter(Event.kind == "companion.disconnected").count() >= 1
 
             # 第二次启动（复用同一份 state）
             stop2 = asyncio.Event()

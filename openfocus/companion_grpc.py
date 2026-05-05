@@ -565,23 +565,7 @@ class CompanionRegistry:
                 self._by_companion_id.pop(cid, None)
                 removed = True
 
-        # 记录“失去连接”事件（仅当确实从 registry 移除）
-        if removed:
-            try:
-                with session_scope() as s:
-                    c = s.get(Companion, cid)
-                    device_id = (c.device_id if c is not None else (conn.device_id or ""))
-                    s.add(
-                        Event(
-                            kind="companion.disconnected",
-                            agent="openfocus/grpc",
-                            task_id=None,
-                            payload={"companion_id": cid, "device_id": device_id},
-                        )
-                    )
-            except Exception:
-                # best-effort: 不影响连接清理
-                pass
+        # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 
 
 class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
@@ -642,26 +626,7 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
         conn.handle_incoming(first)
         await self.registry.set_connected(assigned_id, conn)
 
-        # 记录“连接成功”事件（best-effort，不影响连接建立）
-        try:
-            with session_scope() as s:
-                c = s.get(Companion, assigned_id)
-                device_id_out = (c.device_id if c is not None else (conn.device_id or ""))
-                s.add(
-                    Event(
-                        kind="companion.connected",
-                        agent="openfocus/grpc",
-                        task_id=None,
-                        payload={
-                            "companion_id": int(assigned_id),
-                            "device_id": device_id_out,
-                            "name": (conn.name or "").strip(),
-                            "capabilities": list(conn.capabilities or []),
-                        },
-                    )
-                )
-        except Exception:
-            pass
+        # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 
         await conn._out_q.put(pb2.ServerToClient(welcome=pb2.Welcome(companion_id=assigned_id)))
         await conn.start_ping_loop()

@@ -1,36 +1,61 @@
 {% extends "base.html" %}
 {% block content %}
-  <div style="margin-top: 14px;" class="panel pad">
-    <div class="k">Plan Mode</div>
-    <div class="muted" style="margin-top: 8px;">像 ChatGPT 一样的对话式澄清：先问清楚再拆解，最终结果必须由你确认后才会写入。</div>
+  <style>
+    .plan-page{ max-width: 1040px; margin: 14px auto 0; padding: 0 6px; }
+    .plan-head{ display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap; }
+    .plan-title{ font-size: 18px; font-weight: 700; color: rgba(255,209,102,0.92); }
+    .plan-sub{ margin-top: 6px; color: rgba(215,255,233,0.62); font-size: 12px; }
+    .plan-actions{ display:flex; gap: 10px; align-items:center; }
+    .plan-actions a{ padding: 0; }
+
+    .plan-box{ margin-top: 12px; border: 1px solid rgba(255,255,255,0.18); border-radius: 12px; background: rgba(0,0,0,0.55); }
+    .plan-box .pad{ padding: 14px; }
+    .plan-label{ color: rgba(215,255,233,0.62); font-size: 12px; margin-bottom: 6px; }
+    .plan-hint{ margin-top: 10px; color: rgba(215,255,233,0.60); font-size: 12px; }
+    .plan-error{ border-color: rgba(255,59,92,0.45) !important; background: rgba(255,59,92,0.06) !important; }
+  </style>
+
+  <div class="plan-page">
+    <div class="plan-head">
+      <div>
+        <div class="plan-title">Plan</div>
+        <div class="plan-sub">Plan Mode = 先规划再执行。Describe your goal… 我们会先拆成步骤，再进入执行（NextMove / Events）。</div>
+      </div>
+      <div class="plan-actions">
+        <a href="/goals" class="btn-ghost" role="button">Dashboard</a>
+      </div>
+    </div>
 
     {% if error %}
-      <div class="divider"></div>
-      <div class="panel pad" style="border-color: rgba(255,59,92,0.45); background: rgba(255,59,92,0.06);">
-        <div class="k" style="color: rgba(255,59,92,0.95);">无法启动 Plan Mode</div>
-        <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ error }}</div>
+      <div class="plan-box plan-error" style="margin-top: 12px;">
+        <div class="pad">
+          <div class="k" style="color: rgba(255,59,92,0.95);">无法启动 Plan Mode</div>
+          <div class="muted" style="margin-top: 10px; white-space: pre-wrap;">{{ error }}</div>
+        </div>
       </div>
     {% endif %}
 
-    <div class="divider"></div>
+    <div class="plan-box">
+      <div class="pad">
+        <form method="post" action="/goals/plan/start" id="plan-start-form">
+          <div class="plan-label">Describe your goal</div>
+          <textarea name="draft_content" rows="5" placeholder="Describe your goal...\n\nWe’ll break this into steps before execution." required>{{ draft_content or '' }}</textarea>
 
-    <form method="post" action="/goals/plan/start" id="plan-start-form">
-      <div style="margin-bottom: 10px;">
-        <label class="muted">初始目标（草稿）</label>
-        <textarea name="draft_content" rows="4" placeholder="例如：做一个本地部署的注意力 OS，先把 goal/task/事件跑通" required></textarea>
+          <div style="margin-top: 12px; display:flex; align-items:end; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
+            <div>
+              <div class="plan-label">DDL</div>
+              <input type="date" name="due_date" value="{{ default_due }}" required />
+            </div>
+            <div style="display:flex; gap: 10px; align-items:center;">
+              <a href="/goals" class="btn-ghost" role="button">Cancel</a>
+              <button type="submit" id="plan-start-btn" class="btn-primary">Generate Plan</button>
+            </div>
+          </div>
+
+          <div id="plan-start-hint" class="plan-hint" style="display:none;"><span class="spin"></span> Planning…</div>
+        </form>
       </div>
-      <div class="row">
-        <div>
-          <label class="muted">完成时间（DDL）</label>
-          <input type="date" name="due_date" value="{{ default_due }}" required />
-        </div>
-        <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
-          <a href="/goals" class="btn-ghost" role="button" style="align-self:center;">返回 Dashboard</a>
-          <button type="submit" id="plan-start-btn">开始澄清</button>
-        </div>
-      </div>
-      <div id="plan-start-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> 正在启动 Plan Agent…</div>
-    </form>
+    </div>
   </div>
 
   <script>

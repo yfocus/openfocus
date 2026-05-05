@@ -1,61 +1,159 @@
 {% extends "base.html" %}
 {% block content %}
-  <div class="panel pad" style="margin-top: 14px;">
-    <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
+  <style>
+    /* Layout: centered column like the whiteboard */
+    .comp-page{
+      max-width: 1120px;
+      margin: 18px auto 0;
+      padding: 0 6px;
+    }
+    .comp-head{
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap: 14px;
+      flex-wrap:wrap;
+      margin-bottom: 14px;
+    }
+    .comp-title{ font-size: 22px; font-weight: 700; color: rgba(255,209,102,0.92); }
+    .comp-link{ border: 0; background: transparent; padding: 0; color: rgba(215,255,233,0.72); }
+    .comp-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+
+    /* Cards: no border, rely on background + spacing */
+    .comp-list{ display:flex; flex-direction:column; gap: 12px; }
+    .comp-item{
+      background: rgba(255,255,255,0.06);
+      border: 0;
+      border-radius: 12px;
+      padding: 14px 16px;
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap: 14px;
+    }
+    .comp-item:hover{ background: rgba(255,255,255,0.09); }
+
+    .comp-left{ min-width:0; flex: 1; }
+    .comp-name{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      color: rgba(229,231,235,0.95);
+      line-height: 1.4;
+    }
+    .comp-desc{ margin-top: 6px; color: rgba(215,255,233,0.58); font-size: 13px; }
+    .comp-kv{ margin-top: 8px; display:flex; flex-direction:column; gap: 6px; }
+    .kv{ color: rgba(215,255,233,0.62); font-size: 12px; }
+    .kv b{ color: rgba(215,255,233,0.78); font-weight: 600; }
+    .mono{ font-family: var(--mono); }
+
+    .dev-icon{ width: 18px; height: 18px; flex: 0 0 auto; }
+    .dev-icon svg{ width:100%; height:100%; display:block; }
+    .dev-icon.active{ color: rgba(34,197,94,0.95); }
+    .dev-icon.offline{ color: rgba(239,68,68,0.95); }
+    .dev-icon.pending_certification{ color: rgba(245,158,11,0.95); }
+
+    .comp-right{ flex: 0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap: 10px; }
+    .status{
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.35);
+    }
+    .status.active{ color: rgba(34,197,94,0.95); }
+    .status.offline{ color: rgba(239,68,68,0.95); }
+    .status.pending_certification{ color: rgba(245,158,11,0.95); }
+
+    .actions{ display:flex; gap: 10px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
+    .btn{
+      border: 0;
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      font-family: var(--mono);
+    }
+    .btn.pair{ background: rgba(34,197,94,0.92); color: #07140b; }
+    .btn.pair:hover{ background: rgba(34,197,94,1); }
+    .btn.del{ background: rgba(239,68,68,0.92); color: #180707; }
+    .btn.del:hover{ background: rgba(239,68,68,1); }
+
+    /* Inline pair (per pending companion) */
+    .pair-inline{ display:grid; grid-template-columns: 1fr 140px; gap: 10px; align-items:stretch; width: 360px; max-width: 100%; }
+    .pair-inline input{ height: 36px; font-family: var(--mono); }
+    .pair-inline button{ height: 36px; }
+    .pair-inline-err{ margin-top: 8px; color: var(--danger); font-size: 12px; text-align: right; }
+  </style>
+
+  <div class="comp-page">
+    <div class="comp-head">
       <div>
-        <div class="k">COMPANION</div>
-        <div class="muted" style="margin-top: 6px;">管理已注册的 Companion（active/offline/pending certification）。</div>
+        <div class="comp-title">Companion</div>
       </div>
-      <div style="display:flex; gap: 10px; flex-wrap:wrap; justify-content:flex-end;">
-        <button type="button" class="btn-ghost" id="comp-refresh">刷新</button>
-      </div>
+      <button type="button" class="comp-link" id="comp-refresh">ref</button>
     </div>
-    <div class="divider"></div>
-    <div id="comp-list" class="muted">加载中…</div>
+
+    <div id="comp-list" class="comp-list muted">loading...</div>
+
   </div>
 
-  <dialog id="pair-dialog" class="panel" style="max-width: 560px; width: calc(100% - 24px);">
-    <form method="dialog" style="margin:0;">
-      <div class="pad" style="padding: 14px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div>
-            <div class="k">认证 Companion</div>
-            <div class="muted" style="margin-top: 4px;" id="pair-hint">—</div>
-          </div>
-          <button type="submit" class="btn-ghost">关闭</button>
-        </div>
-      </div>
-    </form>
-    <div class="divider"></div>
-    <div class="pad" style="padding: 14px;">
-      <div class="muted" style="margin-bottom: 10px;">点击“认证”后系统会让 Companion 生成新的 10 位认证码（有效期 10 分钟），并仅在 Companion 终端输出。请复制到这里。</div>
-      <input id="pair-code" placeholder="例如：A1B2C3D4E5" maxlength="10" />
-      <div style="display:flex; justify-content:flex-end; gap: 10px; margin-top: 10px; flex-wrap:wrap;">
-        <button type="button" id="pair-submit">认证</button>
-      </div>
-      <div id="pair-err" class="muted" style="margin-top: 10px; color: var(--danger);"></div>
-    </div>
-  </dialog>
-
   <script>
-    const STATE = { currentId: null };
+    const STATE = {};
 
     function esc(s){
       const x = String(s ?? '');
       return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
     }
 
-    function badge(status){
-      const s = String(status||'');
-      if(s === 'active') return '<span class="pill" style="border-color: rgba(43,255,183,0.35);">active</span>';
-      if(s === 'offline') return '<span class="pill" style="border-color: rgba(255,209,102,0.35);">offline</span>';
-      return '<span class="pill" style="border-color: rgba(255,59,92,0.35);">pending certification</span>';
+    function normalizeStatus(status){
+      const raw = String(status || '').trim();
+      const s = raw.toLowerCase();
+      // UI wants "waiting for pairing" but backend may output different variants.
+      if(s === 'pending_certification' || s === 'waiting_for_pairing' || s === 'waiting for pairing' || s === 'waiting-for-pairing'){
+        return { key: 'pending_certification', label: 'waiting for pairing', waiting: true };
+      }
+      return { key: raw || '', label: raw || '', waiting: false };
+    }
+
+    function statusBadge(status){
+      const st = normalizeStatus(status);
+      return '<span class="status ' + esc(st.key) + '">' + esc(st.label || st.key || '-') + '</span>';
+    }
+
+    function devIcon(status){
+      const st = normalizeStatus(status);
+      const s = st.key;
+      // simple desktop/monitor icon (outline)
+      return (
+        '<span class="dev-icon ' + esc(s) + '">' +
+        '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+        + '<path d="M4 5.5C4 4.67157 4.67157 4 5.5 4H18.5C19.3284 4 20 4.67157 20 5.5V15.5C20 16.3284 19.3284 17 18.5 17H5.5C4.67157 17 4 16.3284 4 15.5V5.5Z" stroke="currentColor" stroke-width="1.6"/>'
+        + '<path d="M9 20H15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+        + '<path d="M12 17V20" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+        + '</svg>'
+        + '</span>'
+      );
+    }
+
+    function fmtYmd(iso){
+      try{
+        const d = new Date(iso);
+        if(Number.isNaN(d.getTime())) return '—';
+        const y = d.getFullYear();
+        const m = String(d.getMonth()+1).padStart(2,'0');
+        const dd = String(d.getDate()).padStart(2,'0');
+        return y + '-' + m + '-' + dd;
+      }catch(_){ return '—'; }
     }
 
     async function deleteCompanion(id){
       const cid = String(id||'').trim();
       if(!cid) return;
-      if(!confirm('确认删除 Companion #' + cid + '？\n\n- 会解绑关联的 AgentSpace\n- 删除后需要 Companion 重新注册/重新配对')) return;
+      if(!confirm('确认删除 Companion #' + cid + '？\n\n- 会解绑关联的 AgentSpaces\n- 删除后需要 Companion 重新注册/重新配对')) return;
       const r = await fetch('/api/companions/' + encodeURIComponent(cid), { method: 'DELETE' });
       if(!r.ok){
         const t = await r.text().catch(()=> '');
@@ -68,72 +166,56 @@
       const box = document.getElementById('comp-list');
       const btn = document.getElementById('comp-refresh');
       if(btn) btn.disabled = true;
-      box.innerHTML = '<span class="spin"></span> <span class="muted">加载中…</span>';
+      box.innerHTML = '<span class="spin"></span> <span class="muted">loading...</span>';
       try{
         const r = await fetch('/api/companions?limit=50');
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const items = (data && data.items) ? data.items : [];
-        if(!items.length){ box.textContent = '暂无 Companion。请先启动 Companion 进程并让其向 OpenFocus register。'; return; }
+        if(!items.length){ box.textContent = 'No companion. Start the companion process and register to OpenFocus.'; return; }
         box.innerHTML = items.map((it)=>{
           const spaces = Array.isArray(it.agent_spaces) ? it.agent_spaces : [];
+          const related = spaces.length ? spaces.map(x=> (x && (x.task_public_id || ('space#'+x.id)))).filter(Boolean).join(', ') : '—';
+          const status = String(it.status || '');
+          const st = normalizeStatus(status);
+          const title = (it.name || it.device_id || 'companion');
+          const created = fmtYmd(it.created_at);
           return `
-            <div class="panel" style="margin: 10px 0; background: rgba(0,0,0,0.18);">
-              <div class="pad" style="padding: 10px 12px;">
-                <div style="display:flex; align-items:baseline; justify-content:space-between; gap: 10px; flex-wrap:wrap;">
-                  <div style="min-width:0; flex:1;">
-                    <div class="k">${esc(it.name || it.device_id || 'companion')}</div>
-                    <div class="muted" style="margin-top: 6px;">base_url: ${esc(it.base_url || '')}</div>
-                    <div class="muted" style="margin-top: 6px;">device_id: ${esc(it.device_id || '')}</div>
-                  </div>
-                <div style="display:flex; gap: 10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
-                  ${badge(it.status)}
-                  ${(it.status === 'pending_certification') ? `<button type="button" class="btn-ghost js-pair" data-id="${esc(it.id)}">认证</button>` : ''}
-                  <button type="button" class="btn-ghost js-del" data-id="${esc(it.id)}" style="border-color: rgba(255,59,92,0.35);">删除</button>
+            <div class="comp-item" data-status="${esc(st.key)}">
+              <div class="comp-left">
+                <div class="comp-name">${devIcon(st.key)}<span title="${esc(title)}">${esc(title)}</span></div>
+                <div class="comp-kv">
+                  <div class="kv"><b>device_id</b>: <span class="mono">${esc(it.device_id || '—')}</span></div>
+                  <div class="kv"><b>related_space</b>: <span class="mono">${esc(related)}</span></div>
+                  <div class="kv"><b>created</b>: <span class="mono">${esc(created)}</span></div>
                 </div>
+              </div>
+              <div class="comp-right">
+                ${statusBadge(st.key)}
+                <div class="actions">
+                  ${(st.waiting) ? `
+                    <div>
+                      <div class="pair-inline">
+                        <input class="mono js-pair-code" placeholder="Enter pairing code" maxlength="10" />
+                        <button type="button" class="btn pair js-pair-submit" data-id="${esc(it.id)}">Pair</button>
+                      </div>
+                      <div class="pair-inline-err js-pair-err"></div>
+                    </div>
+                  ` : ''}
+                  <button type="button" class="btn del js-del" data-id="${esc(it.id)}">Delete</button>
                 </div>
-
-                <div class="divider"></div>
-                <div class="muted">关联 AgentSpace：${spaces.length ? esc(spaces.map(x=> (x.task_public_id || ('space#'+x.id))).join(', ')) : '—'}</div>
-                <div class="muted" style="margin-top: 6px;">last_seen: ${esc(it.last_seen_at || '—')}</div>
               </div>
             </div>
           `;
         }).join('');
       }catch(e){
-        box.textContent = '加载失败：' + String(e && e.message ? e.message : e);
+        box.textContent = 'Failed: ' + String(e && e.message ? e.message : e);
       }finally{
         if(btn) btn.disabled = false;
       }
     }
 
-    async function pairCurrent(){
-      const id = STATE.currentId;
-      const code = String(document.getElementById('pair-code')?.value || '').trim();
-      const err = document.getElementById('pair-err');
-      if(err) err.textContent = '';
-      if(!id){ if(err) err.textContent='id 缺失'; return; }
-      if(!code){ if(err) err.textContent='请输入认证码'; return; }
-      try{
-        const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pair', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code })
-        });
-        if(!r.ok){
-          const t = await r.text().catch(()=> '');
-          throw new Error(t || ('HTTP ' + r.status));
-        }
-        toast('认证成功');
-        document.getElementById('pair-dialog')?.close();
-        await refresh();
-      }catch(e){
-        if(err) err.textContent = String(e && e.message ? e.message : e);
-      }
-    }
-
     document.getElementById('comp-refresh')?.addEventListener('click', refresh);
-    document.getElementById('pair-submit')?.addEventListener('click', pairCurrent);
 
     document.addEventListener('click', (e)=>{
       const t = e.target;
@@ -144,41 +226,50 @@
         (async ()=>{
           try{
             await deleteCompanion(id);
-            toast('已删除');
+            toast('deleted');
             await refresh();
           }catch(err){
-            toast('删除失败');
-            alert('删除失败：' + String(err && err.message ? err.message : err));
+            toast('delete failed');
+            alert('Delete failed: ' + String(err && err.message ? err.message : err));
           }
         })();
         return;
       }
-      const b = t.closest('.js-pair');
-      if(!b) return;
-      const id = b.getAttribute('data-id');
-      STATE.currentId = id;
-      document.getElementById('pair-hint').textContent = 'companion_id=' + id + ' · 正在生成认证码（请看 Companion 终端）…';
-      document.getElementById('pair-code').value = '';
-      document.getElementById('pair-err').textContent = '';
+      const p = t.closest('.js-pair-submit');
+      if(!p) return;
+      const id = String(p.getAttribute('data-id') || '').trim();
+      const item = p.closest('.comp-item');
+      const codeEl = item ? item.querySelector('.js-pair-code') : null;
+      const errEl = item ? item.querySelector('.js-pair-err') : null;
+      if(errEl) errEl.textContent = '';
+      const code = String((codeEl && codeEl.value) ? codeEl.value : '').trim();
+      if(!id){ if(errEl) errEl.textContent = '缺少 companion_id'; return; }
+      if(!code){ if(errEl) errEl.textContent = '请输入配对码'; return; }
+      if(!/^[A-Za-z0-9]{10}$/.test(code)){
+        if(errEl) errEl.textContent = '配对码需为 10 位字母或数字';
+        return;
+      }
 
-      // 每次点击“认证”都让服务端通过 gRPC 向 Companion 请求一个新的配对码
       (async ()=>{
         try{
-          const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pairing_code', { method: 'POST' });
+          p.disabled = true;
+          const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pair', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+          });
           if(!r.ok){
-            const t = await r.text().catch(()=> '');
-            throw new Error(t || ('HTTP ' + r.status));
+            const txt = await r.text().catch(()=> '');
+            throw new Error(txt || ('HTTP ' + r.status));
           }
-          const data = await r.json();
-          const exp = String((data && data.expires_at) ? data.expires_at : '').trim();
-          document.getElementById('pair-hint').textContent = 'companion_id=' + id + (exp ? (' · expires_at=' + exp) : '') + ' · 请到 Companion 终端复制配对码';
+          toast('paired');
+          await refresh();
         }catch(err){
-          document.getElementById('pair-hint').textContent = 'companion_id=' + id;
-          document.getElementById('pair-err').textContent = String(err && err.message ? err.message : err);
+          if(errEl) errEl.textContent = String(err && err.message ? err.message : err);
+        }finally{
+          p.disabled = false;
         }
       })();
-
-      try{ document.getElementById('pair-dialog')?.showModal(); }catch(_){ }
     });
 
     refresh();

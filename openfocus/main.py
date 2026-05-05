@@ -37,7 +37,6 @@ from .schemas import (
 )
 
 from .agent.llm.openai_compat import OpenAICompatibleProvider
-from .agent.agents.task_prompt_recommender import TaskPromptRecommenderAgent
 
 from .companion_grpc import (
     CompanionGrpcError,
@@ -57,6 +56,11 @@ app = FastAPI(title="OpenFocus", version="0.1.0")
 _REMOTE_TERMINAL_DIR = (APP_DIR.parent / "remote-terminal").resolve()
 if _REMOTE_TERMINAL_DIR.exists() and _REMOTE_TERMINAL_DIR.is_dir():
     app.mount("/remote-terminal", StaticFiles(directory=str(_REMOTE_TERMINAL_DIR)), name="remote-terminal")
+
+# 静态资源：内置资源（resources/，例如 icons）
+_RESOURCES_DIR = (APP_DIR.parent / "resources").resolve()
+if _RESOURCES_DIR.exists() and _RESOURCES_DIR.is_dir():
+    app.mount("/resources", StaticFiles(directory=str(_RESOURCES_DIR)), name="resources")
 
 
 # OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
@@ -430,7 +434,98 @@ async def _startup_companion_grpc() -> None:
     await COMPANION_GRPC.start()
 
 
+_DOTENV_LOADED = False
+
+
+def _load_dotenv_once() -> None:
+    """Best-effort load `.env` into process env (only if variables are missing).
+
+    约定：
+    - 默认读取启动目录（cwd）下的 `.env`
+    - 若 cwd 下不存在，则再尝试读取“仓库根目录”（`openfocus/..`）下的 `.env`
+      （解决从子目录启动服务时读不到 `.env` 的问题）
+    - 可通过 `OPENFOCUS_ENV_FILE` 指定自定义路径
+    - 永不覆盖已存在的环境变量
+    """
+
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+
+    candidates: list[Path] = []
+    env_file = str(os.environ.get("OPENFOCUS_ENV_FILE") or "").strip()
+
+    # 默认行为：
+    # - 运行应用时（非测试）：自动尝试加载 cwd/.env
+    # - 运行测试时：默认不加载 cwd/.env（避免本地密钥污染测试）；只有显式指定 OPENFOCUS_ENV_FILE 才加载。
+    mode = str(os.environ.get("OPENFOCUS_DOTENV") or "auto").strip().lower()
+    if mode in {"0", "false", "off", "no"}:
+        return
+    if mode == "auto" and os.environ.get("PYTEST_CURRENT_TEST") and not env_file:
+        return
+
+    if env_file:
+        try:
+            candidates.append(Path(env_file).expanduser())
+        except Exception:
+            pass
+    candidates.append(Path.cwd() / ".env")
+    # 兼容：从源码目录推断仓库根目录（openfocus/..），避免 cwd 不在仓库根目录时读不到 .env。
+    try:
+        repo_env = Path(__file__).resolve().parent.parent / ".env"
+        if repo_env not in candidates:
+            candidates.append(repo_env)
+    except Exception:
+        pass
+
+    def _strip_quotes(v: str) -> str:
+        s = (v or "").strip()
+        if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+            return s[1:-1]
+        return s
+
+    def _parse_line(line: str) -> tuple[str, str] | None:
+        raw = (line or "").strip()
+        if not raw or raw.startswith("#"):
+            return None
+        if raw.startswith("export "):
+            raw = raw[len("export ") :].lstrip()
+        if "=" not in raw:
+            return None
+        k, v = raw.split("=", 1)
+        key = (k or "").strip()
+        if not key:
+            return None
+        val = (v or "").strip()
+        # 支持：KEY=VALUE # comment（仅对未加引号的值做截断）
+        if val and not (val.startswith('"') or val.startswith("'")):
+            hash_idx = val.find("#")
+            if hash_idx >= 0:
+                before = val[:hash_idx]
+                # 只有在 # 前面有空白时才认为是注释
+                if before.rstrip() != before:
+                    val = before.strip()
+        return key, _strip_quotes(val)
+
+    for p in candidates:
+        try:
+            if not p.exists() or not p.is_file():
+                continue
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                kv = _parse_line(line)
+                if not kv:
+                    continue
+                key, val = kv
+                if key not in os.environ and val != "":
+                    os.environ[key] = val
+            break
+        except Exception:
+            continue
+
+
 def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str | None]:
+    _load_dotenv_once()
     try:
         return OpenAICompatibleProvider.from_env(), None
     except Exception as e:
@@ -439,6 +534,7 @@ def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str |
             "请设置环境变量（任选其一）：\n"
             "- OpenAI-compatible：OPENFOCUS_OPENAI_API_KEY（以及可选的 OPENFOCUS_OPENAI_BASE_URL/OPENFOCUS_OPENAI_MODEL）\n"
             "- Ark：OPENFOCUS_ARK_API_KEY（或 ARK_API_KEY），以及 OPENFOCUS_ARK_BASE_URL/OPENFOCUS_ARK_MODEL（或 ARK_BASE_URL/ARK_MODEL）\n"
+            "也支持在启动目录放置 `.env`（可参考仓库根目录的 `.env-default`），或用 OPENFOCUS_ENV_FILE 指定路径。\n"
             f"错误：{e}"
         )
 
@@ -516,9 +612,15 @@ def index() -> RedirectResponse:
 @app.get("/goals", response_class=HTMLResponse)
 def goals_list(request: Request) -> HTMLResponse:
     with session_scope() as s:
-        goals = s.query(Goal).order_by(Goal.id.desc()).all()
+        # Dashboard 左侧目标列表：支持筛选/排序
+        goal_filter = (request.query_params.get("gfilter") or "ALL").strip().upper()
+        goal_sort = (request.query_params.get("gsort") or "DDL").strip().upper()
 
-        goal_ids = [g.id for g in goals]
+        goals_all = s.query(Goal).order_by(Goal.id.desc()).all()
+        today = dt.date.today()
+
+        # 仅对当前页面所需的 goals 做聚合
+        goal_ids = [g.id for g in goals_all]
         tasks = []
         if goal_ids:
             tasks = s.query(Task).filter(Task.goal_id.in_(goal_ids)).order_by(Task.id.asc()).all()
@@ -552,6 +654,11 @@ def goals_list(request: Request) -> HTMLResponse:
         # 任务详情栏需要展示“与该任务相关的事件”（只展示最近 N 条，避免页面过重）。
         # 注意：事件展示面向人，不直接暴露内部 kind/status 码。
         task_events: dict[str, list[dict]] = {pid: [] for pid in public_ids}
+
+        # Goal 的事件：聚合该 Goal 下各 Task 的事件（用于 Dashboard 中间栏 Goal->Event）。
+        # 先初始化，保证即使没有 task 也不会出现未定义。
+        task_goal_by_pid: dict[str, int] = {t.public_id: t.goal_id for t in tasks}
+        goal_events: dict[int, list[dict]] = {g.id: [] for g in goals_all}
         if public_ids:
             per_task_limit = 12
             evs = (
@@ -577,6 +684,53 @@ def goals_list(request: Request) -> HTMLResponse:
                     }
                 )
 
+        for pid, evs in task_events.items():
+            gid = task_goal_by_pid.get(pid)
+            if gid is None or gid not in goal_events:
+                continue
+            for it in evs:
+                # 额外带上 task_public_id，未来可在 UI 里做“打开该任务”。
+                goal_events[gid].append({**it, "task_public_id": pid})
+
+        # Goal 级事件：用于 Goal 详情页的 Event 区块（例如“confirm done by user”）。
+        # 同时记录“完成时间”，用于 Dashboard 左侧排序。
+        goal_done_at: dict[int, dt.datetime] = {}
+        goal_level_evs = (
+            s.query(Event)
+            .filter(Event.kind.like("goal.%"))
+            .order_by(Event.id.desc())
+            .limit(200)
+            .all()
+        )
+        for ev in goal_level_evs:
+            payload = ev.payload or {}
+            try:
+                gid = int((payload or {}).get("goal_id") or 0)
+            except Exception:
+                gid = 0
+            if not gid or gid not in goal_events:
+                continue
+
+            if ev.kind == "goal.confirmed_done_by_user":
+                prev = goal_done_at.get(gid)
+                if prev is None or (hasattr(ev.created_at, "timestamp") and hasattr(prev, "timestamp") and ev.created_at > prev):
+                    goal_done_at[gid] = ev.created_at
+
+            goal_events[gid].append(
+                {
+                    "id": ev.id,
+                    "kind": ev.kind,
+                    "kind_label": _event_kind_label(ev.kind, payload),
+                    "source_label": _event_source_label(ev.agent),
+                    "created_at": ev.created_at,
+                    "summary": _event_summary(ev.kind, payload),
+                    "task_public_id": None,
+                }
+            )
+        for gid, evs in goal_events.items():
+            evs.sort(key=lambda x: x.get("created_at") or _utcnow(), reverse=True)
+            goal_events[gid] = evs[:30]
+
         task_meta: dict[str, dict] = {}
         now = _utcnow()
         for t in tasks:
@@ -601,6 +755,50 @@ def goals_list(request: Request) -> HTMLResponse:
                 "last_event_at": last_at,
                 "elapsed": _human_since(last_at or t.created_at, now=now),
             }
+
+        def _goal_group(g: Goal) -> int:
+            # 0: in_progress, 1: expired, 2: completed
+            if (g.status or "").strip() == "done":
+                return 2
+            if getattr(g, "due_date", None) and g.due_date < today:
+                return 1
+            return 0
+
+        def _accept_goal(g: Goal) -> bool:
+            x = goal_filter
+            if x == "ALL":
+                return True
+            grp = _goal_group(g)
+            if x in {"IN_PROGRESS", "INPROGRESS", "IN-PROGRESS"}:
+                return grp == 0
+            if x == "EXPIRED":
+                return grp == 1
+            if x == "COMPLETED":
+                return grp == 2
+            return True
+
+        def _sort_key(g: Goal):
+            grp = _goal_group(g)
+            created_at = getattr(g, "created_at", None) or _utcnow()
+            # 只对已完成的 goal 使用 done_at；否则为空
+            done_at = goal_done_at.get(int(g.id)) if grp == 2 else None
+
+            # 统一把“已完成”放到下面（grp 参与排序），满足默认要求
+            if goal_sort in {"CREATED", "CREATED_AT", "CREATED_EVENT"}:
+                # 新建优先（倒序）
+                return (grp, -(created_at.timestamp() if hasattr(created_at, "timestamp") else 0), -int(g.id))
+            if goal_sort in {"COMPLETED", "COMPLETED_AT", "DONE", "DONE_AT"}:
+                # 完成时间优先（倒序）；未完成放在各自组里按创建时间兜底
+                ts_done = done_at.timestamp() if (done_at and hasattr(done_at, "timestamp")) else -1
+                ts_created = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+                return (grp, -ts_done if grp == 2 else -ts_created, -int(g.id))
+            # 默认 DDL（due_date 升序；同 DDL 以创建时间倒序）
+            due = getattr(g, "due_date", None) or today
+            ts_created = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+            return (grp, int(due.toordinal()) if hasattr(due, "toordinal") else 0, -ts_created, -int(g.id))
+
+        goals = [g for g in goals_all if _accept_goal(g)]
+        goals.sort(key=_sort_key)
 
         # Dashboard 左栏显示用摘要（不触发 LLM；空摘要时做截断兜底）
         goal_display: dict[int, str] = {}
@@ -638,10 +836,14 @@ def goals_list(request: Request) -> HTMLResponse:
             "goal_display": goal_display,
             "task_display": task_display,
             "task_events": task_events,
+            "goal_events": goal_events,
             "now": _utcnow(),
+            "today": today,
             "selected_goal": selected_goal,
             "selected_task": selected_task,
             "default_due": default_due.isoformat(),
+            "goal_filter": goal_filter,
+            "goal_sort": goal_sort,
         },
     )
 
@@ -761,11 +963,18 @@ def goals_new(request: Request) -> HTMLResponse:
 
 
 @app.post("/goals", include_in_schema=False)
-def goals_create(
+async def goals_create(
     content: str = Form(..., min_length=1, max_length=2000),
     description: str = Form(..., min_length=1, max_length=4000),
     due_date: str = Form(...),
+    plan_mode: str | None = Form(default=None),
 ) -> RedirectResponse:
+    # Server-side guard: if Plan Mode is ON but JS didn't repoint form action,
+    # we should still enter Plan flow instead of creating the goal directly.
+    pm = (str(plan_mode or "").strip().lower())
+    if pm in {"1", "true", "on", "yes"}:
+        return await goal_plan_create_session(due_date=due_date, content=content, description=description, draft_content=None)
+
     parsed_due = dt.date.fromisoformat(due_date)
     provider, _err = _get_llm_provider_or_error()
     summary = _summarize_items(provider, [content.strip()])[0]
@@ -822,6 +1031,49 @@ def tasks_create(
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
+@app.post("/goals/{goal_id:int}/done", include_in_schema=False)
+def goals_mark_done(goal_id: int) -> RedirectResponse:
+    """将 Goal 标记为已完成（人工行为）。"""
+
+    with session_scope() as s:
+        g = s.get(Goal, goal_id)
+        if g is None:
+            raise HTTPException(status_code=404, detail="Goal not found")
+        if (g.status or "").strip() != "done":
+            old = (g.status or "").strip() or "active"
+            g.status = "done"
+            s.add(
+                Event(
+                    kind="goal.confirmed_done_by_user",
+                    agent="ui",
+                    task_id=None,
+                    payload={"goal_id": int(goal_id), "from": old},
+                )
+            )
+    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
+
+
+@app.post("/goals/{goal_id:int}/reopen", include_in_schema=False)
+def goals_reopen(goal_id: int) -> RedirectResponse:
+    """将已完成的 Goal 重新打开（人工行为）。"""
+
+    with session_scope() as s:
+        g = s.get(Goal, goal_id)
+        if g is None:
+            raise HTTPException(status_code=404, detail="Goal not found")
+        if (g.status or "").strip() == "done":
+            g.status = "active"
+            s.add(
+                Event(
+                    kind="goal.reopened_by_user",
+                    agent="ui",
+                    task_id=None,
+                    payload={"goal_id": int(goal_id)},
+                )
+            )
+    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
+
+
 @app.post("/tasks/{task_id:int}/done", include_in_schema=False)
 def tasks_mark_done(task_id: int) -> RedirectResponse:
     with session_scope() as s:
@@ -841,6 +1093,24 @@ def tasks_mark_done(task_id: int) -> RedirectResponse:
                 )
             )
         goal_id = t.goal_id
+        task_public_id = t.public_id
+
+    # 完成任务时自动释放 AgentSpace（若存在）。
+    # 注意：这里是 best-effort；释放失败不应阻断“完成”本身。
+    try:
+        asyncio.run(delete_agent_space(task_public_id))
+    except RuntimeError:
+        # 兼容：极少数情况下当前线程已有 event loop。
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(delete_agent_space(task_public_id))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -865,6 +1135,27 @@ def tasks_reopen(task_id: int) -> RedirectResponse:
             )
         goal_id = t.goal_id
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
+
+
+@app.post("/tasks/{task_id:int}/edit", include_in_schema=False)
+def tasks_update(
+    task_id: int,
+    title: str = Form(..., min_length=1, max_length=512),
+    description: str = Form(..., min_length=1, max_length=4000),
+) -> RedirectResponse:
+    with session_scope() as s:
+        t = s.get(Task, task_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        provider, _err = _get_llm_provider_or_error()
+        summary = _summarize_items(provider, [title.strip()])[0]
+        t.title = title.strip()
+        t.summary = summary
+        t.description = description.strip()
+        goal_id = t.goal_id
+        pid = t.public_id
+    # 保持 Dashboard 选中态
+    return RedirectResponse(url=f"/goals?task={pid}&goal={goal_id}", status_code=303)
 
 
 @app.post("/tasks/{task_id:int}/delete", include_in_schema=False)
@@ -1028,13 +1319,52 @@ def goals_delete(goal_id: int) -> RedirectResponse:
 
 @app.get("/goals/plan", response_class=HTMLResponse)
 def goal_plan_start(request: Request) -> HTMLResponse:
-    default_due = dt.date.today() + dt.timedelta(days=7)
+    # Optional prefill from:
+    # - /goals/{goal_id}/plan/start when LLM not configured => ?goal_id=
+    # - /goals/plan/start POST when LLM not configured => ?draft_content=&due_date=
+    default_due_obj = dt.date.today() + dt.timedelta(days=7)
+    draft_content = ""
+
+    qp = getattr(request, "query_params", None)
+    if qp is not None:
+        try:
+            # Preserve user input if POST fails due to missing LLM.
+            draft_content = str(qp.get("draft_content") or "").strip()
+        except Exception:
+            draft_content = ""
+
+        try:
+            due = str(qp.get("due_date") or "").strip()
+            if due:
+                default_due_obj = dt.date.fromisoformat(due)
+        except Exception:
+            pass
+
+        # If coming from a goal, prefill from that goal.
+        if not draft_content:
+            try:
+                gid_raw = str(qp.get("goal_id") or "").strip()
+                gid = int(gid_raw) if gid_raw else 0
+            except Exception:
+                gid = 0
+            if gid:
+                try:
+                    with session_scope() as s:
+                        g = s.get(Goal, gid)
+                        if g is not None:
+                            draft_content = str(g.content or "").strip()
+                            if getattr(g, "due_date", None):
+                                default_due_obj = g.due_date
+                except Exception:
+                    pass
+
     _provider, err = _get_llm_provider_or_error()
     return templates.TemplateResponse(
         request,
         "goal_plan.html",
         {
-            "default_due": default_due.isoformat(),
+            "default_due": default_due_obj.isoformat(),
+            "draft_content": draft_content,
             "error": err,
         },
     )
@@ -1099,35 +1429,133 @@ def _plan_llm_step(
     return _json.loads(res.content)
 
 
+async def _kickoff_plan_session_first_step(session_id: int) -> None:
+    """异步启动 Plan Session 的第一步（避免阻塞创建请求）。"""
+
+    try:
+        provider, err = _get_llm_provider_or_error()
+        if provider is None:
+            with session_scope() as s:
+                sess = s.get(GoalPlanSession, int(session_id))
+                if sess is None:
+                    return
+                sess.status = "error"
+                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=str(err or "LLM 未配置")))
+            return
+
+        # Snapshot session/messages for LLM call (avoid holding DB session during network).
+        with session_scope() as s:
+            sess = s.get(GoalPlanSession, int(session_id))
+            if sess is None:
+                return
+            msgs = (
+                s.query(GoalPlanMessage)
+                .filter(GoalPlanMessage.session_id == int(session_id))
+                .order_by(GoalPlanMessage.id.asc())
+                .all()
+            )
+            sess_snapshot = GoalPlanSession(
+                id=sess.id,
+                status=sess.status,
+                draft_content=sess.draft_content,
+                due_date=sess.due_date,
+                source_goal_id=sess.source_goal_id,
+                turns=sess.turns,
+                result_json=sess.result_json,
+                created_goal_id=sess.created_goal_id,
+            )
+            msgs_snapshot = [GoalPlanMessage(session_id=m.session_id, role=m.role, content=m.content) for m in msgs]
+
+        data = await asyncio.to_thread(
+            _plan_llm_step,
+            provider=provider,
+            session=sess_snapshot,
+            messages=msgs_snapshot,
+        )
+
+        with session_scope() as s:
+            sess = s.get(GoalPlanSession, int(session_id))
+            if sess is None:
+                return
+
+            if data.get("type") == "question":
+                q = str(data.get("question") or "").strip() or "请补充更多细节。"
+                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=q))
+                sess.status = "in_progress"
+                return
+
+            # final：保存草案，但仍允许继续对话迭代（不直接落库 goal/tasks）
+            sess.result_json = data
+            sess.status = "in_progress"
+            s.add(
+                GoalPlanMessage(
+                    session_id=int(session_id),
+                    role="assistant",
+                    content="我已经生成了任务拆解草案。你可以继续补充/调整要求，或直接点击“确认并写入”创建目标与任务。",
+                )
+            )
+    except Exception as e:
+        with session_scope() as s:
+            sess = s.get(GoalPlanSession, int(session_id))
+            if sess is None:
+                return
+            sess.status = "error"
+            s.add(
+                GoalPlanMessage(
+                    session_id=int(session_id),
+                    role="assistant",
+                    content="启动失败：" + str(e),
+                )
+            )
+
+
 @app.post("/goals/plan/start", include_in_schema=False)
-def goal_plan_create_session(
-    draft_content: str = Form(..., min_length=1, max_length=2000),
+async def goal_plan_create_session(
     due_date: str = Form(...),
+    draft_content: str | None = Form(default=None),
+    content: str | None = Form(default=None),
+    description: str | None = Form(default=None),
 ) -> RedirectResponse:
     provider, err = _get_llm_provider_or_error()
     if provider is None:
-        return RedirectResponse(url="/goals/plan", status_code=303)
+        from urllib.parse import urlencode
+
+        raw = (draft_content or "").strip()
+        if not raw:
+            c = (content or "").strip()
+            d = (description or "").strip()
+            raw = c
+            if d:
+                raw = (c + "\n\n详细描述：\n" + d).strip()
+        qs = urlencode({"draft_content": raw, "due_date": due_date})
+        return RedirectResponse(url="/goals/plan?" + qs, status_code=303)
 
     parsed_due = dt.date.fromisoformat(due_date)
+    raw = (draft_content or "").strip()
+    if not raw:
+        c = (content or "").strip()
+        d = (description or "").strip()
+        raw = c
+        if d:
+            raw = (c + "\n\n详细描述：\n" + d).strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="draft_content/content is required")
+    if len(raw) > 2000:
+        raw = raw[:2000]
+
     with session_scope() as s:
-        sess = GoalPlanSession(draft_content=draft_content.strip(), due_date=parsed_due)
+        sess = GoalPlanSession(status="starting", draft_content=raw, due_date=parsed_due)
         s.add(sess)
         s.flush()
         sid = sess.id
         # 先写一条 assistant 引导语
         s.add(GoalPlanMessage(session_id=sid, role="assistant", content="我会先问你几个问题来澄清目标，然后给出一份可执行的任务拆解草案。"))
 
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, sid)
-        msgs = s.query(GoalPlanMessage).filter(GoalPlanMessage.session_id == sid).order_by(GoalPlanMessage.id.asc()).all()
-        data = _plan_llm_step(provider=provider, session=sess, messages=msgs)
-        if data.get("type") == "question":
-            s.add(GoalPlanMessage(session_id=sid, role="assistant", content=str(data.get("question") or "")))
-        else:
-            # final：保存草案，等待用户确认（不直接落库 goal/tasks）
-            sess.result_json = data
-            sess.status = "awaiting_confirm"
-            s.add(GoalPlanMessage(session_id=sid, role="assistant", content="我已经生成了任务拆解草案。请在下方确认后再创建。"))
+    try:
+        asyncio.get_running_loop().create_task(_kickoff_plan_session_first_step(int(sid)))
+    except RuntimeError:
+        # no running loop (should not happen under uvicorn); best-effort fallback
+        pass
 
     return RedirectResponse(url=f"/goals/plan/{sid}", status_code=303)
 
@@ -1188,64 +1616,58 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
             s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=q))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
-        # final：保存草案，等待用户确认
+        # final：保存草案，但仍允许继续对话迭代
         sess.result_json = data
-        sess.status = "awaiting_confirm"
-        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="我已经生成了任务拆解草案。请在下方确认后再应用。"))
+        sess.status = "in_progress"
+        s.add(
+            GoalPlanMessage(
+                session_id=session_id,
+                role="assistant",
+                content="我已经生成了任务拆解草案。你可以继续补充/调整要求，或直接点击“确认并写入”创建目标与任务。",
+            )
+        )
         return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
 
 @app.post("/goals/{goal_id:int}/plan/start", include_in_schema=False)
 def goal_plan_create_session_from_goal(goal_id: int) -> RedirectResponse:
-    """从已有 goal 进入 Plan：输出 tasks 草案，用户确认后再写入。"""
-
-    provider, _err = _get_llm_provider_or_error()
-    if provider is None:
-        return RedirectResponse(url="/goals/plan", status_code=303)
-
-    with session_scope() as s:
-        g = s.get(Goal, goal_id)
-        if g is None:
-            raise HTTPException(status_code=404, detail="Goal not found")
-
-        sess = GoalPlanSession(draft_content=g.content.strip(), due_date=g.due_date, source_goal_id=goal_id)
-        s.add(sess)
-        s.flush()
-        sid = sess.id
-        s.add(
-            GoalPlanMessage(
-                session_id=sid,
-                role="assistant",
-                content="我会基于该目标与现有任务，与你确认意图后给出新的任务拆解草案。",
-            )
-        )
-
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, sid)
-        msgs = s.query(GoalPlanMessage).filter(GoalPlanMessage.session_id == sid).order_by(GoalPlanMessage.id.asc()).all()
-        g = s.get(Goal, goal_id)
-        existing_tasks = s.query(Task).filter(Task.goal_id == goal_id).order_by(Task.id.asc()).all()
-        data = _plan_llm_step(provider=provider, session=sess, messages=msgs, source_goal=g, existing_tasks=existing_tasks)
-        if data.get("type") == "question":
-            s.add(GoalPlanMessage(session_id=sid, role="assistant", content=str(data.get("question") or "")))
-        else:
-            sess.result_json = data
-            sess.status = "awaiting_confirm"
-            s.add(GoalPlanMessage(session_id=sid, role="assistant", content="我已经生成了任务拆解草案。请在下方确认后再应用。"))
-
-    return RedirectResponse(url=f"/goals/plan/{sid}", status_code=303)
+    # 交互约束：已创建的 goal 不支持 Plan Mode。
+    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
 @app.post("/goals/plan/{session_id}/confirm", include_in_schema=False)
-def goal_plan_confirm(session_id: int, selected_task: list[str] = Form(default=[])) -> RedirectResponse:
+async def goal_plan_confirm(request: Request, session_id: int) -> RedirectResponse:
+    form = await request.form()
+    selected_task = list(form.getlist("selected_task"))
+
+    # Optional edited titles from UI: task_title_{i}
+    edited: dict[int, str] = {}
+    try:
+        for k, v in form.items():
+            if not isinstance(k, str):
+                continue
+            if not k.startswith("task_title_"):
+                continue
+            try:
+                idx = int(k.split("task_title_", 1)[1])
+            except Exception:
+                continue
+            edited[idx] = str(v or "").strip()
+    except Exception:
+        edited = {}
+
     with session_scope() as s:
         sess = s.get(GoalPlanSession, session_id)
         if sess is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        if sess.status != "awaiting_confirm":
+        # 允许在 in_progress 阶段确认写入（Plan 可迭代，随时用最新草案落库）
+        if sess.status not in {"in_progress", "awaiting_confirm"}:
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         data = sess.result_json or {}
+        if not data:
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="当前还没有可写入的草案。请先生成 Plan。"))
+            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         tasks = data.get("tasks") or []
 
         # 选中项：用 index 选择，避免 title 重复
@@ -1262,7 +1684,7 @@ def goal_plan_confirm(session_id: int, selected_task: list[str] = Form(default=[
                 continue
             if not isinstance(t, dict):
                 continue
-            title = str(t.get("title") or "").strip()
+            title = str(edited.get(i) or t.get("title") or "").strip()
             if title:
                 picked.append(title)
 
@@ -1309,6 +1731,88 @@ def goal_plan_confirm(session_id: int, selected_task: list[str] = Form(default=[
             sess.created_goal_id = target_goal_id
         s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="已应用到目标。"))
 
+    return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
+
+
+@app.post("/goals/plan/{session_id}/step/{step_index}/create", include_in_schema=False)
+async def goal_plan_create_single_task(request: Request, session_id: int, step_index: int) -> RedirectResponse:
+    """从 Plan 草案里按 step 创建单个 Task。
+
+    - 若该 session 还没有创建 goal，则先创建 goal，并记录 created_goal_id。
+    - 创建完 task 后跳回 Dashboard 打开该 task。
+    """
+
+    form = await request.form()
+
+    with session_scope() as s:
+        sess = s.get(GoalPlanSession, session_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        data = sess.result_json or {}
+        tasks = data.get("tasks") or []
+        if not isinstance(tasks, list) or step_index < 0 or step_index >= len(tasks):
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="无效的 step。"))
+            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
+        t_item = tasks[step_index]
+        if not isinstance(t_item, dict):
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="无效的 step。"))
+            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
+
+        # Prefer edited title from UI if present.
+        edited_title = ""
+        try:
+            edited_title = str(form.get(f"task_title_{step_index}") or "").strip()
+        except Exception:
+            edited_title = ""
+        title = edited_title or str(t_item.get("title") or "").strip()
+        if not title:
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="step 标题为空，无法创建 task。"))
+            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
+
+        # Ensure a goal exists.
+        target_goal_id: int
+        if getattr(sess, "created_goal_id", None):
+            target_goal_id = int(sess.created_goal_id)
+        else:
+            goal_obj = data.get("goal") or {}
+            content = str(goal_obj.get("content") or sess.draft_content).strip()
+            description = str(goal_obj.get("description") or "").strip()
+            status = str(goal_obj.get("status") or "active").strip() or "active"
+            priority = str(goal_obj.get("priority") or "normal").strip() or "normal"
+            importance = str(goal_obj.get("importance") or "normal").strip() or "normal"
+
+            provider, _err = _get_llm_provider_or_error()
+            summary = _summarize_items(provider, [content])[0]
+            g = Goal(
+                content=content,
+                summary=summary,
+                description=description,
+                due_date=sess.due_date,
+                status=status,
+                priority=priority,
+                importance=importance,
+            )
+            s.add(g)
+            s.flush()
+            target_goal_id = g.id
+            sess.created_goal_id = g.id
+
+        provider, _err = _get_llm_provider_or_error()
+        t_summary = _summarize_items(provider, [title])[0]
+        task = Task(goal_id=target_goal_id, title=title, summary=t_summary, status="todo")
+        s.add(task)
+        s.flush()
+
+        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=f"已创建 Task：{title}"))
+        # Keep session in progress for further iterations.
+        sess.status = "in_progress"
+
+        public_id = str(getattr(task, "public_id", "") or "").strip()
+        if public_id:
+            return RedirectResponse(url=f"/goals?task={public_id}", status_code=303)
+
+    # Fallback
     return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
 
 
@@ -1433,6 +1937,7 @@ def companions_list(limit: int = 50) -> dict:
                 "base_url": c.base_url,
                 "status": _companion_display_status(c),
                 "last_seen_at": (c.last_seen_at.isoformat() if c.last_seen_at else None),
+                "created_at": (c.created_at.isoformat() if getattr(c, "created_at", None) else None),
                 "agent_spaces": spaces_by_comp.get(c.id, []),
             }
         )
@@ -1650,7 +2155,10 @@ def recent_events(limit: int = 30) -> dict:
 
     limit = max(1, min(int(limit or 30), 200))
     with session_scope() as s:
-        evs = s.query(Event).order_by(Event.id.desc()).limit(limit).all()
+        # 过滤噪声事件：Companion 的连接/断连不展示
+        exclude = {"companion.connected", "companion.disconnected"}
+        evs_raw = s.query(Event).order_by(Event.id.desc()).limit(limit * 3).all()
+        evs = [ev for ev in evs_raw if (ev.kind or "") not in exclude][:limit]
 
         # 只对真实存在的任务提供“打开”能力，避免 UI 出现能点但打不开的事件。
         cand_task_ids = [ev.task_id for ev in evs if ev.task_id]
@@ -1680,6 +2188,113 @@ def recent_events(limit: int = 30) -> dict:
             }
         )
     return {"items": items}
+
+
+@app.get("/api/calendar/month")
+def calendar_month(ym: str | None = None) -> dict:
+    """Calendar by month.
+
+    - Grid view: show tasks completed per day (based on Task.completed_at)
+    - Swimlane view: show goals timeline within the month (created_at -> due_date)
+    """
+
+    today = dt.date.today()
+    raw = str(ym or "").strip()
+    try:
+        if raw:
+            parts = raw.split("-")
+            if len(parts) != 2:
+                raise ValueError("ym must be YYYY-MM")
+            y = int(parts[0])
+            m = int(parts[1])
+        else:
+            y, m = int(today.year), int(today.month)
+        if not (1 <= m <= 12):
+            raise ValueError("month out of range")
+        # Keep a reasonable bound to avoid accidental giant queries.
+        if y < 1970 or y > 2100:
+            raise ValueError("year out of range")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    month_start = dt.date(y, m, 1)
+    if m == 12:
+        month_end = dt.date(y + 1, 1, 1)
+    else:
+        month_end = dt.date(y, m + 1, 1)
+
+    start_dt = dt.datetime(month_start.year, month_start.month, month_start.day, tzinfo=dt.timezone.utc)
+    end_dt = dt.datetime(month_end.year, month_end.month, month_end.day, tzinfo=dt.timezone.utc)
+
+    with session_scope() as s:
+        done_tasks = (
+            s.query(Task)
+            .filter(Task.completed_at.isnot(None))
+            .filter(Task.completed_at >= start_dt)
+            .filter(Task.completed_at < end_dt)
+            .all()
+        )
+
+        # Goals for swimlane + goal tasks view.
+        goals = s.query(Goal).order_by(Goal.id.asc()).all()
+        all_tasks = s.query(Task).order_by(Task.id.asc()).all()
+
+    goal_by_id: dict[int, Goal] = {int(g.id): g for g in goals}
+    tasks_by_goal: dict[int, list[Task]] = {}
+    for t in all_tasks:
+        tasks_by_goal.setdefault(int(t.goal_id), []).append(t)
+
+    days: dict[str, list[dict]] = {}
+    for t in done_tasks:
+        if not t.completed_at:
+            continue
+        d = t.completed_at.astimezone(dt.timezone.utc).date().isoformat()
+        g = goal_by_id.get(int(t.goal_id))
+        days.setdefault(d, []).append(
+            {
+                "task_public_id": t.public_id,
+                "task_title": t.title,
+                "goal_id": int(t.goal_id),
+                "goal_title": (g.content if g is not None else ""),
+                "completed_at": t.completed_at.isoformat() if hasattr(t.completed_at, "isoformat") else str(t.completed_at),
+            }
+        )
+
+    goals_out: list[dict] = []
+    for g in goals:
+        gid = int(g.id)
+        ts = tasks_by_goal.get(gid, [])
+        done_n = sum(1 for t in ts if (t.status or "").strip() == "done")
+        goals_out.append(
+            {
+                "id": gid,
+                "title": g.content,
+                "status": g.status,
+                "created_at": g.created_at.isoformat() if hasattr(g.created_at, "isoformat") else str(g.created_at),
+                "due_date": g.due_date.isoformat() if hasattr(g.due_date, "isoformat") else str(g.due_date),
+                "total_tasks": len(ts),
+                "done_tasks": done_n,
+                "tasks": [
+                    {
+                        "id": int(t.id),
+                        "public_id": t.public_id,
+                        "title": t.title,
+                        "status": t.status,
+                        "completed_at": t.completed_at.isoformat() if (t.completed_at and hasattr(t.completed_at, "isoformat")) else (str(t.completed_at) if t.completed_at else None),
+                    }
+                    for t in ts
+                ],
+            }
+        )
+
+    return {
+        "ok": True,
+        "ym": f"{y:04d}-{m:02d}",
+        "month_start": month_start.isoformat(),
+        "month_end": month_end.isoformat(),
+        "days": days,
+        "goals": goals_out,
+    }
 
 
 @app.post("/api/skills/focus_report")
@@ -1716,10 +2331,12 @@ def focus_report(report: FocusReportIn) -> dict:
 def _event_summary(kind: str, payload: object) -> str:
     """将 Event 转成用于 UI 展示的短摘要。"""
 
-    if kind == "task.recommended_prompt.generated":
-        return "已生成推荐提示词"
     if kind == "task.confirmed_done":
         return "已人工确认完成"
+    if kind == "goal.confirmed_done_by_user":
+        return "confirm done by user"
+    if kind == "goal.reopened_by_user":
+        return "reopen by user"
     if kind == "task.reopened":
         return "已重新打开（从完成状态恢复）"
 
@@ -1805,8 +2422,10 @@ def _event_kind_label(kind: str, payload: object) -> str:
         return "重新打开"
     if kind == "task.confirmed_done":
         return "人工确认完成"
-    if kind == "task.recommended_prompt.generated":
-        return "生成推荐提示词"
+    if kind == "goal.confirmed_done_by_user":
+        return "confirm done by user"
+    if kind == "goal.reopened_by_user":
+        return "reopen by user"
     if kind == "companion.pairing_code.requested":
         return "Companion 配对"
     if kind == "companion.pair.attempted":
@@ -1818,77 +2437,6 @@ def _event_kind_label(kind: str, payload: object) -> str:
     if kind == "companion.deleted":
         return "Companion 管理"
     return kind
-
-
-class _NoopEventSink:
-    def emit(self, kind: str, agent: str, payload: dict | None = None, task_id: str | None = None) -> None:
-        return None
-
-
-@app.get("/api/tasks/{task_public_id}/recommended_prompt")
-def task_recommended_prompt(task_public_id: str) -> dict:
-    """按需生成任务推荐提示词（不落库）。"""
-
-    provider, err = _get_llm_provider_or_error()
-    if provider is None:
-        raise HTTPException(status_code=400, detail=err or "LLM provider not configured")
-
-    agent = TaskPromptRecommenderAgent(task_public_id=task_public_id, provider=provider)
-    try:
-        out = agent.run(sink=_NoopEventSink())
-    except ValueError as e:
-        msg = str(e)
-        if "Task not found" in msg:
-            raise HTTPException(status_code=404, detail=msg)
-        raise HTTPException(status_code=500, detail=msg)
-    except Exception as e:
-        # LLM 调用失败/网关错误等：向前端返回可读错误信息（不包含密钥）。
-        raise HTTPException(status_code=502, detail=str(e))
-
-    prompt = out["prompt"]
-
-    # 记录生成历史（用于 UI 展示）。
-    with session_scope() as s:
-        s.add(
-            Event(
-                kind="task.recommended_prompt.generated",
-                agent="openfocus/ui",
-                task_id=task_public_id,
-                payload={"prompt": prompt},
-            )
-        )
-
-    return {"task_public_id": task_public_id, "prompt": prompt}
-
-
-@app.get("/api/tasks/{task_public_id}/recommended_prompt_history")
-def task_recommended_prompt_history(task_public_id: str, limit: int = 10) -> dict:
-    """推荐提示词生成历史（按时间倒序）。"""
-
-    limit = max(1, min(int(limit or 10), 50))
-    with session_scope() as s:
-        evs = (
-            s.query(Event)
-            .filter(Event.kind == "task.recommended_prompt.generated")
-            .filter(Event.task_id == task_public_id)
-            .order_by(Event.id.desc())
-            .limit(limit)
-            .all()
-        )
-
-    items: list[dict] = []
-    for ev in evs:
-        payload = ev.payload or {}
-        prompt = ""
-        if isinstance(payload, dict) and isinstance(payload.get("prompt"), str):
-            prompt = payload.get("prompt")
-        items.append(
-            {
-                "created_at": ev.created_at.isoformat() if hasattr(ev.created_at, "isoformat") else str(ev.created_at),
-                "prompt": prompt,
-            }
-        )
-    return {"task_public_id": task_public_id, "items": items}
 
 
 @app.get("/tasks/{task_public_id}/agent_space", response_class=HTMLResponse)
@@ -1928,7 +2476,6 @@ def get_agent_space(task_public_id: str) -> dict:
                 "task_public_id": space.task_public_id,
                 "companion_id": getattr(space, "companion_id", None),
                 "root_path": space.root_path,
-                "agent_type": space.agent_type,
             },
         }
 
@@ -1938,10 +2485,6 @@ def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict
     root_path = str((payload.root_path or "").strip())
     if not root_path:
         raise HTTPException(status_code=400, detail="root_path 不能为空")
-
-    agent_type = (payload.agent_type or "").strip().lower()
-    if agent_type not in {"trae-cli", "coco"}:
-        raise HTTPException(status_code=400, detail="暂不支持该 agent_type（当前仅支持 trae-cli(coco)）")
 
     with session_scope() as s:
         task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()

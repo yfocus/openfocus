@@ -20,9 +20,6 @@
     <div style="display:flex; gap: 10px; flex-wrap:wrap;">
       <a href="/goals" class="btn-ghost" role="button">返回 Dashboard</a>
       <a href="/goals/{{ goal.id }}/edit" class="btn-ghost" role="button">编辑目标</a>
-      <form method="post" action="/goals/{{ goal.id }}/plan/start" style="margin:0;">
-        <button type="submit" class="btn-ghost">Plan</button>
-      </form>
     </div>
   </div>
 
@@ -30,7 +27,7 @@
     <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
       <div>
         <div class="k">TASKS</div>
-        <div class="muted">手动模式可维护；也可在 Dashboard 右侧生成推荐提示词。</div>
+        <div class="muted">手动模式可维护。</div>
       </div>
       <div class="pill">{{ tasks|length }} tasks</div>
     </div>
