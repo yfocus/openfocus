@@ -51,7 +51,7 @@
     <div class="plan-head">
       <div>
         <div class="plan-title">Plan</div>
-        <div class="plan-sub">Plan Mode 已启用：在对话中生成/迭代计划，点击 “Create” 后才会创建 Goal/Tasks。</div>
+        <div class="plan-sub">Plan Mode is active. Iterate on the plan in chat, and Goal/Tasks are created only after you click Create.</div>
       </div>
       <div class="plan-actions">
         <a href="/goals" class="btn-ghost" role="button">Dashboard</a>
@@ -82,7 +82,7 @@
             <div class="msg" style="border-color: rgba(255,59,92,0.45); background: rgba(255,59,92,0.06);">
               <div class="pad">
                 <div class="msg-role" style="color: rgba(255,59,92,0.95);">error</div>
-                <div class="msg-text">请检查 LLM 配置后重试。</div>
+                <div class="msg-text">Check the LLM configuration and try again.</div>
                 {% set ns = namespace(detail='') %}
                 {% for m in messages|reverse %}
                   {% if ns.detail == '' and m.role == 'assistant' and (m.content or '')|trim %}
@@ -120,7 +120,7 @@
                 <div class="plan-card" style="margin-top: 8px;">
                   <div class="pad">
                     <div class="plan-k">Plan</div>
-                    <div class="muted2" style="margin-top: 8px;">你可以继续在下方输入要求来迭代 plan；确认时会按最新草案写入。</div>
+                    <div class="muted2" style="margin-top: 8px;">You can continue refining the plan below. Create always uses the latest draft.</div>
 
                     <div class="plan-block">
                       <div class="t">Goal</div>
@@ -132,7 +132,7 @@
                       <form method="post" action="/goals/plan/{{ session.id }}/confirm" id="confirm-form" style="margin-top: 10px;">
                         <div style="display:flex; flex-direction:column; gap: 10px;">
                           {% if d_tasks|length == 0 %}
-                            <div class="muted2">草案里没有 steps。</div>
+                            <div class="muted2">The draft does not contain any steps.</div>
                           {% endif %}
                           {% for t in d_tasks %}
                             {% if t is mapping %}
@@ -169,7 +169,7 @@
             <div class="msg">
               <div class="pad">
                 <div class="msg-role">agent</div>
-                <div class="msg-text"><span class="spin"></span> 正在思考…</div>
+                <div class="msg-text"><span class="spin"></span> Thinking…</div>
               </div>
             </div>
           </div>
@@ -190,7 +190,7 @@
         </div>
       {% else %}
         <div class="composer">
-          <div class="muted2">等待 Plan 状态：{{ session.status }}</div>
+          <div class="muted2">Waiting for Plan status: {{ session.status }}</div>
         </div>
       {% endif %}
     </div>
@@ -201,9 +201,9 @@
       <div class="plan-card" style="margin-top: 12px;">
         <div class="pad">
           <div class="plan-k">Done</div>
-          <div class="muted2" style="margin-top: 8px;">已应用到目标。</div>
+          <div class="muted2" style="margin-top: 8px;">Applied to the goal.</div>
           <div style="margin-top: 10px;">
-            <a href="/goals?goal={{ created_goal_id }}" class="btn-ghost" role="button">打开目标</a>
+            <a href="/goals?goal={{ created_goal_id }}" class="btn-ghost" role="button">Open Goal</a>
           </div>
         </div>
       </div>
@@ -217,7 +217,7 @@
       const txt = document.getElementById('reply-text');
       const thinking = document.getElementById('thinking');
       if(f && btn && txt && thinking){
-        // Cmd+Enter（mac）/ Ctrl+Enter（其他）发送；Enter 保持换行。
+        // Cmd+Enter on macOS or Ctrl+Enter elsewhere sends the message; Enter inserts a newline.
         const platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '').toLowerCase();
         const isMac = platform.includes('mac') || platform.includes('iphone') || platform.includes('ipad');
         txt.addEventListener('keydown', (e)=>{

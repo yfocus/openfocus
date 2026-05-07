@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.mark.anyio
 async def test_plan_route_not_swallowed_by_goal_id():
-    # 不配置 LLM key，确保 plan 页面能正常展示“不可用”提示，而不是报错。
+    # With no LLM key configured, the plan page should render an unavailable state instead of failing.
     import os
 
     os.environ.pop("OPENFOCUS_OPENAI_API_KEY", None)
@@ -19,8 +19,36 @@ async def test_plan_route_not_swallowed_by_goal_id():
         assert r.status_code == 200
 
 
+@pytest.mark.anyio
+async def test_plan_session_writes_audit_memory(monkeypatch, tmp_path):
+    import os
+
+    os.environ.pop("OPENFOCUS_OPENAI_API_KEY", None)
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/goals/plan/start",
+            data={
+                "due_date": "2026-12-31",
+                "content": "build memory pipeline",
+                "description": "need a plan first",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+    audit_files = list((tmp_path / "memory" / "audit").glob("**/*.md"))
+    assert audit_files
+    text = audit_files[0].read_text(encoding="utf-8")
+    assert "plan.session_start_requested" in text
+
+
 def test_llm_provider_env_supports_ark(monkeypatch):
-    # 验证：项目支持火山 Ark（OpenAI-compatible）环境变量别名。
+    # Verify that Ark (OpenAI-compatible) environment variable aliases are supported.
     from openfocus.agent.llm.openai_compat import OpenAICompatibleProvider
 
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
@@ -38,7 +66,7 @@ def test_llm_provider_env_supports_ark(monkeypatch):
 
 
 def test_llm_provider_env_openai_takes_precedence(monkeypatch):
-    # 验证：若同时配置 OpenAI 与 Ark，则优先使用 OpenAI 配置。
+    # Verify that OpenAI settings take precedence when both OpenAI and Ark are configured.
     from openfocus.agent.llm.openai_compat import OpenAICompatibleProvider
 
     monkeypatch.setenv("OPENFOCUS_OPENAI_API_KEY", "test-openai-key")
@@ -56,7 +84,7 @@ def test_llm_provider_env_openai_takes_precedence(monkeypatch):
 
 
 def test_llm_provider_can_load_from_dotenv(monkeypatch, tmp_path):
-    # 验证：支持从启动目录（cwd）下的 .env 加载 LLM 配置（不会覆盖已存在 env）。
+    # Verify that LLM config can be loaded from a startup-directory `.env` without overwriting existing env vars.
     import os
 
     monkeypatch.chdir(tmp_path)

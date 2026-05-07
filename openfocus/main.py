@@ -7,10 +7,12 @@ import mimetypes
 import asyncio
 import uuid
 import base64
+import re
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
@@ -156,6 +158,20 @@ async def _persist_and_publish_agent_chunk(ch) -> None:
             sess.updated_at = _utcnow()
             s.add(sess)
 
+    if ch.text or ch.error or bool(ch.done):
+        _try_audit_memory(
+            kind="agent.session.chunk",
+            source=f"agent:{str(getattr(ch, 'session_id', '') or '').strip() or 'session'}",
+            summary="Agent session produced output.",
+            detail=(str(ch.text or "") + (f"\n\nError: {ch.error}" if ch.error else "")).strip(),
+            metadata={
+                "session_id": str(getattr(ch, "session_id", "") or ""),
+                "request_id": str(getattr(ch, "request_id", "") or ""),
+                "done": bool(getattr(ch, "done", False)),
+                "ok": bool(getattr(ch, "ok", False)),
+            },
+        )
+
 
 def _install_agent_chunk_listener_once() -> None:
     global _AGENT_LISTENER_INSTALLED
@@ -232,6 +248,7 @@ async def _handle_terminal_output(out) -> None:
 
     # 持久化输出（用于刷新/重进页面回放）。
     if raw:
+        decoded = _memory_decode_terminal_bytes(raw)
         try:
             with session_scope() as s:
                 ts = (
@@ -283,6 +300,17 @@ async def _handle_terminal_output(out) -> None:
                             )
         except Exception:
             pass
+        _try_audit_memory(
+            kind="terminal.output",
+            source="agentspace.shell",
+            summary=f"Terminal output from {str(out.terminal_id or '').strip()}",
+            detail=decoded,
+            metadata={
+                "terminal_id": str(out.terminal_id or ""),
+                "closed": bool(out.closed),
+                "error": str(out.error or ""),
+            },
+        )
 
     if bool(out.closed) or (out.error or ""):
         with session_scope() as s:
@@ -321,9 +349,530 @@ _TERM_HISTORY_MAX_BYTES = 1024 * 1024 * 1024
 # 回放接口单次返回的最大体积（避免把 1GB 直接塞给浏览器/WS）。
 _TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
+_MEMORY_LOCK = threading.RLock()
+
 
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _memory_audit_window_seconds() -> int:
+    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS") or "").strip()
+    try:
+        return max(60, int(raw or 3600))
+    except Exception:
+        return 3600
+
+
+def _memory_audit_max_entries() -> int:
+    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES") or "").strip()
+    try:
+        return max(1, int(raw or 2000))
+    except Exception:
+        return 2000
+
+
+def _memory_audit_ttl_days() -> int:
+    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_TTL_DAYS") or "").strip()
+    try:
+        return max(1, int(raw or 7))
+    except Exception:
+        return 7
+
+
+def _memory_state_path() -> Path:
+    return _memory_dir() / ".memory_state.json"
+
+
+def _memory_audit_root() -> Path:
+    p = _memory_dir() / "audit"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _memory_daily_root() -> Path:
+    p = _memory_dir() / "daily"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _memory_long_term_path() -> Path:
+    return _memory_dir() / "MEMORY.md"
+
+
+def _memory_path_from_rel(rel_path: str) -> Path:
+    rel = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+    p = (_memory_dir() / rel).resolve()
+    base = _memory_dir().resolve()
+    if p != base and base not in p.parents:
+        raise ValueError("invalid memory path")
+    return p
+
+
+def _memory_rel_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_memory_dir().resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def _memory_read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def _memory_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _memory_append_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _memory_load_state_unlocked() -> dict:
+    raw = _memory_read_text(_memory_state_path()).strip()
+    if not raw:
+        return {"current_audit": None, "summarized_audits": [], "finalized_days": [], "last_maintenance_at": None}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {"current_audit": None, "summarized_audits": [], "finalized_days": [], "last_maintenance_at": None}
+    if not isinstance(data, dict):
+        data = {}
+    summarized = data.get("summarized_audits")
+    data["summarized_audits"] = [str(x) for x in (summarized if isinstance(summarized, list) else []) if str(x).strip()]
+    finalized = data.get("finalized_days")
+    data["finalized_days"] = [str(x) for x in (finalized if isinstance(finalized, list) else []) if str(x).strip()]
+    if not isinstance(data.get("current_audit"), dict):
+        data["current_audit"] = None
+    return data
+
+
+def _memory_save_state_unlocked(state: dict) -> None:
+    payload = {
+        "current_audit": state.get("current_audit"),
+        "summarized_audits": list(dict.fromkeys([str(x) for x in state.get("summarized_audits") or [] if str(x).strip()])),
+        "finalized_days": list(dict.fromkeys([str(x) for x in state.get("finalized_days") or [] if str(x).strip()])),
+        "last_maintenance_at": state.get("last_maintenance_at"),
+    }
+    _memory_write_text(_memory_state_path(), json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _memory_parse_ts(value: object) -> dt.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        raw = raw.replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def _memory_iso(ts: dt.datetime | None) -> str:
+    if ts is None:
+        ts = _utcnow()
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _memory_decode_terminal_bytes(raw: bytes) -> str:
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        return raw.decode("utf-8", errors="replace")
+
+
+def _memory_extract_json_blocks(text: str) -> list[dict]:
+    out: list[dict] = []
+    for m in re.finditer(r"```json\n(.*?)\n```", text or "", flags=re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _memory_entry_markdown(entry: dict) -> str:
+    ts = str(entry.get("timestamp") or _memory_iso(None))
+    kind = str(entry.get("kind") or "memory.event")
+    source = str(entry.get("source") or "system")
+    summary = str(entry.get("summary") or kind).strip()
+    detail = str(entry.get("detail") or "").strip()
+    task_id = str(entry.get("task_public_id") or "").strip()
+    goal_id = entry.get("goal_id")
+    lines = [f"## {ts} · {kind}", f"- Source: {source}", f"- Summary: {summary}"]
+    if task_id:
+        lines.append(f"- Task: {task_id}")
+    if goal_id not in (None, ""):
+        lines.append(f"- Goal: {goal_id}")
+    if detail:
+        lines.append("")
+        lines.append(detail)
+    lines.extend(["", "```json", json.dumps(entry, ensure_ascii=False, indent=2), "```", ""])
+    return "\n".join(lines)
+
+
+def _memory_render_audit_header(*, started_at: dt.datetime) -> str:
+    return (
+        "# Audit Memory\n\n"
+        f"- Started At: {_memory_iso(started_at)}\n"
+        f"- Rotation: {int(_memory_audit_window_seconds() / 60)} minutes or {_memory_audit_max_entries()} entries\n"
+        f"- TTL: {_memory_audit_ttl_days()} days\n\n"
+        "---\n\n"
+    )
+
+
+def _memory_render_daily_summary(*, day: str, file_label: str, started_at: str, ended_at: str, entries: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    highlights: list[str] = []
+    for entry in entries:
+        kind = str(entry.get("kind") or "memory.event")
+        counts[kind] = counts.get(kind, 0) + 1
+        source = str(entry.get("source") or "system")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        summary = str(entry.get("summary") or "").strip()
+        if summary and summary not in highlights:
+            highlights.append(summary)
+    top_kinds = sorted(counts.items(), key=lambda it: (-it[1], it[0]))[:5]
+    top_sources = sorted(source_counts.items(), key=lambda it: (-it[1], it[0]))[:5]
+    lines = [
+        f"## Audit Window · {file_label}",
+        f"- Start: {started_at}",
+        f"- End: {ended_at}",
+        f"- Entries: {len(entries)}",
+    ]
+    if top_sources:
+        lines.append("- Sources: " + ", ".join(f"{name} ({count})" for name, count in top_sources))
+    if top_kinds:
+        lines.append("- Top Kinds: " + ", ".join(f"{name} ({count})" for name, count in top_kinds))
+    if highlights:
+        lines.append("")
+        lines.append("### Highlights")
+        for item in highlights[:8]:
+            lines.append(f"- {item}")
+    lines.extend(["", "---", ""])
+    return "\n".join(lines)
+
+
+def _memory_render_daily_final(day: str, content: str) -> str:
+    lines = [ln.rstrip() for ln in (content or "").splitlines()]
+    cleaned = [ln for ln in lines if ln.strip()]
+    highlights: list[str] = []
+    for ln in cleaned:
+        if ln.startswith("- "):
+            bullet = ln[2:].strip()
+            if bullet and bullet not in highlights:
+                highlights.append(bullet)
+        if len(highlights) >= 12:
+            break
+    out = [f"# Daily Memory · {day}", "", f"- Finalized At: {_memory_iso(None)}", ""]
+    if highlights:
+        out.append("## Final Highlights")
+        for item in highlights[:12]:
+            out.append(f"- {item}")
+        out.append("")
+    out.append("## Source Material")
+    out.append("")
+    out.append(content.strip() or "No daily material.")
+    out.append("")
+    return "\n".join(out)
+
+
+def _memory_extract_long_term_items(day: str, daily_text: str) -> list[str]:
+    items: list[str] = []
+    text = daily_text or ""
+    lower = text.lower()
+    if "trae-cli" in lower:
+        items.append(f"- {day}: Uses `trae-cli` in AgentSpace workflows.")
+    if "plan mode" in lower:
+        items.append(f"- {day}: Uses Plan Mode for task decomposition.")
+    if "terminal" in lower or "web shell" in lower:
+        items.append(f"- {day}: Works through AgentSpace terminal / web shell interactions.")
+    if not items:
+        return [f"- {day}: No stable preference or fact extracted yet."]
+    return items
+
+
+def _memory_write_long_term_unlocked(*, day: str, items: list[str]) -> None:
+    path = _memory_long_term_path()
+    existing = _memory_read_text(path).strip()
+    kept: list[str] = []
+    if existing:
+        for ln in existing.splitlines():
+            stripped = ln.rstrip()
+            if stripped.startswith(f"- {day}:"):
+                continue
+            kept.append(stripped)
+    else:
+        kept = ["# Long-term Memory", "", "## Stable Facts", ""]
+    if not any((ln.strip() == "## Stable Facts") for ln in kept):
+        if kept and kept[-1] != "":
+            kept.append("")
+        kept.extend(["## Stable Facts", ""])
+    if kept and kept[-1] != "":
+        kept.append("")
+    kept.extend(items)
+    kept.append("")
+    _memory_write_text(path, "\n".join(kept).rstrip() + "\n")
+
+
+def _memory_cleanup_audit_files_unlocked(now: dt.datetime) -> None:
+    cutoff = now - dt.timedelta(days=_memory_audit_ttl_days())
+    for path in sorted(_memory_audit_root().glob("**/*.md")):
+        try:
+            mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+        except Exception:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for day_dir in sorted(_memory_audit_root().glob("*")):
+        try:
+            if day_dir.is_dir() and not any(day_dir.iterdir()):
+                day_dir.rmdir()
+        except Exception:
+            pass
+
+
+def _memory_ensure_daily_file(day: str) -> Path:
+    path = _memory_daily_root() / f"{day}.md"
+    if not path.exists():
+        _memory_write_text(path, f"# Daily Memory · {day}\n\n")
+    return path
+
+
+def _memory_start_audit_file_unlocked(state: dict, now: dt.datetime) -> dict:
+    day = now.date().isoformat()
+    day_dir = _memory_audit_root() / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.md"
+    path = day_dir / filename
+    counter = 1
+    while path.exists():
+        filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_{counter}.md"
+        path = day_dir / filename
+        counter += 1
+    _memory_write_text(path, _memory_render_audit_header(started_at=now))
+    current = {
+        "rel_path": _memory_rel_path(path),
+        "started_at": _memory_iso(now),
+        "entries": 0,
+        "day": day,
+    }
+    state["current_audit"] = current
+    return current
+
+
+def _memory_mark_summarized_audit_unlocked(state: dict, rel_path: str) -> None:
+    rel = str(rel_path or "").strip()
+    if not rel:
+        return
+    items = [str(x) for x in state.get("summarized_audits") or [] if str(x).strip() and str(x).strip() != rel]
+    items.append(rel)
+    state["summarized_audits"] = items[-2000:]
+
+
+def _memory_finalize_day_unlocked(day: str, state: dict) -> None:
+    path = _memory_daily_root() / f"{day}.md"
+    if not path.exists():
+        return
+    current = _memory_read_text(path)
+    finalized = _memory_render_daily_final(day, current)
+    _memory_write_text(path, finalized)
+    _memory_write_long_term_unlocked(day=day, items=_memory_extract_long_term_items(day, finalized))
+    finalized_days = [str(x) for x in state.get("finalized_days") or [] if str(x).strip() and str(x) != day]
+    finalized_days.append(day)
+    state["finalized_days"] = finalized_days
+
+
+def _memory_rotate_current_audit_unlocked(
+    state: dict,
+    now: dt.datetime,
+    *,
+    force: bool = False,
+    create_next: bool = True,
+) -> tuple[str | None, str | None]:
+    current = state.get("current_audit") if isinstance(state.get("current_audit"), dict) else None
+    if not current:
+        return None, None
+    started_at = _memory_parse_ts(current.get("started_at")) or now
+    entries = int(current.get("entries") or 0)
+    age_seconds = max(0, int((now - started_at).total_seconds()))
+    if (not force) and entries < _memory_audit_max_entries() and age_seconds < _memory_audit_window_seconds():
+        return None, None
+    rel_path = str(current.get("rel_path") or "").strip()
+    if not rel_path:
+        state["current_audit"] = None
+        return None, None
+    if entries <= 0:
+        return None, None
+    path = _memory_path_from_rel(rel_path)
+    if path.exists():
+        entries_data = _memory_extract_json_blocks(_memory_read_text(path))
+        day = str(current.get("day") or started_at.date().isoformat())
+        daily_path = _memory_ensure_daily_file(day)
+        label = path.name
+        started_iso = _memory_iso(started_at)
+        ended_iso = _memory_iso(now)
+        summary = _memory_render_daily_summary(
+            day=day,
+            file_label=label,
+            started_at=started_iso,
+            ended_at=ended_iso,
+            entries=entries_data,
+        )
+        _memory_append_text(daily_path, summary)
+        _memory_mark_summarized_audit_unlocked(state, rel_path)
+        state["finalized_days"] = [str(x) for x in state.get("finalized_days") or [] if str(x) != day]
+    state["current_audit"] = None
+    next_rel: str | None = None
+    if create_next:
+        next_rel = str(_memory_start_audit_file_unlocked(state, now).get("rel_path") or "").strip() or None
+    return rel_path, next_rel
+
+
+def _memory_finalize_due_days_unlocked(state: dict, now: dt.datetime) -> None:
+    today = now.date().isoformat()
+    finalized = {str(x) for x in state.get("finalized_days") or [] if str(x).strip()}
+    for path in sorted(_memory_daily_root().glob("*.md")):
+        day = path.stem
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            continue
+        if day >= today or day in finalized:
+            continue
+        _memory_finalize_day_unlocked(day, state)
+
+
+def _memory_maintenance(now: dt.datetime | None = None) -> None:
+    now = now or _utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    with _MEMORY_LOCK:
+        state = _memory_load_state_unlocked()
+        _memory_rotate_current_audit_unlocked(state, now, force=False, create_next=True)
+        _memory_finalize_due_days_unlocked(state, now)
+        _memory_cleanup_audit_files_unlocked(now)
+        state["last_maintenance_at"] = _memory_iso(now)
+        _memory_save_state_unlocked(state)
+
+
+def _memory_append_audit_entry(
+    *,
+    kind: str,
+    source: str,
+    summary: str,
+    detail: str = "",
+    task_public_id: str | None = None,
+    goal_id: int | None = None,
+    metadata: dict | None = None,
+    occurred_at: dt.datetime | None = None,
+) -> None:
+    now = occurred_at or _utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    entry = {
+        "timestamp": _memory_iso(now),
+        "kind": str(kind or "memory.event"),
+        "source": str(source or "system"),
+        "summary": str(summary or kind or "memory event").strip(),
+        "detail": str(detail or "").strip(),
+        "task_public_id": str(task_public_id or "").strip() or None,
+        "goal_id": goal_id,
+        "metadata": metadata or {},
+    }
+    with _MEMORY_LOCK:
+        state = _memory_load_state_unlocked()
+        _memory_rotate_current_audit_unlocked(state, now, force=False, create_next=True)
+        current = state.get("current_audit") if isinstance(state.get("current_audit"), dict) else None
+        if current is None:
+            current = _memory_start_audit_file_unlocked(state, now)
+        path = _memory_path_from_rel(str(current.get("rel_path") or ""))
+        _memory_append_text(path, _memory_entry_markdown(entry))
+        current["entries"] = int(current.get("entries") or 0) + 1
+        state["current_audit"] = current
+        _memory_finalize_due_days_unlocked(state, now)
+        _memory_cleanup_audit_files_unlocked(now)
+        state["last_maintenance_at"] = _memory_iso(now)
+        _memory_save_state_unlocked(state)
+
+
+def _memory_file_display_name(path: Path) -> str:
+    if path.suffix.lower() == ".md":
+        stem = path.stem
+        if re.fullmatch(r"\d{2}-\d{2}-\d{2}", stem):
+            day = path.parent.name
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                return f"{day} {stem.replace('-', ':')}"
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", stem):
+            day, tm = stem.split("_", 1)
+            return f"{day} {tm.replace('-', ':')}"
+    return path.name
+
+
+def _memory_collect_file_items(root: Path, pattern: str) -> list[dict]:
+    state = _memory_load_state_unlocked()
+    summarized = {str(x) for x in state.get("summarized_audits") or [] if str(x).strip()}
+    current_rel = ""
+    if isinstance(state.get("current_audit"), dict):
+        current_rel = str((state.get("current_audit") or {}).get("rel_path") or "").strip()
+    items: list[dict] = []
+    for path in sorted(root.glob(pattern), reverse=True):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+            updated_at = dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc)
+        except Exception:
+            updated_at = _utcnow()
+        rel_path = _memory_rel_path(path)
+        items.append(
+            {
+                "name": _memory_file_display_name(path),
+                "rel_path": rel_path,
+                "updated_at": _memory_iso(updated_at),
+                "size": int(getattr(stat, "st_size", 0) if 'stat' in locals() else 0),
+                "summarized": rel_path in summarized,
+                "current": rel_path == current_rel,
+            }
+        )
+    return items
+
+
+def _memory_read_selected_file(rel_path: str | None) -> str:
+    raw = str(rel_path or "").strip()
+    if not raw:
+        return ""
+    try:
+        return _memory_read_text(_memory_path_from_rel(raw))
+    except Exception:
+        return ""
+
+
+def _try_audit_memory(**kwargs) -> None:
+    try:
+        _memory_append_audit_entry(**kwargs)
+    except Exception:
+        pass
 
 
 def _human_duration_seconds(seconds: int) -> str:
@@ -424,6 +973,11 @@ def _startup() -> None:
             # 表不存在时忽略（首次启动由 create_all 创建）
             pass
 
+    try:
+        _memory_maintenance()
+    except Exception:
+        pass
+
 
 @app.on_event("startup")
 async def _startup_companion_grpc() -> None:
@@ -503,7 +1057,7 @@ def _load_dotenv_once() -> None:
             hash_idx = val.find("#")
             if hash_idx >= 0:
                 before = val[:hash_idx]
-                # 只有在 # 前面有空白时才认为是注释
+                # Treat `#` as a comment only when preceded by whitespace.
                 if before.rstrip() != before:
                     val = before.strip()
         return key, _strip_quotes(val)
@@ -530,12 +1084,12 @@ def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str |
         return OpenAICompatibleProvider.from_env(), None
     except Exception as e:
         return None, (
-            "缺少 LLM 配置，Plan 模式不可用。\n"
-            "请设置环境变量（任选其一）：\n"
-            "- OpenAI-compatible：OPENFOCUS_OPENAI_API_KEY（以及可选的 OPENFOCUS_OPENAI_BASE_URL/OPENFOCUS_OPENAI_MODEL）\n"
-            "- Ark：OPENFOCUS_ARK_API_KEY（或 ARK_API_KEY），以及 OPENFOCUS_ARK_BASE_URL/OPENFOCUS_ARK_MODEL（或 ARK_BASE_URL/ARK_MODEL）\n"
-            "也支持在启动目录放置 `.env`（可参考仓库根目录的 `.env-default`），或用 OPENFOCUS_ENV_FILE 指定路径。\n"
-            f"错误：{e}"
+            "Missing LLM configuration. Plan Mode is unavailable.\n"
+            "Set one of the following environment variable groups:\n"
+            "- OpenAI-compatible: OPENFOCUS_OPENAI_API_KEY (optionally OPENFOCUS_OPENAI_BASE_URL / OPENFOCUS_OPENAI_MODEL)\n"
+            "- Ark: OPENFOCUS_ARK_API_KEY (or ARK_API_KEY), plus OPENFOCUS_ARK_BASE_URL / OPENFOCUS_ARK_MODEL (or ARK_BASE_URL / ARK_MODEL)\n"
+            "You can also place a `.env` file in the startup directory (see `.env-default` at the repo root), or point to one with OPENFOCUS_ENV_FILE.\n"
+            f"Error: {e}"
         )
 
 
@@ -860,7 +1414,7 @@ def _score_text_to_weight(v: str | None) -> int:
 
 
 @app.get("/api/recommendations/next")
-def recommendations_next(limit: int = 5) -> dict:
+def recommendations_next(limit: int = 5) -> JSONResponse:
     """推荐下一步（MVP 规则版）。
 
     触发：前端在状态变更、30 分钟轮询、手动刷新时调用。
@@ -872,9 +1426,20 @@ def recommendations_next(limit: int = 5) -> dict:
     today = now.date()
 
     with session_scope() as s:
-        goals = s.query(Goal).order_by(Goal.due_date.asc(), Goal.id.desc()).all()
-        goal_by_id = {g.id: g for g in goals}
-        tasks = s.query(Task).filter(Task.status != "done").order_by(Task.id.asc()).all()
+        goal_rows = (
+            s.query(Goal)
+            .filter(Goal.status.notin_(["done", "archived", "paused"]))
+            .order_by(Goal.due_date.asc(), Goal.id.desc())
+            .all()
+        )
+        goal_by_id = {g.id: g for g in goal_rows}
+        tasks = (
+            s.query(Task)
+            .filter(Task.goal_id.in_(list(goal_by_id.keys())) if goal_by_id else text("1=0"))
+            .filter(Task.status.in_(["todo", "in_progress", "blocked"]))
+            .order_by(Task.id.asc())
+            .all()
+        )
 
         # 最近事件：用于识别 in_progress / percent
         public_ids = [t.public_id for t in tasks]
@@ -953,7 +1518,10 @@ def recommendations_next(limit: int = 5) -> dict:
         because_text = because[0] if because else ""
         sentence = f"建议下一步去完成「{item.get('title') or ''}」，因为{because_text}。" if because_text else f"建议下一步去完成「{item.get('title') or ''}」。"
 
-    return {"generated_at": now.isoformat(), "item": item, "items": ([item] if item else []), "sentence": sentence}
+    return JSONResponse(
+        {"generated_at": now.isoformat(), "item": item, "items": ([item] if item else []), "sentence": sentence},
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/goals/new", response_class=HTMLResponse)
@@ -978,15 +1546,25 @@ async def goals_create(
     parsed_due = dt.date.fromisoformat(due_date)
     provider, _err = _get_llm_provider_or_error()
     summary = _summarize_items(provider, [content.strip()])[0]
+    created_goal_id = 0
     with session_scope() as s:
-        s.add(
-            Goal(
-                content=content.strip(),
-                summary=summary,
-                description=description.strip(),
-                due_date=parsed_due,
-            )
+        goal = Goal(
+            content=content.strip(),
+            summary=summary,
+            description=description.strip(),
+            due_date=parsed_due,
         )
+        s.add(goal)
+        s.flush()
+        created_goal_id = int(goal.id or 0)
+    _try_audit_memory(
+        kind="goal.created",
+        source="web",
+        summary=f"Created goal: {content.strip()}",
+        detail=f"Goal content:\n\n{content.strip()}\n\nDescription:\n\n{description.strip()}",
+        goal_id=created_goal_id or None,
+        metadata={"due_date": parsed_due.isoformat(), "summary": summary},
+    )
     return RedirectResponse(url="/goals", status_code=303)
 
 
@@ -1013,21 +1591,32 @@ def tasks_create(
     title: str = Form(..., min_length=1, max_length=512),
     description: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
+    created_task_id = ""
     with session_scope() as s:
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
         provider, _err = _get_llm_provider_or_error()
         summary = _summarize_items(provider, [title.strip()])[0]
-        s.add(
-            Task(
-                goal_id=goal_id,
-                title=title.strip(),
-                summary=summary,
-                description=description.strip(),
-                status="todo",
-            )
+        task = Task(
+            goal_id=goal_id,
+            title=title.strip(),
+            summary=summary,
+            description=description.strip(),
+            status="todo",
         )
+        s.add(task)
+        s.flush()
+        created_task_id = str(task.public_id or "")
+    _try_audit_memory(
+        kind="task.created",
+        source="web",
+        summary=f"Created task: {title.strip()}",
+        detail=f"Task title:\n\n{title.strip()}\n\nDescription:\n\n{description.strip()}",
+        goal_id=goal_id,
+        task_public_id=created_task_id or None,
+        metadata={"summary": summary},
+    )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -1050,6 +1639,14 @@ def goals_mark_done(goal_id: int) -> RedirectResponse:
                     payload={"goal_id": int(goal_id), "from": old},
                 )
             )
+            _try_audit_memory(
+                kind="goal.finished",
+                source="web",
+                summary=f"Finished goal: {g.content}",
+                detail=f"Goal moved from `{old}` to `done`.",
+                goal_id=int(goal_id),
+                metadata={"from": old, "to": "done"},
+            )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -1071,6 +1668,14 @@ def goals_reopen(goal_id: int) -> RedirectResponse:
                     payload={"goal_id": int(goal_id)},
                 )
             )
+            _try_audit_memory(
+                kind="goal.reopened",
+                source="web",
+                summary=f"Reopened goal: {g.content}",
+                detail="Goal moved from `done` back to `active`.",
+                goal_id=int(goal_id),
+                metadata={"to": "active"},
+            )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -1091,6 +1696,15 @@ def tasks_mark_done(task_id: int) -> RedirectResponse:
                     task_id=t.public_id,
                     payload={"from": old},
                 )
+            )
+            _try_audit_memory(
+                kind="task.finished",
+                source="web",
+                summary=f"Finished task: {t.title}",
+                detail=f"Task moved from `{old}` to `done`.",
+                goal_id=int(t.goal_id),
+                task_public_id=t.public_id,
+                metadata={"from": old, "to": "done"},
             )
         goal_id = t.goal_id
         task_public_id = t.public_id
@@ -1133,6 +1747,15 @@ def tasks_reopen(task_id: int) -> RedirectResponse:
                     payload={},
                 )
             )
+            _try_audit_memory(
+                kind="task.reopened",
+                source="web",
+                summary=f"Reopened task: {t.title}",
+                detail="Task moved from `done` back to `todo`.",
+                goal_id=int(t.goal_id),
+                task_public_id=t.public_id,
+                metadata={"to": "todo"},
+            )
         goal_id = t.goal_id
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
@@ -1143,10 +1766,14 @@ def tasks_update(
     title: str = Form(..., min_length=1, max_length=512),
     description: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
+    old_title = ""
+    old_description = ""
     with session_scope() as s:
         t = s.get(Task, task_id)
         if t is None:
             raise HTTPException(status_code=404, detail="Task not found")
+        old_title = str(t.title or "")
+        old_description = str(t.description or "")
         provider, _err = _get_llm_provider_or_error()
         summary = _summarize_items(provider, [title.strip()])[0]
         t.title = title.strip()
@@ -1154,17 +1781,35 @@ def tasks_update(
         t.description = description.strip()
         goal_id = t.goal_id
         pid = t.public_id
+    _try_audit_memory(
+        kind="task.edited",
+        source="web",
+        summary=f"Edited task: {title.strip()}",
+        detail=(
+            f"Previous title: {old_title}\n\n"
+            f"Previous description:\n\n{old_description}\n\n"
+            f"Updated title: {title.strip()}\n\n"
+            f"Updated description:\n\n{description.strip()}"
+        ),
+        goal_id=goal_id,
+        task_public_id=pid,
+        metadata={"summary": summary},
+    )
     # 保持 Dashboard 选中态
     return RedirectResponse(url=f"/goals?task={pid}&goal={goal_id}", status_code=303)
 
 
 @app.post("/tasks/{task_id:int}/delete", include_in_schema=False)
 def tasks_delete(task_id: int) -> RedirectResponse:
+    deleted_title = ""
+    deleted_public_id = ""
     with session_scope() as s:
         t = s.get(Task, task_id)
         if t is None:
             raise HTTPException(status_code=404, detail="Task not found")
         goal_id = t.goal_id
+        deleted_title = str(t.title or "")
+        deleted_public_id = str(t.public_id or "")
         # 清理该 task 绑定的 AgentSpace（若存在）
         space = s.query(AgentSpace).filter(AgentSpace.task_public_id == t.public_id).one_or_none()
         if space is not None:
@@ -1176,6 +1821,15 @@ def tasks_delete(task_id: int) -> RedirectResponse:
                 s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(synchronize_session=False)
             s.delete(space)
         s.delete(t)
+    _try_audit_memory(
+        kind="task.deleted",
+        source="web",
+        summary=f"Deleted task: {deleted_title}",
+        detail="Task and related AgentSpace resources were deleted.",
+        goal_id=goal_id,
+        task_public_id=deleted_public_id or None,
+        metadata={},
+    )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -1205,22 +1859,44 @@ def goals_update(
     importance: str = Form("normal", max_length=32),
 ) -> RedirectResponse:
     parsed_due = dt.date.fromisoformat(due_date)
+    old_content = ""
+    old_description = ""
     with session_scope() as s:
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
+        old_content = str(goal.content or "")
+        old_description = str(goal.description or "")
         goal.content = content.strip()
         goal.description = description.strip()
         goal.due_date = parsed_due
         goal.status = status.strip() or "active"
         goal.priority = priority.strip() or "normal"
         goal.importance = importance.strip() or "normal"
+    _try_audit_memory(
+        kind="goal.edited",
+        source="web",
+        summary=f"Edited goal: {content.strip()}",
+        detail=(
+            f"Previous content: {old_content}\n\n"
+            f"Previous description:\n\n{old_description}\n\n"
+            f"Updated content: {content.strip()}\n\n"
+            f"Updated description:\n\n{description.strip()}"
+        ),
+        goal_id=goal_id,
+        metadata={
+            "due_date": parsed_due.isoformat(),
+            "status": status.strip() or "active",
+            "priority": priority.strip() or "normal",
+            "importance": importance.strip() or "normal",
+        },
+    )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
 @app.post("/api/goals/extract_content_from_description")
 def api_extract_goal_from_description(payload: dict) -> dict:
-    """从详细描述提炼 goal 内容（用于 New Goal 对话框的“从详细描述生成”）。"""
+    """Extract goal content from the detailed description for New Goal."""
 
     desc = (payload.get("description") if isinstance(payload, dict) else "")
     desc = (str(desc or "").strip())
@@ -1233,17 +1909,17 @@ def api_extract_goal_from_description(payload: dict) -> dict:
 
     import json as _json
 
-    sys = "你是一个中文目标提炼器。你必须严格输出 JSON（不要 Markdown）。"
+    sys = "You extract a clear, executable goal from the user's description. Return strict JSON only."
     user = (
-        "从下面的详细描述中提炼一个清晰、可执行的 goal 内容（不要超过 2000 字）。\n"
-        "要求：只输出 goal 内容，不要多余解释，不要引号，不要换行。\n"
+        "Extract one clear, executable goal from the detailed description below.\n"
+        "Requirements: output only the goal content, no extra explanation, no quotes, no line breaks, max 2000 characters.\n"
         + _json.dumps({"description": desc}, ensure_ascii=False)
     )
 
     trace = [
-        "读取用户详细描述",
-        "提炼为一句可执行目标",
-        "校验长度限制（<=2000 字）",
+        "Read the detailed description",
+        "Extract one executable goal",
+        "Validate the 2000-character limit",
     ]
 
     res = provider.chat_completions(
@@ -1256,7 +1932,7 @@ def api_extract_goal_from_description(payload: dict) -> dict:
     content = (data.get("content") or data.get("goal") or "")
     content = str(content).strip().replace("\n", " ")
     if not content:
-        raise HTTPException(status_code=502, detail="LLM 返回为空")
+        raise HTTPException(status_code=502, detail="LLM returned empty content")
     if len(content) > 2000:
         content = content[:2000]
     return {"ok": True, "content": content, "trace": trace}
@@ -1264,7 +1940,7 @@ def api_extract_goal_from_description(payload: dict) -> dict:
 
 @app.post("/api/tasks/extract_title_from_description")
 def api_extract_task_title_from_description(payload: dict) -> dict:
-    """从详细描述提炼 task 标题（用于 New Task 对话框的“从详细描述生成”）。"""
+    """Extract a task title from the detailed description for New Task."""
 
     desc = (payload.get("description") if isinstance(payload, dict) else "")
     desc = (str(desc or "").strip())
@@ -1277,16 +1953,16 @@ def api_extract_task_title_from_description(payload: dict) -> dict:
 
     import json as _json
 
-    sys = "你是一个中文任务标题提炼器。你必须严格输出 JSON（不要 Markdown）。"
+    sys = "You extract a short, actionable task title from the user's description. Return strict JSON only."
     user = (
-        "从下面的详细描述中提炼一个 task 标题（<=512 字），要求：短、清晰、可执行。\n"
-        "只输出标题，不要多余解释，不要引号，不要换行。\n"
+        "Extract one short, clear, actionable task title from the detailed description below.\n"
+        "Requirements: output only the title, no extra explanation, no quotes, no line breaks, max 512 characters.\n"
         + _json.dumps({"description": desc}, ensure_ascii=False)
     )
     trace = [
-        "读取用户详细描述",
-        "提炼为一句可执行任务标题",
-        "校验长度限制（<=512 字）",
+        "Read the detailed description",
+        "Extract one actionable task title",
+        "Validate the 512-character limit",
     ]
 
     res = provider.chat_completions(
@@ -1299,7 +1975,7 @@ def api_extract_task_title_from_description(payload: dict) -> dict:
     title = (data.get("title") or data.get("task") or "")
     title = str(title).strip().replace("\n", " ")
     if not title:
-        raise HTTPException(status_code=502, detail="LLM 返回为空")
+        raise HTTPException(status_code=502, detail="LLM returned empty title")
     if len(title) > 512:
         title = title[:512]
     return {"ok": True, "title": title, "trace": trace}
@@ -1307,13 +1983,23 @@ def api_extract_task_title_from_description(payload: dict) -> dict:
 
 @app.post("/goals/{goal_id:int}/delete", include_in_schema=False)
 def goals_delete(goal_id: int) -> RedirectResponse:
+    deleted_content = ""
     with session_scope() as s:
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
+        deleted_content = str(goal.content or "")
         # 清理关联 tasks（MVP 先做简单级联）
         s.query(Task).filter(Task.goal_id == goal_id).delete()
         s.delete(goal)
+    _try_audit_memory(
+        kind="goal.deleted",
+        source="web",
+        summary=f"Deleted goal: {deleted_content}",
+        detail="Goal and its tasks were deleted.",
+        goal_id=goal_id,
+        metadata={},
+    )
     return RedirectResponse(url="/goals", status_code=303)
 
 
@@ -1372,15 +2058,15 @@ def goal_plan_start(request: Request) -> HTMLResponse:
 
 def _plan_system_prompt(*, remaining_turns: int) -> str:
     return (
-        "你是一个 Goal 规划助手（Plan 模式）。\n"
-        "目标：通过与用户对话，逐步澄清 goal 的真实目的、识别潜在 goal 冲突、识别 goal 与 goal 的关系，并输出可执行 tasks。\n"
-        "你必须严格输出 JSON（不要 Markdown）。\n"
-        "你每次只能做两种之一：\n"
-        "1) 继续提问：输出 {\"type\":\"question\", \"question\":\"...\"}\n"
-        "2) 给出最终方案：输出 {\"type\":\"final\", \"goal\":{...}, \"tasks\":[...], \"conflicts\":[...], \"relations\":[...]}\n"
-        f"剩余可提问次数：{remaining_turns}。当 remaining_turns<=0 时必须输出 final。\n"
-        "final.goal 需要字段：content, description, status, priority, importance。\n"
-        "tasks 每项至少包含 title（字符串）。"
+        "You are a Goal planning assistant in Plan Mode.\n"
+        "Your job is to clarify the goal through conversation, identify potential goal conflicts and goal relationships, and produce executable tasks.\n"
+        "You must return strict JSON only, never Markdown.\n"
+        "On each turn you may do exactly one of the following:\n"
+        "1) Ask a follow-up question: {\"type\":\"question\", \"question\":\"...\"}\n"
+        "2) Return a final plan: {\"type\":\"final\", \"goal\":{...}, \"tasks\":[...], \"conflicts\":[...], \"relations\":[...]}\n"
+        f"Remaining follow-up turns: {remaining_turns}. When remaining_turns <= 0 you must return `final`.\n"
+        "`final.goal` must include: content, description, status, priority, importance.\n"
+        "Each item in `tasks` must include at least `title` as a string."
     )
 
 
@@ -1397,12 +2083,12 @@ def _plan_llm_step(
     convo: list[dict] = [{"role": "system", "content": sys}]
     extra = ""
     if source_goal is not None:
-        extra += f"\n当前 goal：{source_goal.content}\n"
+        extra += f"\nCurrent goal: {source_goal.content}\n"
         if source_goal.description:
-            extra += f"goal 描述：{source_goal.description}\n"
-        extra += f"goal 状态：{source_goal.status} · priority={source_goal.priority} · importance={source_goal.importance}\n"
+            extra += f"Goal description: {source_goal.description}\n"
+        extra += f"Goal status: {source_goal.status} · priority={source_goal.priority} · importance={source_goal.importance}\n"
     if existing_tasks:
-        extra += "\n当前已存在的 tasks：\n"
+        extra += "\nExisting tasks:\n"
         for t in existing_tasks[:50]:
             extra += f"- [{t.status}] {t.title} (taskId={t.public_id})\n"
 
@@ -1410,7 +2096,7 @@ def _plan_llm_step(
         {
             "role": "user",
             "content": (
-                f"草稿 goal：{session.draft_content}\n完成时间：{session.due_date.isoformat()}\n"
+                f"Draft goal: {session.draft_content}\nDue date: {session.due_date.isoformat()}\n"
                 + extra
             ),
         }
@@ -1430,7 +2116,7 @@ def _plan_llm_step(
 
 
 async def _kickoff_plan_session_first_step(session_id: int) -> None:
-    """异步启动 Plan Session 的第一步（避免阻塞创建请求）。"""
+    """Start the first Plan Session step asynchronously without blocking creation."""
 
     try:
         provider, err = _get_llm_provider_or_error()
@@ -1440,7 +2126,14 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 if sess is None:
                     return
                 sess.status = "error"
-                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=str(err or "LLM 未配置")))
+                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=str(err or "LLM is not configured")))
+            _try_audit_memory(
+                kind="plan.error",
+                source="plan_mode",
+                summary=f"Plan session {int(session_id)} is blocked by missing LLM.",
+                detail=str(err or "LLM is not configured"),
+                metadata={"session_id": int(session_id)},
+            )
             return
 
         # Snapshot session/messages for LLM call (avoid holding DB session during network).
@@ -1479,20 +2172,34 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 return
 
             if data.get("type") == "question":
-                q = str(data.get("question") or "").strip() or "请补充更多细节。"
+                q = str(data.get("question") or "").strip() or "Please share a bit more detail."
                 s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=q))
                 sess.status = "in_progress"
+                _try_audit_memory(
+                    kind="plan.assistant_message",
+                    source="plan_mode",
+                    summary=f"Plan session {int(session_id)} asked a follow-up question.",
+                    detail=q,
+                    metadata={"session_id": int(session_id), "message_type": "question"},
+                )
                 return
 
-            # final：保存草案，但仍允许继续对话迭代（不直接落库 goal/tasks）
+            # Save the draft result but keep the conversation open for more iteration.
             sess.result_json = data
             sess.status = "in_progress"
             s.add(
                 GoalPlanMessage(
                     session_id=int(session_id),
                     role="assistant",
-                    content="我已经生成了任务拆解草案。你可以继续补充/调整要求，或直接点击“确认并写入”创建目标与任务。",
+                    content="I generated a draft task breakdown. You can keep refining it here, or click Create to write the goal and tasks.",
                 )
+            )
+            _try_audit_memory(
+                kind="plan.draft_generated",
+                source="plan_mode",
+                summary=f"Plan session {int(session_id)} generated a draft.",
+                detail=json.dumps(data, ensure_ascii=False, indent=2),
+                metadata={"session_id": int(session_id), "tasks": len(data.get("tasks") or [])},
             )
     except Exception as e:
         with session_scope() as s:
@@ -1504,9 +2211,16 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 GoalPlanMessage(
                     session_id=int(session_id),
                     role="assistant",
-                    content="启动失败：" + str(e),
+                    content="Failed to start: " + str(e),
                 )
             )
+        _try_audit_memory(
+            kind="plan.error",
+            source="plan_mode",
+            summary=f"Plan session {int(session_id)} failed to start.",
+            detail=str(e),
+            metadata={"session_id": int(session_id)},
+        )
 
 
 @app.post("/goals/plan/start", include_in_schema=False)
@@ -1526,7 +2240,14 @@ async def goal_plan_create_session(
             d = (description or "").strip()
             raw = c
             if d:
-                raw = (c + "\n\n详细描述：\n" + d).strip()
+                raw = (c + "\n\nDescription:\n" + d).strip()
+        _try_audit_memory(
+            kind="plan.session_start_requested",
+            source="web",
+            summary="Requested plan session without available LLM provider.",
+            detail=raw,
+            metadata={"due_date": due_date, "error": str(err or "LLM is not configured")},
+        )
         qs = urlencode({"draft_content": raw, "due_date": due_date})
         return RedirectResponse(url="/goals/plan?" + qs, status_code=303)
 
@@ -1537,7 +2258,7 @@ async def goal_plan_create_session(
         d = (description or "").strip()
         raw = c
         if d:
-            raw = (c + "\n\n详细描述：\n" + d).strip()
+            raw = (c + "\n\nDescription:\n" + d).strip()
     if not raw:
         raise HTTPException(status_code=400, detail="draft_content/content is required")
     if len(raw) > 2000:
@@ -1548,8 +2269,16 @@ async def goal_plan_create_session(
         s.add(sess)
         s.flush()
         sid = sess.id
-        # 先写一条 assistant 引导语
-        s.add(GoalPlanMessage(session_id=sid, role="assistant", content="我会先问你几个问题来澄清目标，然后给出一份可执行的任务拆解草案。"))
+        # Seed the session with an assistant intro message.
+        s.add(GoalPlanMessage(session_id=sid, role="assistant", content="I will ask a few questions to clarify the goal, then draft an executable task breakdown."))
+
+    _try_audit_memory(
+        kind="plan.session_started",
+        source="web",
+        summary=f"Started plan session {int(sid)}.",
+        detail=raw,
+        metadata={"session_id": int(sid), "due_date": parsed_due.isoformat()},
+    )
 
     try:
         asyncio.get_running_loop().create_task(_kickoff_plan_session_first_step(int(sid)))
@@ -1592,6 +2321,13 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         s.add(GoalPlanMessage(session_id=session_id, role="user", content=answer.strip()))
         sess.turns += 1
+    _try_audit_memory(
+        kind="plan.user_reply",
+        source="web",
+        summary=f"Plan session {int(session_id)} received a user reply.",
+        detail=answer.strip(),
+        metadata={"session_id": int(session_id)},
+    )
 
     with session_scope() as s:
         sess = s.get(GoalPlanSession, session_id)
@@ -1612,19 +2348,33 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
         )
 
         if data.get("type") == "question":
-            q = str(data.get("question") or "").strip() or "请补充更多细节。"
+            q = str(data.get("question") or "").strip() or "Please share a bit more detail."
             s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=q))
+            _try_audit_memory(
+                kind="plan.assistant_message",
+                source="plan_mode",
+                summary=f"Plan session {int(session_id)} asked a follow-up question.",
+                detail=q,
+                metadata={"session_id": int(session_id), "message_type": "question"},
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
-        # final：保存草案，但仍允许继续对话迭代
+        # Save the draft result but keep the conversation open for more iteration.
         sess.result_json = data
         sess.status = "in_progress"
         s.add(
             GoalPlanMessage(
                 session_id=session_id,
                 role="assistant",
-                content="我已经生成了任务拆解草案。你可以继续补充/调整要求，或直接点击“确认并写入”创建目标与任务。",
+                content="I generated a draft task breakdown. You can keep refining it here, or click Create to write the goal and tasks.",
             )
+        )
+        _try_audit_memory(
+            kind="plan.draft_generated",
+            source="plan_mode",
+            summary=f"Plan session {int(session_id)} generated a draft.",
+            detail=json.dumps(data, ensure_ascii=False, indent=2),
+            metadata={"session_id": int(session_id), "tasks": len(data.get("tasks") or [])},
         )
         return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
@@ -1660,17 +2410,17 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
         sess = s.get(GoalPlanSession, session_id)
         if sess is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        # 允许在 in_progress 阶段确认写入（Plan 可迭代，随时用最新草案落库）
+        # Allow writes during `in_progress` so the latest draft can be created at any time.
         if sess.status not in {"in_progress", "awaiting_confirm"}:
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         data = sess.result_json or {}
         if not data:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="当前还没有可写入的草案。请先生成 Plan。"))
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="There is no draft to create yet. Generate a plan first."))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         tasks = data.get("tasks") or []
 
-        # 选中项：用 index 选择，避免 title 重复
+        # Use indices instead of titles so duplicate task names remain selectable.
         selected_idx: set[int] = set()
         for x in selected_task:
             try:
@@ -1688,9 +2438,9 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
             if title:
                 picked.append(title)
 
-        # 没有勾选就直接回到会话
+        # If nothing is selected, return to the session without making changes.
         if not picked:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="未选择任何任务，未做变更。"))
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="No tasks were selected. No changes were made."))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         target_goal_id: int
@@ -1720,7 +2470,7 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
             target_goal_id = g.id
             sess.created_goal_id = g.id
 
-        # 应用 tasks
+        # Create tasks from the selected draft items.
         provider, _err = _get_llm_provider_or_error()
         summaries = _summarize_items(provider, picked)
         for i, title in enumerate(picked):
@@ -1729,17 +2479,26 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
         sess.status = "completed"
         if sess.created_goal_id is None:
             sess.created_goal_id = target_goal_id
-        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="已应用到目标。"))
+        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Applied to the goal."))
+
+    _try_audit_memory(
+        kind="plan.confirmed",
+        source="web",
+        summary=f"Plan session {int(session_id)} created goal/tasks.",
+        detail="\n".join(f"- {title}" for title in picked),
+        goal_id=target_goal_id,
+        metadata={"session_id": int(session_id), "created_tasks": picked},
+    )
 
     return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
 
 
 @app.post("/goals/plan/{session_id}/step/{step_index}/create", include_in_schema=False)
 async def goal_plan_create_single_task(request: Request, session_id: int, step_index: int) -> RedirectResponse:
-    """从 Plan 草案里按 step 创建单个 Task。
+    """Create a single task from one step in the Plan draft.
 
-    - 若该 session 还没有创建 goal，则先创建 goal，并记录 created_goal_id。
-    - 创建完 task 后跳回 Dashboard 打开该 task。
+    - Create the goal first if the session has not created one yet.
+    - Redirect back to the Dashboard with the new task opened.
     """
 
     form = await request.form()
@@ -1752,11 +2511,11 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
         data = sess.result_json or {}
         tasks = data.get("tasks") or []
         if not isinstance(tasks, list) or step_index < 0 or step_index >= len(tasks):
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="无效的 step。"))
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Invalid step."))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         t_item = tasks[step_index]
         if not isinstance(t_item, dict):
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="无效的 step。"))
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Invalid step."))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         # Prefer edited title from UI if present.
@@ -1767,7 +2526,7 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
             edited_title = ""
         title = edited_title or str(t_item.get("title") or "").strip()
         if not title:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="step 标题为空，无法创建 task。"))
+            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="The step title is empty, so the task cannot be created."))
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         # Ensure a goal exists.
@@ -1804,7 +2563,7 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
         s.add(task)
         s.flush()
 
-        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=f"已创建 Task：{title}"))
+        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=f"Created task: {title}"))
         # Keep session in progress for further iterations.
         sess.status = "in_progress"
 
@@ -1835,17 +2594,54 @@ def _read_text(p: Path) -> str:
 
 @app.get("/memory", response_class=HTMLResponse)
 def memory_view(request: Request) -> HTMLResponse:
+    _memory_maintenance()
     mem_dir = _memory_dir()
-    user_card = _read_text(mem_dir / "user_card.md")
-    user_memory = _read_text(mem_dir / "user_memory.md")
+    state = _memory_load_state_unlocked()
+    audit_files = _memory_collect_file_items(_memory_audit_root(), "**/*.md")
+    daily_files = _memory_collect_file_items(_memory_daily_root(), "*.md")
+    selected_tab = str(request.query_params.get("tab") or "audit").strip().lower()
+    if selected_tab not in {"audit", "daily", "long_term"}:
+        selected_tab = "audit"
+    selected_audit = str(request.query_params.get("audit_file") or "").strip()
+    selected_daily = str(request.query_params.get("daily_file") or "").strip()
+    if not selected_audit and audit_files:
+        selected_audit = str(audit_files[0].get("rel_path") or "")
+    if not selected_daily and daily_files:
+        selected_daily = str(daily_files[0].get("rel_path") or "")
+    audit_content = _memory_read_selected_file(selected_audit)
+    daily_content = _memory_read_selected_file(selected_daily)
+    long_term_path = _memory_long_term_path()
+    long_term_memory = _memory_read_text(long_term_path)
+    if not long_term_memory:
+        long_term_memory = _read_text(mem_dir / "user_memory.md")
     return templates.TemplateResponse(
         request,
         "memory.html",
         {
-            "user_card": user_card,
-            "user_memory": user_memory,
+            "selected_tab": selected_tab,
+            "audit_files": audit_files,
+            "daily_files": daily_files,
+            "selected_audit": selected_audit,
+            "selected_daily": selected_daily,
+            "audit_content": audit_content,
+            "daily_content": daily_content,
+            "long_term_memory": long_term_memory,
+            "state": state,
         },
     )
+
+
+@app.post("/memory/audit/summary", include_in_schema=False)
+def memory_audit_summary() -> RedirectResponse:
+    now = _utcnow()
+    with _MEMORY_LOCK:
+        state = _memory_load_state_unlocked()
+        _memory_rotate_current_audit_unlocked(state, now, force=True, create_next=True)
+        _memory_finalize_due_days_unlocked(state, now)
+        _memory_cleanup_audit_files_unlocked(now)
+        state["last_maintenance_at"] = _memory_iso(now)
+        _memory_save_state_unlocked(state)
+    return RedirectResponse(url="/memory?tab=audit", status_code=303)
 
 
 @app.get("/companions", response_class=HTMLResponse)
@@ -2121,11 +2917,19 @@ async def companion_choose_directory_proxy(companion_id: int) -> dict:
 
 
 @app.post("/memory/save", include_in_schema=False)
-def memory_save(user_card: str = Form(""), user_memory: str = Form("")) -> RedirectResponse:
+def memory_save(
+    long_term_memory: str = Form(""),
+    user_memory: str = Form(""),
+    user_card: str = Form(""),
+) -> RedirectResponse:
     mem_dir = _memory_dir()
-    (mem_dir / "user_card.md").write_text(user_card or "", encoding="utf-8")
-    (mem_dir / "user_memory.md").write_text(user_memory or "", encoding="utf-8")
-    return RedirectResponse(url="/memory", status_code=303)
+    if user_card:
+        (mem_dir / "user_card.md").write_text(user_card or "", encoding="utf-8")
+    content = long_term_memory if str(long_term_memory or "").strip() else user_memory
+    _memory_long_term_path().write_text(content or "", encoding="utf-8")
+    if user_memory:
+        (mem_dir / "user_memory.md").write_text(user_memory or "", encoding="utf-8")
+    return RedirectResponse(url="/memory?tab=long_term", status_code=303)
 
 
 @app.post("/api/agent/events")
@@ -2146,6 +2950,15 @@ def agent_report_event(payload: AgentEventIn) -> dict:
         s.flush()  # 获取自增 id
         event_id = ev.id
         created_at = ev.created_at
+    _try_audit_memory(
+        kind=f"event.{payload.kind}",
+        source=f"agent:{payload.agent}",
+        summary=f"Agent reported event `{payload.kind}`.",
+        detail=json.dumps(payload.payload or {}, ensure_ascii=False, indent=2),
+        task_public_id=payload.task_id,
+        metadata={"event_id": event_id, "created_at": _memory_iso(created_at)},
+        occurred_at=created_at,
+    )
     return {"id": event_id, "created_at": created_at}
 
 
@@ -2325,6 +3138,15 @@ def focus_report(report: FocusReportIn) -> dict:
             )
         )
         s.flush()
+    _try_audit_memory(
+        kind="skill.focus_report",
+        source=f"agent:{report.agent}",
+        summary=f"Focus report for task `{report.task_name}` with status `{report.status}`.",
+        detail=json.dumps(payload, ensure_ascii=False, indent=2),
+        goal_id=report.goal_id,
+        task_public_id=report.task_public_id,
+        metadata={"status": report.status},
+    )
     return {"ok": True, "task_updated": None}
 
 
@@ -2795,6 +3617,15 @@ async def terminals_new(space_id: int) -> dict:
         s.add(t)
         s.flush()
 
+    _try_audit_memory(
+        kind="terminal.created",
+        source="web",
+        summary=f"Created terminal `{name}`.",
+        detail=f"AgentSpace {int(sp.id)} created terminal {real_tid} at {str(sp.root_path or '')}.",
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "terminal_id": real_tid, "name": name},
+    )
+
     return {"ok": True, "terminal": {"terminal_id": real_tid, "name": name}}
 
 
@@ -2863,6 +3694,15 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
         s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.terminal_id == tid).delete(
             synchronize_session=False
         )
+
+    _try_audit_memory(
+        kind="terminal.closed",
+        source="web",
+        summary=f"Closed terminal `{tid}`.",
+        detail=f"AgentSpace {int(sp.id)} removed terminal {tid}.",
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "terminal_id": tid},
+    )
 
     return {"ok": True}
 
@@ -3004,6 +3844,14 @@ async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) ->
                 elif isinstance(msg.get("data"), str):
                     raw = msg.get("data").encode("utf-8")
                 if raw:
+                    _try_audit_memory(
+                        kind="terminal.input",
+                        source="web",
+                        summary=f"Terminal input sent to `{tid}`.",
+                        detail=_memory_decode_terminal_bytes(raw),
+                        task_public_id=str(sp.task_public_id or "") or None,
+                        metadata={"space_id": int(sp.id), "terminal_id": tid},
+                    )
                     try:
                         await conn.request_terminal_input(terminal_id=tid, data=raw, timeout_seconds=10.0)
                     except Exception as e:
@@ -3100,6 +3948,14 @@ async def agent_sessions_new(space_id: int) -> dict:
         )
         s.add(ss)
         s.flush()
+    _try_audit_memory(
+        kind="agent.session.created",
+        source="web",
+        summary=f"Created agent session `{real_sid}`.",
+        detail=f"Agent type: {str(sp.agent_type or 'trae-cli')}\nRoot path: {str(sp.root_path or '')}",
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "session_id": real_sid},
+    )
     return {"ok": True, "session": {"session_id": real_sid}}
 
 
@@ -3162,6 +4018,14 @@ async def agent_session_terminate(space_id: int, session_id: str) -> dict:
         if sess is not None:
             sess.status = "terminated"
             s.add(sess)
+    _try_audit_memory(
+        kind="agent.session.terminated",
+        source="web",
+        summary=f"Terminated agent session `{sid}`.",
+        detail="User terminated the managed agent session.",
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "session_id": sid},
+    )
     return {"ok": True}
 
 
@@ -3203,6 +4067,15 @@ async def agent_session_send(request: Request, space_id: int, session_id: str) -
         task_public_id=str(sp.task_public_id or ""),
         session_id=sid,
         user_prompt=user_text,
+    )
+
+    _try_audit_memory(
+        kind="agent.session.user_message",
+        source="web",
+        summary=f"Sent message to agent session `{sid}`.",
+        detail=user_text,
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "session_id": sid},
     )
 
     try:

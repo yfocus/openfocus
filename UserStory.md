@@ -193,6 +193,7 @@ Memory uses a three-layer markdown system: `audit memory`, `daily memory`, and `
    - `Audit` shows rolling audit files grouped by time window.
    - `Daily` shows the current `YYYY-MM-dd.md` file or a selected historical daily file.
    - `Long-term` shows `MEMORY.md`.
+   - The page layout, typography, and color system should align with the Dashboard style baseline.
 2. Audit memory must be visible in the Memory page in MVP.
    - The UI may present audit logs by file list, time range, or rolling segments.
    - The UI does not need to flatten all audit files into one infinite stream.
@@ -206,6 +207,9 @@ Memory uses a three-layer markdown system: `audit memory`, `daily memory`, and `
    - `2000 entries`
 5. Every audit rotation triggers a summary job.
    - The generated summary is appended into that day's `daily memory`.
+   - After each summary finishes, the system must immediately roll a brand new audit file for subsequent logs.
+   - The Audit tab must provide a `Summary` button so the user can manually trigger the same summary-and-roll flow.
+   - Audit files that already produced a summary must be visually marked in the file list so they are distinguishable from files that have not been summarized.
    - Audit memory files keep a `7 days` TTL.
 6. After `00:00`, the system starts a daily finalization job for the previous day.
    - It reads the whole previous day's daily memory draft.
@@ -213,3 +217,6 @@ Memory uses a three-layer markdown system: `audit memory`, `daily memory`, and `
    - It extracts stable user preferences and facts into `MEMORY.md`.
 7. `daily memory` and `MEMORY.md` are permanent files and have no TTL.
 8. Recommendation and planning may read both the latest daily memory and `MEMORY.md`, but the UI must keep user-facing text in English.
+9. `Long-term` is read-only by default.
+   - The primary action shows `Edit` by default.
+   - Only after clicking `Edit` does the text area become editable and the action switch to `Save`.

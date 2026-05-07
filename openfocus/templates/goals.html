@@ -270,10 +270,7 @@
               'gray' if g.status == 'done'
               else (
                 'red' if (today and g.due_date < today)
-                else (
-                  'green' if (ns.has_ip or (total_n > 0 and done_n == total_n))
-                  else ('red' if total_n > 0 else 'gray')
-                )
+                else ('gray' if g.status == 'paused' else 'green')
               )
             ) %}
 
@@ -1375,7 +1372,7 @@
       if(btn) btn.disabled = true;
       box.innerHTML = '<span class="spin"></span> <span class="muted">thinking...</span>';
       try{
-        const r = await fetch('/api/recommendations/next?limit=5');
+        const r = await fetch('/api/recommendations/next?limit=5', { cache: 'no-store' });
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const item = (data && data.item) ? data.item : null;

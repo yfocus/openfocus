@@ -30,6 +30,7 @@ async def _wait_until_companion_ready(client: AsyncClient, *, timeout_s: float =
 def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
     async def _run() -> None:
         os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "openfocus_test.db")
+        os.environ["OPENFOCUS_MEMORY_DIR"] = str(tmp_path / "memory")
         os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
         os.environ["OPENFOCUS_TEST_PAIRING_CODE"] = "A1B2C3D4E5"
         os.environ["OPENFOCUS_TEST_TERMINAL_ECHO"] = "1"
@@ -157,6 +158,11 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                 # releasing space should delete terminals records
                 r = await client.delete(f"/api/tasks/{task_pid}/agent_space")
                 assert r.status_code == 200
+
+            audit_files = list((tmp_path / "memory" / "audit").glob("**/*.md"))
+            assert audit_files
+            audit_text = "\n".join(p.read_text(encoding="utf-8") for p in audit_files)
+            assert "terminal.output" in audit_text
         finally:
             stop.set()
             await asyncio.wait_for(comp_task, timeout=5.0)
