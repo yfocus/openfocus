@@ -62,11 +62,8 @@ flowchart TD
        - On `Save`, the system must use LLM-based smart extraction from `Content` to produce `Title`.
        - `Auto=OFF`：`Title` 才允许输入。
        - 必须移除 `gen` 按钮（不再通过按钮生成 Title）。
-     - `Plan Mode` 行为（交互强约束）：
-       - 对话框底部提供 `Plan Mode` 开关。
-       - `Plan Mode=ON`：提交按钮文案显示为 `Plan`；点击后进入 Plan 流程，不在此处直接创建 goal（由 Plan Mode 的 `Create` 写库）。
-       - `Plan Mode=OFF`：提交按钮文案显示为 `Save`；点击后立即创建 goal。
-       - 顶部导航栏不提供单独的 Plan Mode 按钮。
+     - 顶部导航栏提供独立的 `Inspiration` 入口；`New Goal` 对话框内不再承载 `Plan Mode` 或其他规划入口。
+     - 提交按钮固定显示为 `Save`；点击后立即创建 goal。
 7. 「摘要」规则（强约束）：
   - Goal/Task 创建时：若原文长度超过 20 个字符，必须生成一个**不超过 20 个字符**的短摘要；否则摘要=原文。
   - Dashboard 左侧栏只展示摘要（节省空间，便于扫视）；原文只在中间详情栏展示。
@@ -101,7 +98,11 @@ flowchart TD
    - 目标详情需展示目标与详细描述原文。
    - 支持在目标详情内编辑（不依赖跳转到单独编辑页）。
 
-15. 顶端导航栏提供Companion选项，点击后跳转到Companion管理页。
+15. 顶端导航栏提供 `Inspiration` 选项，点击后跳转到灵感空间列表页。
+   - Inspiration 使用独立页面与独立 URL，不嵌在 `New Goal` 对话框里。
+   - 顶部导航需同时保留 `New Goal` 与 `Inspiration` 两个入口，职责明确分离：前者负责立即创建，后者负责持续讨论与规划。
+
+16. 顶端导航栏提供Companion选项，点击后跳转到Companion管理页。
     - Companion page shows current registered Companion basics: `name/device_id`, related AgentSpace list, created date, and status.
     - Companion statuses in the current product are: `active`, `offline`, and `waiting for pairing` (backend state key: `pending_certification`).
     - For waiting companions, the page shows an inline pairing code input plus `Pair` button inside each card.
@@ -138,26 +139,63 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
 待定
 1. 点击tui中的文件路径&行号能在FILES和PREVIEW里头跳转。
 
-### PlanMode
+### Inspiration
 
 **概述**
-Plan Mode 用于“先规划再创建”：在用户点击 `Create` 之前，不写入 Goal/Tasks。
+Inspiration is the dedicated ideation and planning module. It replaces `New Goal`'s old `Plan Mode` flow and provides persistent `InspirationSpace` workspaces for discussion, resource-assisted exploration, draft iteration, and final publish.
 
 **视觉与交互**
-1. Plan Mode 的入口在 `New Goal` 对话框：打开 `Plan Mode` 开关后，点击 `Plan` 不创建 goal，直接进入 Plan 流程。
-   - 不在左侧列表上放按钮。
-   - 顶部导航栏不提供 Plan Mode 按钮。
-2. 页面流转（当前实现）：`Input → Planning → Plan Ready → Reply/Retry/Create`。
-   - Input：从 `New Goal` 对话框进入 plan session。
-   - Planning：等待 agent 输出期间必须展示明确的进行中状态，并锁定发送按钮/输入框，避免重复点击与误操作。
-   - Plan Ready：agent 给出可执行 steps 后，进入“人类确认”区。
-     - User can continue sending more requirements in the same session.
-     - User can select which generated tasks to create.
-     - `Retry` starts a new plan session with the same draft.
-     - `Create` writes Goal/Tasks and returns to Dashboard.
-   - 强约束：在 `Create` 之前不得写入任何 task（人类在环）。
-3. 对话的实现参考 ChatGPT/豆包：等待大模型时必须有提示，且不能继续发送/编辑输入内容（避免“无提示 + 可重复点击”这种反人类交互）。
+1. 顶部导航提供独立的 `Inspiration` 页面，采用：
+   - `GET /inspirations`：Inspiration list
+   - `GET /inspirations/{id}`：InspirationSpace detail
+2. `Inspiration` 列表页展示全部灵感空间，并按 `open / published / closed` 分栏或筛选。
+   - 各分栏默认按最近更新时间倒序。
+   - 顶部提供明确的 `New Inspiration` 按钮。
+   - 每张卡片至少展示：标题、状态、最近更新时间、消息轮次数、资源数量。
+   - 对于已发布空间，卡片还需展示已生成的 goal 标题。
+3. `InspirationSpace` 详情页采用两栏布局：左侧 `Resources`，右侧 `Discussion`。
+   - 不包含 terminal，不允许用户接入任意 agent。
+   - 使用 OpenFocus 内建的规划 agent，风格偏“规划助手”：信息不足时主动追问，而不是立刻生成草案。
+4. 创建空间时必须先手动填写标题。
+   - 之后用户可通过消息输入区的 `/summary_title` 命令请求 agent 生成多个候选标题。
+   - 标题候选以 assistant 消息内按钮的形式展示，用户点选后更新标题。
+5. 资源系统支持 `url`、`image`、`text` 与系统生成的 `summary` 资源。
+   - `url` 资源在 V1 中只保存 URL 本身与名称。
+   - `image` 资源在 V1 中只支持本地上传图片文件。
+   - 文本与 URL 存数据库；图片存文件系统，数据库保存路径与元信息。
+   - 资源侧栏顶部提供统一的 `Add Resource` 入口，由用户选择 `URL / Image / Text`。
+   - 资源列表按最近更新时间倒序。
+6. `open` 状态下，每个资源默认提供以下操作：`Send to prompt`、`Preview`、`Rename`、`Delete`。
+   - `Preview` 采用页内抽屉，不离开当前详情页。
+   - `Send to prompt` 插入结构化引用，而不是直接把全文贴进输入框。
+   - 资源删除后从列表消失，但对应上传/删除行为必须保留在审计与事件记录中。
+7. 对话区采用持续会话模式，支持多轮讨论与历史回看。
+   - 消息历史采用倒序分页加载。
    - 发送快捷键（强约束）：当输入框聚焦时，macOS 使用 `Cmd+Enter` 发送；其他平台使用 `Ctrl+Enter` 发送；单独 `Enter` 保持换行。
+   - 等待 agent 回复期间必须展示明确的进行中状态，并锁定发送按钮/输入框，避免重复点击与误操作。
+8. 用户可通过 `/draft_goal_tasks`，或在 agent 认为信息充分时，由 agent 生成新的 `Draft vN`。
+   - 每次草案都作为一条 assistant 消息写入消息流，并显示版本号（例如 `Draft v1`、`Draft v2`）。
+   - 草案历史不单独放在独立页面，用户通过浏览聊天记录即可查看旧版本。
+9. `Draft vN` 的 assistant 消息需要渲染结构化确认卡片。
+   - 卡片展示候选 goal 与 tasks。
+   - tasks 默认全选，用户可取消不需要的 task 后再发布。
+   - 确认卡片本身只负责确认，不支持直接编辑 goal/task 内容；若用户想修改内容，需要继续对话并让 agent 重新生成新草案。
+   - 未勾选的 tasks 视为本次 `deferred`，需要体现在发布结果与发布总结中。
+10. 正式发布通过 assistant 草案卡片内的 `Publish` 完成，而不是通过聊天口令确认。
+   - 发布固定产出 `1 个 goal + 多个被勾选的 tasks`。
+   - 发布前不得写入任何 Goal/Task（人类在环）。
+   - 发布失败时，原草案卡片需直接显示错误并允许用户原地重试。
+11. 发布成功后，`InspirationSpace` 进入 `published` 状态并永久只读。
+   - 系统必须自动生成一个只读资源，名称固定为 `Published Summary`。
+   - `Published Summary` 至少包含：`Idea`、`Why now`、`Goal`、`Published tasks`、`Open questions`、`Rejected / deferred ideas`。
+   - 已发布空间头部需展示发布时间、goal 跳转链接与 task 数量。
+12. `closed` 表示暂停/封存，而不是废弃。
+   - `closed` 空间详情页提供 `Reopen`。
+   - 对于未发布空间，`closed` 详情页还提供 `Delete`；删除前做简单二次确认。
+13. `published` 空间不可 reopen；若要基于当前结果继续思考，必须使用 `Fork New Inspiration`。
+   - Fork 出的新空间默认带一个 follow-up 风格标题。
+   - 新空间默认继承上一版的 `Published Summary` 资源，并允许用户选择附带部分原始资源。
+   - 继承过来的 `summary` 默认只出现在资源区，不自动注入首轮 prompt；是否发送由用户决定。
 
 ### Calendar
 
@@ -219,7 +257,7 @@ Memory uses a three-layer markdown system: `audit memory`, `daily memory`, and `
    - The UI does not need to flatten all audit files into one infinite stream.
 3. Audit memory must include all key behaviors from users and agents inside OpenFocus:
    - Goal / Task create, edit, `Finish`, delete
-   - Plan Mode interaction history
+   - Inspiration interaction history, including messages, resource operations, draft generation, publish, reopen, and fork
    - Agent / Skill reports
    - All web shell inputs and outputs in AgentSpace
 4. Audit memory rotates automatically when either threshold is reached:
