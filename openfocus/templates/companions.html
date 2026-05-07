@@ -18,6 +18,7 @@
     .comp-title{ font-size: 22px; font-weight: 700; color: rgba(255,209,102,0.92); }
     .comp-link{ border: 0; background: transparent; padding: 0; color: rgba(215,255,233,0.72); }
     .comp-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+    .icon-btn{ min-width: 30px; padding: 6px 8px; border-radius: 999px; font-size: 16px; line-height: 1; }
 
     /* Cards: no border, rely on background + spacing */
     .comp-list{ display:flex; flex-direction:column; gap: 12px; }
@@ -94,7 +95,7 @@
       <div>
         <div class="comp-title">Companion</div>
       </div>
-      <button type="button" class="comp-link" id="comp-refresh">ref</button>
+      <button type="button" class="comp-link icon-btn" id="comp-refresh" title="Refresh" aria-label="Refresh">↻</button>
     </div>
 
     <div id="comp-list" class="comp-list muted">loading...</div>

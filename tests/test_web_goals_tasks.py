@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -245,6 +246,167 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
         assert r.status_code == 200
         assert 'status-dot green' in r.text
         assert 'status-dot red' not in r.text
+
+
+@pytest.mark.anyio
+async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monkeypatch):
+    from openfocus.main import app
+    from openfocus.db import session_scope
+    from openfocus.models import Event, Goal, Task
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/goals",
+            data={
+                "content": "任务排序目标",
+                "description": "验证 dashboard goal detail 的默认排序与表头排序能力",
+                "due_date": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        with session_scope() as s:
+            goal = s.query(Goal).order_by(Goal.id.desc()).first()
+            assert goal is not None
+            goal_id = goal.id
+
+        task_titles = ["todo-old", "todo-new", "doing-mid", "done-last"]
+        for title in task_titles:
+            r = await client.post(
+                f"/goals/{goal_id}/tasks",
+                data={"title": title, "description": f"desc for {title}"},
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+
+        now = dt.datetime.now(dt.timezone.utc)
+        with session_scope() as s:
+            rows = {t.title: t for t in s.query(Task).filter(Task.goal_id == goal_id).all()}
+            rows["todo-old"].created_at = now - dt.timedelta(days=3)
+            rows["todo-new"].created_at = now - dt.timedelta(days=1)
+            rows["doing-mid"].created_at = now - dt.timedelta(days=2)
+            rows["done-last"].created_at = now
+            rows["done-last"].status = "done"
+            rows["done-last"].completed_at = now
+            s.add(
+                Event(
+                    kind="task.started",
+                    agent="test",
+                    task_id=rows["doing-mid"].public_id,
+                    payload={"task_public_id": rows["doing-mid"].public_id},
+                )
+            )
+
+        r = await client.get(f"/goals?goal={goal_id}")
+        assert r.status_code == 200
+        assert '>↻<' in r.text
+        assert '>ref<' not in r.text
+
+        matched = re.search(rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>', r.text, re.S)
+        assert matched is not None
+        html = matched.group("html")
+
+        assert 'data-sort-key="title"' in html
+        assert 'data-sort-key="created-at"' in html
+        assert 'data-sort-key="status"' in html
+
+        order = [
+            html.index("doing-mid"),
+            html.index("todo-new"),
+            html.index("todo-old"),
+            html.index("done-last"),
+        ]
+        assert order == sorted(order)
+
+
+@pytest.mark.anyio
+async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.main import app
+    from openfocus.db import session_scope
+    from openfocus.models import Goal, NextMoveFeedback
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/goals",
+            data={
+                "content": "Next Move 测试目标",
+                "description": "验证三条推荐与反馈学习",
+                "due_date": (dt.date.today() + dt.timedelta(days=1)).isoformat(),
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        with session_scope() as s:
+            goal = s.query(Goal).order_by(Goal.id.desc()).first()
+            assert goal is not None
+            goal_id = goal.id
+
+        tasks = [
+            ("Deep analysis refactor", "Need design + refactor for one module."),
+            ("Review PR comments", "Review and reply to comments quickly."),
+            ("Reply stakeholder message", "Send a short update message."),
+            ("Document cleanup", "Cleanup docs and organize notes."),
+        ]
+        for title, description in tasks:
+            r = await client.post(
+                f"/goals/{goal_id}/tasks",
+                data={"title": title, "description": description},
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+
+        r = await client.get("/api/recommendations/next?limit=3&trigger=manual_refresh")
+        assert r.status_code == 200
+        data = r.json()
+        items = data.get("items") or []
+        assert len(items) == 3
+        assert data.get("run_id")
+        top = items[0]
+        assert top.get("task_type")
+        assert top.get("task_type_label")
+        assert top.get("expected_time_minutes")
+        assert top.get("context_switch_cost") in {"low", "medium", "high"}
+        dismissed_pid = (top.get("target") or {}).get("task_public_id")
+        assert dismissed_pid
+
+        r = await client.post(
+            "/api/recommendations/feedback",
+            json={
+                "run_id": data.get("run_id"),
+                "task_public_id": dismissed_pid,
+                "feedback_type": "dismiss",
+                "reason_code": "too_long",
+                "reason_text": "现在只想先做短任务",
+            },
+        )
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload.get("ok") is True
+
+        with session_scope() as s:
+            fb = s.query(NextMoveFeedback).order_by(NextMoveFeedback.id.desc()).first()
+            assert fb is not None
+            assert fb.task_public_id == dismissed_pid
+            assert fb.reason_code == "too_long"
+
+        r = await client.get("/api/recommendations/next?limit=3&trigger=feedback_submitted")
+        assert r.status_code == 200
+        data2 = r.json()
+        items2 = data2.get("items") or []
+        assert len(items2) == 3
+        assert ((items2[0].get("target") or {}).get("task_public_id")) != dismissed_pid
+
+        daily_path = tmp_path / "memory" / "daily" / f"{dt.date.today().isoformat()}.md"
+        assert daily_path.exists()
+        daily_text = daily_path.read_text(encoding="utf-8")
+        assert "Next Move Feedback" in daily_text
+        assert "现在只想先做短任务" in daily_text
 
 
 @pytest.mark.anyio

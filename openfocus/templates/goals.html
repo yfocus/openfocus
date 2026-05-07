@@ -83,11 +83,15 @@
 
       /* Goal tasks table */
       #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
-      #dashboard table.wb-table th{ text-align:left; color: rgba(255,191,102,0.85); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); }
+      #dashboard table.wb-table th{ text-align:left; color: rgba(255,191,102,0.85); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); vertical-align: middle; }
       #dashboard table.wb-table td{ padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.88); }
       #dashboard table.wb-table tr:hover td{ background: rgba(255,255,255,0.04); }
       #dashboard .wb-table .tlink{ cursor:pointer; color: rgba(255,255,255,0.92); }
       #dashboard .wb-table .muted{ color: rgba(255,255,255,0.55); }
+      #dashboard .sort-th{ display:inline-flex; align-items:center; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
+      #dashboard .sort-th:hover{ color: rgba(0,229,255,0.92); }
+      #dashboard .sort-arrow{ color: rgba(215,255,233,0.52); font-size: 11px; line-height: 1; }
+      #dashboard .sort-th.is-active .sort-arrow{ color: rgba(0,229,255,0.92); }
 
       /* Right column */
       #dashboard .side-title{ display:flex; align-items:center; justify-content:space-between; gap: 10px; }
@@ -101,22 +105,30 @@
         min-height: 0;
       }
       #dashboard .side-head{ flex: 0 0 auto; }
+      #dashboard .side-card > .divider{ height: 1px; margin: 0; background: rgba(255,255,255,0.10); }
       #dashboard .side-body{ flex: 1 1 auto; min-height: 0; }
-      #dashboard .side-body > .pad{ padding: 12px; }
+      #dashboard .side-body > .pad{ padding: 0 12px 12px; }
+      #dashboard #next-list,
+      #dashboard #ev-list{ padding-top: 0; margin-top: 0; }
+      #dashboard .icon-btn{ min-width: 30px; padding: 6px 8px; border-radius: 999px; font-size: 16px; line-height: 1; }
 
       /* NextMove (decision panel) */
-      #dashboard .nm-wrap{ display:flex; flex-direction:column; gap: 12px; }
+      #dashboard .nm-wrap{ display:flex; flex-direction:column; gap: 8px; }
       #dashboard .nm-card{ border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; background: rgba(255,255,255,0.03); padding: 12px; }
       #dashboard .nm-k{ color: rgba(255,255,255,0.60); font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; }
       #dashboard .nm-title{ margin-top: 6px; color: rgba(255,209,102,0.92); font-size: 13px; font-weight: 700; }
-      #dashboard .nm-desc{ margin-top: 8px; color: rgba(215,255,233,0.72); font-size: 12px; white-space: pre-wrap; }
+      #dashboard .nm-sub{ margin-top: 4px; color: rgba(255,255,255,0.55); font-size: 12px; }
+      #dashboard .nm-meta{ margin-top: 10px; display:flex; gap: 8px; flex-wrap:wrap; }
+      #dashboard .nm-badge{ display:inline-flex; align-items:center; padding: 4px 8px; border-radius: 999px; font-size: 11px; color: rgba(215,255,233,0.88); background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.14); }
+      #dashboard .nm-reasons{ margin-top: 10px; display:flex; flex-direction:column; gap: 6px; }
+      #dashboard .nm-reason{ color: rgba(215,255,233,0.74); font-size: 12px; }
       #dashboard .nm-actions{ margin-top: 10px; display:flex; gap: 10px; flex-wrap:wrap; }
       #dashboard .nm-actions .btn-primary{ padding: 8px 12px; border-radius: 10px; }
       #dashboard .nm-actions .btn-ghost{ padding: 8px 12px; border-radius: 10px; }
       #dashboard .nm-secondary{ display:flex; gap: 10px; flex-wrap:wrap; margin-top: 8px; }
 
       /* Events timeline */
-      #dashboard .ev-timeline{ padding: 0; display:flex; flex-direction:column; gap: 12px; }
+      #dashboard .ev-timeline{ padding: 0; display:flex; flex-direction:column; gap: 8px; }
       #dashboard .ev-item{
         display:grid;
         grid-template-columns: 58px 14px 1fr;
@@ -346,16 +358,16 @@
                     <div class="detail-sec" data-sec="tasks">
                       <div class="sec-title">Tasks</div>
                       <div class="sec-body">
-                        <table class="wb-table" aria-label="Tasks">
+                        <table class="wb-table js-task-table" aria-label="Tasks">
                           <thead>
                             <tr>
-                              <th>任务名称</th>
-                              <th>DDL</th>
-                              <th>创建时间</th>
-                              <th>状态</th>
-                              <th>taskId</th>
-                              <th>Agent</th>
-                              <th>Token</th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="title">任务名称<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="ddl">DDL<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="created-at">创建时间<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="status">状态<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="task-id">taskId<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="agent">Agent<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="token">Token<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                             </tr>
                           </thead>
                           <tbody>
@@ -363,7 +375,17 @@
                               {% set m = task_meta.get(t.public_id, {}) %}
                               {% set ui = m.get('ui_status','todo') %}
                               {% set st = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
-                              <tr class="js-open-task" data-task="{{ t.public_id }}" data-goal="{{ g.id }}">
+                              <tr class="js-open-task"
+                                data-task="{{ t.public_id }}"
+                                data-goal="{{ g.id }}"
+                                data-sort-title="{{ t.title }}"
+                                data-sort-ddl="{{ g.due_date.isoformat() if g.due_date else '' }}"
+                                data-sort-created-at="{{ t.created_at.isoformat() if t.created_at else '' }}"
+                                data-sort-status="{{ st }}"
+                                data-sort-task-id="{{ t.public_id }}"
+                                data-sort-agent=""
+                                data-sort-token=""
+                              >
                                 <td class="tlink" title="{{ t.title }}">{{ t.title }}</td>
                                 <td class="muted">{{ g.due_date }}</td>
                                 <td class="muted">{{ t.created_at|human_since(now=now) }}</td>
@@ -535,10 +557,10 @@
     <div class="dash-col" id="dash-right">
       <div class="side-card" style="flex: 1 1 0;">
         <div class="side-head">
-          <div class="pad" style="padding: 12px;">
+          <div class="pad" style="padding: 10px 12px 2px;">
             <div class="side-title">
               <div class="k">Next Move</div>
-              <button type="button" id="next-refresh" class="btn-ghost">ref</button>
+              <button type="button" id="next-refresh" class="btn-ghost icon-btn" title="Refresh" aria-label="Refresh">↻</button>
             </div>
           </div>
         </div>
@@ -550,7 +572,7 @@
 
       <div class="side-card" style="flex: 1 1 0;">
         <div class="side-head">
-          <div class="pad" style="padding: 12px;">
+          <div class="pad" style="padding: 10px 12px 2px;">
             <div class="side-title">
               <div class="k">Events</div>
               <div style="display:flex; gap: 8px; flex-wrap:wrap; justify-content:flex-end;">
@@ -559,7 +581,7 @@
                   <input type="checkbox" id="notify-toggle" />
                   <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
                 </label>
-                <button type="button" id="ev-refresh" class="btn-ghost">ref</button>
+                <button type="button" id="ev-refresh" class="btn-ghost icon-btn" title="Refresh" aria-label="Refresh">↻</button>
               </div>
             </div>
           </div>
@@ -571,6 +593,45 @@
       </div>
     </div>
   </div>
+
+  <dialog id="next-feedback-dialog" class="of-dialog" style="max-width: 560px; width: calc(100% - 24px);">
+    <form method="dialog" style="margin:0;">
+      <div class="dlg-head">
+        <div>
+          <div class="dlg-title">Not for now</div>
+          <div class="dlg-sub" id="next-feedback-task-hint">Tell Next Move why this recommendation is off.</div>
+        </div>
+        <button type="submit" class="dlg-close" aria-label="Close">x</button>
+      </div>
+    </form>
+    <div class="divider"></div>
+    <div class="dlg-body">
+      <form method="post" action="/api/recommendations/feedback" id="next-feedback-form">
+        <input type="hidden" id="next-feedback-run-id" name="run_id" />
+        <input type="hidden" id="next-feedback-task-id" name="task_public_id" />
+        <input type="hidden" id="next-feedback-type" name="feedback_type" value="dismiss" />
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="next-feedback-reason">Reason</label></div>
+          <select id="next-feedback-reason" name="reason_code" style="width:100%;">
+            <option value="too_much_context_switch">Too much context switching</option>
+            <option value="too_long">Too long for now</option>
+            <option value="wrong_type">Wrong type of work right now</option>
+            <option value="not_important_now">Not important right now</option>
+            <option value="lacking_context">I do not have enough context yet</option>
+            <option value="waiting_on_someone">Blocked / waiting on someone</option>
+          </select>
+        </div>
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="next-feedback-text">More context</label></div>
+          <textarea id="next-feedback-text" name="reason_text" rows="5" maxlength="2000" placeholder="Optional note to help the agent learn..."></textarea>
+        </div>
+        <div class="dlg-footer">
+          <span></span>
+          <button type="submit" class="btn-primary" id="next-feedback-submit">Submit</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
 
   <!-- New Goal dialog (opened from topbar) -->
   <dialog id="new-goal-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
@@ -744,7 +805,7 @@
       <div class="dlg-field">
         <div class="dlg-label">
           <label for="agent-space-companion">Companion</label>
-          <button type="button" class="btn-ghost action-link" id="agent-space-companion-refresh">ref</button>
+          <button type="button" class="btn-ghost action-link icon-btn" id="agent-space-companion-refresh" title="Refresh" aria-label="Refresh">↻</button>
         </div>
         <select id="agent-space-companion" style="width:100%;">
           <option value="">loading...</option>
@@ -884,6 +945,25 @@
       }
     }
 
+    function _openNextFeedbackDialog(fromEl){
+      const dlg = document.getElementById('next-feedback-dialog');
+      const hint = document.getElementById('next-feedback-task-hint');
+      const runId = document.getElementById('next-feedback-run-id');
+      const taskId = document.getElementById('next-feedback-task-id');
+      const reason = document.getElementById('next-feedback-reason');
+      const text = document.getElementById('next-feedback-text');
+      const title = String(fromEl?.getAttribute('data-title') || '').trim();
+      const pid = String(fromEl?.getAttribute('data-task') || '').trim();
+      const run = String(fromEl?.getAttribute('data-run-id') || '').trim();
+      if(hint) hint.textContent = title ? ('Tell Next Move why "' + title + '" is not right now.') : 'Tell Next Move why this recommendation is off.';
+      if(runId) runId.value = run;
+      if(taskId) taskId.value = pid;
+      if(reason) reason.value = 'too_much_context_switch';
+      if(text) text.value = '';
+      try{ dlg?.showModal(); }catch(_){ }
+      setTimeout(()=>{ try{ reason?.focus(); }catch(_){ } }, 30);
+    }
+
     function _openNewTaskDialog(goalId){
       const gid = String(goalId || '').trim();
       if(!gid){ toast('请先选择一个目标'); return; }
@@ -955,7 +1035,63 @@
       const tpl = document.getElementById(tid);
       if(!tpl) return false;
       setDetail(tpl.innerHTML);
+      initTaskTableSorters(document.getElementById('detail'));
       return true;
+    }
+
+    function _taskTableRows(table){
+      if(!(table instanceof HTMLTableElement) || !table.tBodies || !table.tBodies[0]) return [];
+      return Array.from(table.tBodies[0].querySelectorAll('tr'));
+    }
+
+    function _updateTaskSortIndicators(table){
+      if(!(table instanceof HTMLTableElement)) return;
+      const activeKey = String(table.getAttribute('data-sort-key') || '').trim();
+      const activeDir = String(table.getAttribute('data-sort-dir') || '').trim();
+      table.querySelectorAll('.js-task-sort').forEach((btn)=>{
+        const key = String(btn.getAttribute('data-sort-key') || '').trim();
+        const arrow = btn.querySelector('[data-sort-arrow]');
+        const active = !!activeKey && key === activeKey;
+        btn.classList.toggle('is-active', active);
+        if(arrow) arrow.textContent = active ? (activeDir === 'desc' ? '↓' : '↑') : '↕';
+      });
+    }
+
+    function sortTaskTable(table, sortKey){
+      if(!(table instanceof HTMLTableElement)) return;
+      const key = String(sortKey || '').trim();
+      if(!key) return;
+      const prevKey = String(table.getAttribute('data-sort-key') || '').trim();
+      const prevDir = String(table.getAttribute('data-sort-dir') || 'asc').trim().toLowerCase();
+      const nextDir = (prevKey === key && prevDir === 'asc') ? 'desc' : 'asc';
+      const rows = _taskTableRows(table);
+      const attr = 'data-sort-' + key;
+      rows.sort((a, b)=>{
+        const av = String(a.getAttribute(attr) || '').trim();
+        const bv = String(b.getAttribute(attr) || '').trim();
+        const cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+        if(cmp !== 0) return nextDir === 'asc' ? cmp : -cmp;
+        const ta = String(a.getAttribute('data-task') || '').trim();
+        const tb = String(b.getAttribute('data-task') || '').trim();
+        const fallback = ta.localeCompare(tb, undefined, { numeric: true, sensitivity: 'base' });
+        return nextDir === 'asc' ? fallback : -fallback;
+      });
+      const body = table.tBodies && table.tBodies[0] ? table.tBodies[0] : null;
+      if(!body) return;
+      rows.forEach((row)=> body.appendChild(row));
+      table.setAttribute('data-sort-key', key);
+      table.setAttribute('data-sort-dir', nextDir);
+      _updateTaskSortIndicators(table);
+    }
+
+    function initTaskTableSorters(root){
+      const scope = (root instanceof HTMLElement || root instanceof Document) ? root : document;
+      scope.querySelectorAll('.js-task-table').forEach((table)=>{
+        if(!(table instanceof HTMLTableElement)) return;
+        table.removeAttribute('data-sort-key');
+        table.removeAttribute('data-sort-dir');
+        _updateTaskSortIndicators(table);
+      });
     }
 
     function activateDetailTab(root, tab){
@@ -1232,6 +1368,13 @@
         return;
       }
 
+      const sortBtn = t.closest('.js-task-sort');
+      if(sortBtn){
+        const table = sortBtn.closest('.js-task-table');
+        sortTaskTable(table, sortBtn.getAttribute('data-sort-key'));
+        return;
+      }
+
       // Click-to-select for whole cards/rows (avoid requiring clicking the text button)
       const taskRow = t.closest('[data-task-item]');
       if(taskRow){
@@ -1273,6 +1416,13 @@
         const gid = openNext.getAttribute('data-goal');
         if(pid) selectTask(pid, gid);
         else if(gid) selectGoal(gid);
+        return;
+      }
+
+      const dismissNext = t.closest('.js-dismiss-next');
+      if(dismissNext){
+        _openNextFeedbackDialog(dismissNext);
+        return;
       }
 
       const openNewTask = t.closest('.js-open-new-task');
@@ -1305,6 +1455,37 @@
     document.addEventListener('submit', async (e)=>{
       const form = e.target;
       if(!(form instanceof HTMLFormElement)) return;
+      if(form.id === 'next-feedback-form'){
+        e.preventDefault();
+        const submitBtn = document.getElementById('next-feedback-submit');
+        try{
+          if(submitBtn) submitBtn.disabled = true;
+          const payload = {
+            run_id: document.getElementById('next-feedback-run-id')?.value || '',
+            task_public_id: document.getElementById('next-feedback-task-id')?.value || '',
+            feedback_type: document.getElementById('next-feedback-type')?.value || 'dismiss',
+            reason_code: document.getElementById('next-feedback-reason')?.value || '',
+            reason_text: document.getElementById('next-feedback-text')?.value || '',
+          };
+          const r = await fetch(form.action, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if(!r.ok) throw new Error('HTTP ' + r.status);
+          try{ document.getElementById('next-feedback-dialog')?.close(); }catch(_){ }
+          const note = document.getElementById('next-feedback-text');
+          if(note) note.value = '';
+          toast('thanks, learning updated');
+          await refreshNext('feedback_submitted');
+        }catch(_){
+          toast('failed to save feedback');
+        }finally{
+          if(submitBtn) submitBtn.disabled = false;
+        }
+        return;
+      }
+
       if(!form.classList.contains('js-action')) return;
       e.preventDefault();
       const action = form.getAttribute('data-action');
@@ -1355,7 +1536,7 @@
           setTimeout(()=>{ location.href = '/goals?goal=' + encodeURIComponent(gid || ''); }, 30);
           return;
         }
-        refreshNext();
+        refreshNext('state_changed');
         refreshEvents();
       }catch(err){
         toast('操作失败');
@@ -1365,50 +1546,65 @@
       }
     });
 
-      async function refreshNext(){
+      async function refreshNext(trigger){
       const box = document.getElementById('next-list');
       const btn = document.getElementById('next-refresh');
+      const scroller = box.closest('.side-body');
       if(!box) return;
       if(btn) btn.disabled = true;
+      if(scroller) scroller.scrollTop = 0;
       box.innerHTML = '<span class="spin"></span> <span class="muted">thinking...</span>';
       try{
-        const r = await fetch('/api/recommendations/next?limit=5', { cache: 'no-store' });
+        const trig = String(trigger || 'manual_refresh');
+        const r = await fetch('/api/recommendations/next?limit=3&trigger=' + encodeURIComponent(trig), { cache: 'no-store' });
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
-        const item = (data && data.item) ? data.item : null;
-        if(!item){ box.textContent = 'no suggestion.'; return; }
-        const why = Array.isArray(item.why) ? item.why : [];
-        const title = item.title || '';
-        const target = item.target || {};
-        const gid = target.goal_id || '';
-        const pid = target.task_public_id || '';
-        const sentence = (data && data.sentence) ? String(data.sentence) : '';
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const runId = String(data?.run_id || '');
+        if(!items.length){ if(scroller) scroller.scrollTop = 0; box.textContent = 'no suggestion.'; return; }
 
-        const label = title || (pid ? ('task ' + pid) : (gid ? ('goal ' + gid) : 'next'));
-        const whyLines = [];
-        if(sentence) whyLines.push(String(sentence));
-        if(why.length) whyLines.push(...why.map(x => String(x || '')).filter(Boolean));
-        const whyText = whyLines.filter(Boolean).map(x => '- ' + x).join('\n');
-
-        const primaryBtn = `
-          <button type="button" class="btn-primary js-open-next" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}">Open</button>
-        `;
+        const cards = items.map((item, idx)=>{
+          const why = Array.isArray(item?.why) ? item.why : [];
+          const title = String(item?.title || '').trim();
+          const target = item?.target || {};
+          const gid = target.goal_id || '';
+          const pid = target.task_public_id || '';
+          const goalTitle = String(item?.goal_title || '').trim();
+          const taskType = String(item?.task_type_label || item?.task_type || 'Execution');
+          const mins = Number(item?.expected_time_minutes || 0);
+          const flow = String(item?.context_switch_cost || 'medium');
+          const confidence = String(item?.confidence || 'medium');
+          const reasons = why.map(x => `<div class="nm-reason">- ${escapeHtml(String(x || ''))}</div>`).join('');
+          return `
+            <div class="nm-card">
+              <div class="nm-k">Rank ${idx + 1}</div>
+              <div class="nm-title">${escapeHtml(title || (pid ? ('task ' + pid) : 'next'))}</div>
+              <div class="nm-sub">${escapeHtml(goalTitle || '')}</div>
+              <div class="nm-meta">
+                <span class="nm-badge">${escapeHtml(taskType)}</span>
+                <span class="nm-badge">${escapeHtml(mins ? (mins + 'm') : 'time unknown')}</span>
+                <span class="nm-badge">switch ${escapeHtml(flow)}</span>
+                <span class="nm-badge">confidence ${escapeHtml(confidence)}</span>
+              </div>
+              ${reasons ? `<div class="nm-reasons">${reasons}</div>` : ''}
+              <div class="nm-actions">
+                <button type="button" class="btn-primary js-open-next" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}">Open</button>
+                <button type="button" class="btn-ghost js-dismiss-next" data-run-id="${escapeHtml(runId)}" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}" data-title="${escapeHtml(title)}">Not for now</button>
+              </div>
+            </div>
+          `;
+        }).join('');
 
         box.classList.remove('muted');
         box.innerHTML = `
           <div class="nm-wrap">
-            <div class="nm-card">
-              <div class="nm-k">Decision</div>
-              <div class="nm-title">${escapeHtml(label)}</div>
-              ${whyText ? `<div class="nm-desc">${escapeHtml(whyText)}</div>` : ''}
-              <div class="nm-actions">
-                ${primaryBtn}
-              </div>
-            </div>
+            ${cards}
           </div>
         `;
+        if(scroller) scroller.scrollTop = 0;
       }catch(e){
         box.textContent = 'failed to load.';
+        if(scroller) scroller.scrollTop = 0;
       }finally{
         if(btn) btn.disabled = false;
       }
@@ -1454,15 +1650,17 @@
     async function refreshEvents(){
       const box = document.getElementById('ev-list');
       const btn = document.getElementById('ev-refresh');
+      const scroller = box.closest('.side-body');
       if(!box) return;
       if(btn) btn.disabled = true;
+      if(scroller) scroller.scrollTop = 0;
       box.innerHTML = '<span class="spin"></span> <span class="muted">loading...</span>';
       try{
         const r = await fetch('/api/events/recent?limit=30');
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
         const items = (data && data.items) ? data.items : [];
-        if(!items.length){ box.textContent = 'no events.'; return; }
+        if(!items.length){ if(scroller) scroller.scrollTop = 0; box.textContent = 'no events.'; return; }
 
         // Read/unread state for events (focus touched => read)
         const readKey = 'openfocus:events_read_ids';
@@ -1558,6 +1756,7 @@
         }).join('');
         box.classList.remove('muted');
         box.innerHTML = `<div class="ev-timeline">${html}</div>`;
+        if(scroller) scroller.scrollTop = 0;
 
         // mark-as-read on focus/click/hover
         if(!box.__evReadBound){
@@ -1575,12 +1774,13 @@
         }
       }catch(e){
         box.textContent = 'failed to load.';
+        if(scroller) scroller.scrollTop = 0;
       }finally{
         if(btn) btn.disabled = false;
       }
     }
 
-    document.getElementById('next-refresh')?.addEventListener('click', refreshNext);
+    document.getElementById('next-refresh')?.addEventListener('click', ()=> refreshNext('manual_refresh'));
     document.getElementById('ev-refresh')?.addEventListener('click', refreshEvents);
     document.getElementById('task-gen')?.addEventListener('click', _extractTaskTitleFromDescription);
     document.getElementById('goal-edit-gen')?.addEventListener('click', async ()=>{
@@ -1807,6 +2007,7 @@
     // periodic refresh
     setInterval(refreshNext, 30 * 60 * 1000);
     setInterval(refreshEvents, 15 * 1000);
+    setInterval(()=> refreshNext('periodic_refresh'), 30 * 60 * 1000);
 
     // initial
     refreshNext();

@@ -65,11 +65,44 @@ class Task(Base):
     summary: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     description: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo")
+    task_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    context_key: Mapped[str] = mapped_column(String(256), nullable=False, default="")
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NextMoveRun(Base):
+    __tablename__ = "next_move_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    generated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(64), nullable=False, default="manual_refresh")
+    context_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    recommendations: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class NextMoveFeedback(Base):
+    __tablename__ = "next_move_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    feedback_type: Mapped[str] = mapped_column(String(32), nullable=False, default="dismiss")
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    reason_text: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    learned_summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
 
 
 class GoalPlanSession(Base):

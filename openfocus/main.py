@@ -28,6 +28,8 @@ from .models import (
     Goal,
     GoalPlanMessage,
     GoalPlanSession,
+    NextMoveFeedback,
+    NextMoveRun,
     RemoteTerminalSession,
     RemoteTerminalOutput,
     Task,
@@ -951,6 +953,15 @@ def _startup() -> None:
         if "description" not in task_cols:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"))
 
+        if "task_type" not in task_cols:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) NOT NULL DEFAULT ''"))
+
+        if "estimated_minutes" not in task_cols:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER NOT NULL DEFAULT 0"))
+
+        if "context_key" not in task_cols:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN context_key VARCHAR(256) NOT NULL DEFAULT ''"))
+
         # goal_plan_sessions 补字段（用于“已有 goal 进入 plan”）
         sess_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goal_plan_sessions)").fetchall()]
         if "source_goal_id" not in sess_cols:
@@ -1310,6 +1321,22 @@ def goals_list(request: Request) -> HTMLResponse:
                 "elapsed": _human_since(last_at or t.created_at, now=now),
             }
 
+        def _task_sort_key(t: Task):
+            meta = task_meta.get(t.public_id, {}) or {}
+            ui_status = str(meta.get("ui_status") or getattr(t, "status", "") or "todo").strip().lower()
+            status_rank = {
+                "in_progress": 0,
+                "todo": 1,
+                "blocked": 2,
+                "done": 9,
+            }.get(ui_status, 3)
+            created_at = getattr(t, "created_at", None) or _utcnow()
+            created_ts = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+            return (status_rank, -created_ts, -int(getattr(t, "id", 0) or 0))
+
+        for gid, grouped_tasks in tasks_by_goal.items():
+            grouped_tasks.sort(key=_task_sort_key)
+
         def _goal_group(g: Goal) -> int:
             # 0: in_progress, 1: expired, 2: completed
             if (g.status or "").strip() == "done":
@@ -1413,19 +1440,229 @@ def _score_text_to_weight(v: str | None) -> int:
     return 2
 
 
+_NEXT_MOVE_TASK_TYPE_LABELS = {
+    "deep_work": "Deep Work",
+    "communication": "Communication",
+    "review": "Review",
+    "execution": "Execution",
+    "admin": "Admin",
+}
+
+
+def _next_move_goal_label(goal: Goal) -> str:
+    summary = str(getattr(goal, "summary", "") or "").strip()
+    return summary if summary else _truncate_zh(str(goal.content or "").strip(), 20)
+
+
+def _next_move_task_type_label(task_type: str | None) -> str:
+    return _NEXT_MOVE_TASK_TYPE_LABELS.get(str(task_type or "").strip().lower(), "Execution")
+
+
+def _infer_task_type(title: str, description: str) -> str:
+    text = f"{title}\n{description}".lower()
+    if any(k in text for k in ["review", "approve", "comment", "code review", "qa", "test report", "验收", "评审", "reviewer", " pr", " mr"]):
+        return "review"
+    if any(k in text for k in ["sync", "meeting", "reply", "email", "message", "call", "沟通", "对齐", "联系", "回复", "会议"]):
+        return "communication"
+    if any(k in text for k in ["admin", "ops", "cleanup", "organize", "docs", "document", "整理", "记录", "文档", "行政"]):
+        return "admin"
+    if any(k in text for k in ["design", "investigate", "analysis", "analyze", "refactor", "architecture", "research", "规划", "设计", "排查", "分析", "重构"]):
+        return "deep_work"
+    return "execution"
+
+
+def _infer_estimated_minutes(task_type: str, title: str, description: str) -> int:
+    text = f"{title}\n{description}".lower()
+    m = re.search(r"(\d{1,3})\s*(minutes?|mins?|min|小时|小時|hour|hours|hr|hrs|h|分钟|分鐘)", text)
+    if m:
+        try:
+            num = max(5, min(240, int(m.group(1))))
+            unit = m.group(2)
+            if unit in {"小时", "小時", "hour", "hours", "hr", "hrs", "h"}:
+                return min(240, num * 60)
+            return num
+        except Exception:
+            pass
+    if re.search(r"\b(quick|small|tiny|minor|trivial|fast|马上|快速|小改|顺手)\b", text):
+        return 20
+    if task_type == "review":
+        return 25
+    if task_type == "communication":
+        return 20
+    if task_type == "admin":
+        return 15
+    if task_type == "deep_work":
+        return 90
+    return 45
+
+
+def _infer_context_key(title: str, description: str, *, goal_id: int, root_path: str | None = None) -> str:
+    rp = str(root_path or "").strip()
+    if rp:
+        try:
+            name = Path(rp).name.strip().lower()
+            if name:
+                return f"space:{name[:80]}"
+        except Exception:
+            pass
+    text = f"{title}\n{description}".lower()
+    m = re.search(r"([a-z0-9_.-]+/[a-z0-9_.-]+)", text)
+    if m:
+        return f"topic:{m.group(1)[:80]}"
+    tokens = [x for x in re.split(r"[^a-zA-Z0-9\u4e00-\u9fff]+", text) if len(x.strip()) >= 2]
+    seed = (tokens[0] if tokens else "")[:32].strip().lower()
+    if seed:
+        return f"goal:{goal_id}:{seed}"
+    return f"goal:{goal_id}"
+
+
+def _next_move_memory_context() -> dict:
+    daily_text = ""
+    try:
+        daily_files = sorted(_memory_daily_root().glob("*.md"), reverse=True)
+        if daily_files:
+            daily_text = _memory_read_text(daily_files[0])
+    except Exception:
+        daily_text = ""
+    long_term_text = _memory_read_text(_memory_long_term_path())
+    merged = f"{daily_text}\n{long_term_text}".lower()
+    signals: set[str] = set()
+    if any(k in merged for k in ["fast feedback", "quick feedback", "快速反馈", "短反馈", "short task", "short tasks"]):
+        signals.add("fast_feedback")
+    if any(k in merged for k in ["avoid context switch", "reduce context switch", "减少切换", "连续推进", "保持上下文", "stay in the same context"]):
+        signals.add("avoid_context_switch")
+    if any(k in merged for k in ["deep work", "深度工作", "long focus block", "大块时间"]):
+        signals.add("deep_work")
+    if any(k in merged for k in ["review first", "先 review", "prefer review", "喜欢 review"]):
+        signals.add("review")
+    return {
+        "daily": daily_text[:4000],
+        "long_term": long_term_text[:4000],
+        "signals": sorted(signals),
+    }
+
+
+def _next_move_feedback_meta(raw: str | None) -> dict:
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return {}
+    try:
+        data = json.loads(text_value)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _next_move_feedback_penalty(
+    feedback_rows: list[NextMoveFeedback],
+    *,
+    task_public_id: str,
+    task_type: str,
+    estimated_minutes: int,
+    goal_id: int,
+    continuity_score: float,
+    now: dt.datetime,
+) -> tuple[float, list[str]]:
+    penalty = 0.0
+    reasons: list[str] = []
+    for fb in feedback_rows:
+        created_at = getattr(fb, "created_at", None) or now
+        if getattr(created_at, "tzinfo", None) is None:
+            created_at = created_at.replace(tzinfo=dt.timezone.utc)
+        if getattr(now, "tzinfo", None) is None:
+            now = now.replace(tzinfo=dt.timezone.utc)
+        age_hours = max(0.0, (now - created_at).total_seconds() / 3600.0)
+        if age_hours > 24 * 14:
+            continue
+        freshness = 1.0 if age_hours <= 24 else (0.7 if age_hours <= 72 else (0.4 if age_hours <= 24 * 7 else 0.2))
+        meta = _next_move_feedback_meta(getattr(fb, "learned_summary", ""))
+        reason_code = str(getattr(fb, "reason_code", "") or meta.get("reason_code") or "").strip().lower()
+        meta_task_type = str(meta.get("task_type") or "").strip().lower()
+        try:
+            meta_goal_id = int(meta.get("goal_id") or 0)
+        except Exception:
+            meta_goal_id = 0
+
+        if str(getattr(fb, "task_public_id", "") or "") == task_public_id:
+            penalty += 8.0 * freshness
+            reasons.append("you recently said not now for this task")
+        if reason_code == "too_long" and estimated_minutes >= max(45, int(meta.get("estimated_minutes") or 45)):
+            penalty += 2.5 * freshness
+            reasons.append("recent feedback prefers a shorter block")
+        if reason_code == "wrong_type" and meta_task_type and meta_task_type == task_type:
+            penalty += 2.2 * freshness
+            reasons.append("recent feedback deprioritized this task type")
+        if reason_code in {"too_much_context_switch", "lacking_context"} and continuity_score < 1.0:
+            penalty += 2.0 * freshness
+            reasons.append("recent feedback asked for less context switching")
+        if reason_code == "not_important_now" and meta_goal_id and meta_goal_id == goal_id:
+            penalty += 1.6 * freshness
+            reasons.append("this goal was recently deprioritized")
+    deduped: list[str] = []
+    for item in reasons:
+        if item not in deduped:
+            deduped.append(item)
+    return penalty, deduped[:2]
+
+
+def _next_move_confidence(score: float) -> str:
+    if score >= 19:
+        return "high"
+    if score >= 13:
+        return "medium"
+    return "low"
+
+
+def _next_move_sentence(items: list[dict]) -> str | None:
+    if not items:
+        return None
+    titles = [str((it.get("title") or "")).strip() for it in items[:3] if str((it.get("title") or "")).strip()]
+    if not titles:
+        return None
+    return "Top picks now: " + ", ".join(titles) + "."
+
+
+def _next_move_learning_note(*, task_title: str, task_type: str, reason_code: str, reason_text: str, estimated_minutes: int) -> str:
+    type_label = _next_move_task_type_label(task_type)
+    reason_map = {
+        "too_much_context_switch": "user wants less context switching",
+        "too_long": "user wants a shorter task block right now",
+        "wrong_type": "this work type does not fit the current mode",
+        "not_important_now": "this task is not important right now",
+        "lacking_context": "user needs more context first",
+        "waiting_on_someone": "the task is blocked on someone else",
+    }
+    reason_label = reason_map.get(reason_code, "the recommendation was dismissed")
+    note = f"- Next Move feedback: `{task_title}` ({type_label}, ~{estimated_minutes}m) was dismissed because {reason_label}."
+    if reason_text:
+        note += f" Note: {reason_text.strip()}"
+    return note
+
+
+def _next_move_persist_feedback_learning(*, note: str, memory_note: str | None = None) -> None:
+    now = _utcnow()
+    daily_path = _memory_daily_root() / f"{now.date().isoformat()}.md"
+    with _MEMORY_LOCK:
+        existing_daily = _memory_read_text(daily_path)
+        if note and note not in existing_daily:
+            prefix = "\n## Next Move Feedback\n\n" if "## Next Move Feedback" not in existing_daily else "\n"
+            _memory_append_text(daily_path, prefix + note + "\n")
+        if memory_note:
+            long_term_path = _memory_long_term_path()
+            existing_long_term = _memory_read_text(long_term_path)
+            if memory_note not in existing_long_term:
+                prefix = "\n## Learned Preferences\n\n" if "## Learned Preferences" not in existing_long_term else "\n"
+                _memory_append_text(long_term_path, prefix + memory_note + "\n")
+
+
 @app.get("/api/recommendations/next")
-def recommendations_next(limit: int = 5) -> JSONResponse:
-    """推荐下一步（MVP 规则版）。
-
-    触发：前端在状态变更、30 分钟轮询、手动刷新时调用。
-    """
-
-    # 产品交互：一次只给一个“下一步”，避免让用户在推荐列表里再做决策。
-    limit = 1
+def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSONResponse:
     now = _utcnow()
     today = now.date()
+    limit = 3
 
     with session_scope() as s:
+        memory_context = _next_move_memory_context()
         goal_rows = (
             s.query(Goal)
             .filter(Goal.status.notin_(["done", "archived", "paused"]))
@@ -1440,10 +1677,14 @@ def recommendations_next(limit: int = 5) -> JSONResponse:
             .order_by(Task.id.asc())
             .all()
         )
-
-        # 最近事件：用于识别 in_progress / percent
         public_ids = [t.public_id for t in tasks]
+        spaces_by_task: dict[str, AgentSpace] = {}
+        if public_ids:
+            for space in s.query(AgentSpace).filter(AgentSpace.task_public_id.in_(public_ids)).all():
+                spaces_by_task[space.task_public_id] = space
+
         latest_event_by_task: dict[str, Event] = {}
+        recent_focus_task_id = ""
         if public_ids:
             evs = (
                 s.query(Event)
@@ -1454,6 +1695,27 @@ def recommendations_next(limit: int = 5) -> JSONResponse:
             for ev in evs:
                 if ev.task_id and ev.task_id not in latest_event_by_task:
                     latest_event_by_task[ev.task_id] = ev
+                if not recent_focus_task_id and ev.task_id and ev.kind in {"task.started", "task.progress"}:
+                    recent_focus_task_id = str(ev.task_id)
+
+        feedback_rows = s.query(NextMoveFeedback).order_by(NextMoveFeedback.id.desc()).limit(120).all()
+
+        memory_signals = set(memory_context.get("signals") or [])
+        recent_focus_task = next((t for t in tasks if t.public_id == recent_focus_task_id), None)
+        recent_focus_goal_id = int(recent_focus_task.goal_id) if recent_focus_task is not None else 0
+        recent_focus_type = (
+            str(getattr(recent_focus_task, "task_type", "") or "").strip().lower() if recent_focus_task is not None else ""
+        )
+        recent_focus_context = ""
+        if recent_focus_task is not None:
+            recent_focus_context = str(getattr(recent_focus_task, "context_key", "") or "").strip()
+            if not recent_focus_context:
+                recent_focus_context = _infer_context_key(
+                    str(recent_focus_task.title or ""),
+                    str(recent_focus_task.description or ""),
+                    goal_id=int(recent_focus_task.goal_id),
+                    root_path=getattr(spaces_by_task.get(recent_focus_task.public_id), "root_path", None),
+                )
 
         scored: list[tuple[float, dict]] = []
         for t in tasks:
@@ -1461,38 +1723,97 @@ def recommendations_next(limit: int = 5) -> JSONResponse:
             if g is None:
                 continue
 
+            space = spaces_by_task.get(t.public_id)
+            task_type = str(getattr(t, "task_type", "") or "").strip().lower() or _infer_task_type(t.title, t.description)
+            estimated_minutes = int(getattr(t, "estimated_minutes", 0) or 0) or _infer_estimated_minutes(task_type, t.title, t.description)
+            context_key = str(getattr(t, "context_key", "") or "").strip() or _infer_context_key(
+                t.title,
+                t.description,
+                goal_id=int(t.goal_id),
+                root_path=getattr(space, "root_path", None),
+            )
+
             days_left = (g.due_date - today).days
-            urgency = 0.0
-            if days_left <= 0:
-                urgency = 6.0
-            elif days_left <= 1:
-                urgency = 5.0
-            elif days_left <= 3:
-                urgency = 4.0
-            elif days_left <= 7:
-                urgency = 3.0
-            else:
-                urgency = 1.0
+            urgency = 6.5 if days_left <= 0 else (5.2 if days_left <= 1 else (4.1 if days_left <= 3 else (2.8 if days_left <= 7 else 1.0)))
 
             pri = _score_text_to_weight(g.priority)
             imp = _score_text_to_weight(g.importance)
 
             ev = latest_event_by_task.get(t.public_id)
-            in_progress = ev is not None and ev.kind in {"task.started", "task.progress"}
-            progress_bonus = 1.0 if in_progress else 0.0
+            in_progress = (t.status == "in_progress") or (ev is not None and ev.kind in {"task.started", "task.progress"})
+            continuity_score = 0.0
+            if recent_focus_task_id and recent_focus_task_id == t.public_id:
+                continuity_score = 3.0
+            elif recent_focus_context and recent_focus_context == context_key:
+                continuity_score = 2.4
+            elif recent_focus_goal_id and recent_focus_goal_id == int(g.id):
+                continuity_score = 1.6
+            elif recent_focus_type and recent_focus_type == task_type:
+                continuity_score = 0.8
+            if in_progress:
+                continuity_score += 1.2
 
-            score = urgency * 3 + pri * 2 + imp * 2 + progress_bonus
+            hour = now.astimezone().hour
+            if estimated_minutes <= 30:
+                time_fit = 2.0 if hour < 10 or hour >= 18 else 1.0
+            elif estimated_minutes >= 90:
+                time_fit = 1.2 if 10 <= hour <= 16 else -1.0
+            else:
+                time_fit = 0.8
 
+            memory_bonus = 0.0
+            memory_notes: list[str] = []
+            if "fast_feedback" in memory_signals:
+                if estimated_minutes <= 30:
+                    memory_bonus += 2.0
+                    memory_notes.append("matches your fast-feedback preference")
+                elif estimated_minutes >= 90:
+                    memory_bonus -= 1.0
+            if "avoid_context_switch" in memory_signals:
+                if continuity_score >= 1.6:
+                    memory_bonus += 2.0
+                    memory_notes.append("keeps the current context warm")
+                else:
+                    memory_bonus -= 1.0
+            if "deep_work" in memory_signals and task_type == "deep_work":
+                memory_bonus += 1.4
+                memory_notes.append("matches your deep-work preference")
+            if "review" in memory_signals and task_type == "review":
+                memory_bonus += 1.2
+                memory_notes.append("fits your review-first preference")
+
+            feedback_penalty, feedback_notes = _next_move_feedback_penalty(
+                feedback_rows,
+                task_public_id=t.public_id,
+                task_type=task_type,
+                estimated_minutes=estimated_minutes,
+                goal_id=int(g.id),
+                continuity_score=continuity_score,
+                now=now,
+            )
+
+            score = urgency * 2.7 + pri * 2.0 + imp * 2.2 + continuity_score + time_fit + memory_bonus - feedback_penalty
+
+            context_switch_cost = "low" if continuity_score >= 2.0 else ("medium" if continuity_score >= 0.8 else "high")
             why: list[str] = []
             if days_left <= 0:
-                why.append("已超期/今日到期，优先处理")
+                why.append("Deadline pressure is high.")
             elif days_left <= 3:
-                why.append(f"DDL 临近（{days_left} 天内）")
+                why.append(f"Deadline is close ({days_left}d).")
             else:
-                why.append(f"目标 DDL：{g.due_date.isoformat()}")
-            why.append(f"重要度：{g.importance} · 优先级：{g.priority}")
-            if in_progress:
-                why.append("最近有进度上报，继续推进可降低切换成本")
+                why.append(f"Goal DDL: {g.due_date.isoformat()}.")
+            if continuity_score >= 2.0:
+                why.append("Keeps your current context active.")
+            elif estimated_minutes <= 30:
+                why.append(f"Short block: about {estimated_minutes}m.")
+            else:
+                why.append(f"Estimated effort: about {estimated_minutes}m.")
+            if memory_notes:
+                why.append(memory_notes[0].capitalize() + ".")
+            elif imp >= 3 or pri >= 3:
+                why.append(f"High goal weight: {g.importance}/{g.priority}.")
+            elif feedback_notes:
+                why.append("Kept lower because of recent feedback, but still relevant now.")
 
             scored.append(
                 (
@@ -1500,28 +1821,136 @@ def recommendations_next(limit: int = 5) -> JSONResponse:
                     {
                         "type": "do_task",
                         "target": {"goal_id": g.id, "task_public_id": t.public_id},
+                        "goal_title": _next_move_goal_label(g),
                         "title": t.title,
+                        "task_type": task_type,
+                        "task_type_label": _next_move_task_type_label(task_type),
                         "why": why[:3],
-                        "expected_time_minutes": 30 if in_progress else 60,
-                        "debug": {"score": score},
+                        "expected_time_minutes": estimated_minutes,
+                        "context_switch_cost": context_switch_cost,
+                        "confidence": _next_move_confidence(score),
+                        "debug": {"score": round(score, 2)},
                     },
                 )
             )
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        best = [it for _s, it in scored[:1]]
-        item = (best[0] if best else None)
+        items = [it for _s, it in scored[:limit]]
+        run = NextMoveRun(
+            trigger_kind=str(trigger or "manual_refresh")[:64],
+            context_summary={
+                "candidate_count": len(tasks),
+                "recent_focus_task_public_id": recent_focus_task_id or None,
+                "memory_signals": sorted(memory_signals),
+                "feedback_count": len(feedback_rows),
+            },
+            recommendations={"items": items},
+        )
+        s.add(run)
+        s.flush()
+        run_id = int(run.id or 0)
 
-    sentence = None
-    if item is not None:
-        because = (item.get("why") or [])
-        because_text = because[0] if because else ""
-        sentence = f"建议下一步去完成「{item.get('title') or ''}」，因为{because_text}。" if because_text else f"建议下一步去完成「{item.get('title') or ''}」。"
+    sentence = _next_move_sentence(items)
+    item = items[0] if items else None
 
     return JSONResponse(
-        {"generated_at": now.isoformat(), "item": item, "items": ([item] if item else []), "sentence": sentence},
+        {"generated_at": now.isoformat(), "run_id": run_id, "item": item, "items": items, "sentence": sentence},
         headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
     )
+
+
+@app.post("/api/recommendations/feedback")
+def recommendations_feedback(payload: dict) -> JSONResponse:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    task_public_id = str(payload.get("task_public_id") or "").strip()
+    if not task_public_id:
+        raise HTTPException(status_code=400, detail="task_public_id is required")
+
+    feedback_type = str(payload.get("feedback_type") or "dismiss").strip().lower() or "dismiss"
+    reason_code = str(payload.get("reason_code") or "").strip().lower()
+    reason_text = str(payload.get("reason_text") or "").strip()
+    try:
+        run_id = int(payload.get("run_id") or 0) or None
+    except Exception:
+        run_id = None
+
+    with session_scope() as s:
+        task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        goal = s.get(Goal, int(task.goal_id))
+        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+
+        task_type = str(getattr(task, "task_type", "") or "").strip().lower() or _infer_task_type(task.title, task.description)
+        estimated_minutes = int(getattr(task, "estimated_minutes", 0) or 0) or _infer_estimated_minutes(task_type, task.title, task.description)
+        context_key = str(getattr(task, "context_key", "") or "").strip() or _infer_context_key(
+            task.title,
+            task.description,
+            goal_id=int(task.goal_id),
+            root_path=getattr(space, "root_path", None),
+        )
+        learned_summary = json.dumps(
+            {
+                "feedback_type": feedback_type,
+                "reason_code": reason_code,
+                "task_type": task_type,
+                "estimated_minutes": estimated_minutes,
+                "context_key": context_key,
+                "goal_id": int(task.goal_id),
+            },
+            ensure_ascii=False,
+        )
+        row = NextMoveFeedback(
+            run_id=run_id,
+            task_public_id=task_public_id,
+            feedback_type=feedback_type,
+            reason_code=reason_code,
+            reason_text=reason_text[:2000],
+            learned_summary=learned_summary,
+        )
+        s.add(row)
+        s.flush()
+        feedback_id = int(row.id or 0)
+        similar_rows = (
+            s.query(NextMoveFeedback)
+            .filter(NextMoveFeedback.feedback_type == feedback_type)
+            .filter(NextMoveFeedback.reason_code == reason_code)
+            .order_by(NextMoveFeedback.id.desc())
+            .limit(50)
+            .all()
+        )
+
+    daily_note = _next_move_learning_note(
+        task_title=str(task.title or task_public_id),
+        task_type=task_type,
+        reason_code=reason_code,
+        reason_text=reason_text,
+        estimated_minutes=estimated_minutes,
+    )
+    memory_note = None
+    if reason_code and sum(1 for row in similar_rows if _next_move_feedback_meta(getattr(row, "learned_summary", "")).get("task_type") == task_type) >= 2:
+        if reason_code == "too_long":
+            memory_note = f"- Prefer shorter tasks over ~{estimated_minutes}m when dismissing { _next_move_task_type_label(task_type) } work."
+        elif reason_code == "too_much_context_switch":
+            memory_note = f"- Prefer recommendations that continue the current context before suggesting new { _next_move_task_type_label(task_type) } work."
+        elif reason_code == "wrong_type":
+            memory_note = f"- Avoid prioritizing { _next_move_task_type_label(task_type) } tasks when the user says the work type is wrong for now."
+        elif reason_code == "not_important_now":
+            memory_note = "- When the user dismisses a recommendation as not important now, reduce near-term priority for similar work."
+    _next_move_persist_feedback_learning(note=daily_note, memory_note=memory_note)
+
+    _try_audit_memory(
+        kind="next_move.feedback",
+        source="web",
+        summary=f"Next Move feedback for task: {task_public_id}",
+        detail=f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
+        goal_id=int(task.goal_id),
+        task_public_id=task_public_id,
+        metadata={"run_id": run_id, "reason_code": reason_code, "learned_summary": learned_summary},
+    )
+    return JSONResponse({"ok": True, "feedback_id": feedback_id, "task_public_id": task_public_id})
 
 
 @app.get("/goals/new", response_class=HTMLResponse)
@@ -1596,14 +2025,22 @@ def tasks_create(
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
+        title_text = title.strip()
+        description_text = description.strip()
         provider, _err = _get_llm_provider_or_error()
-        summary = _summarize_items(provider, [title.strip()])[0]
+        summary = _summarize_items(provider, [title_text])[0]
+        task_type = _infer_task_type(title_text, description_text)
+        estimated_minutes = _infer_estimated_minutes(task_type, title_text, description_text)
+        context_key = _infer_context_key(title_text, description_text, goal_id=goal_id)
         task = Task(
             goal_id=goal_id,
-            title=title.strip(),
+            title=title_text,
             summary=summary,
-            description=description.strip(),
+            description=description_text,
             status="todo",
+            task_type=task_type,
+            estimated_minutes=estimated_minutes,
+            context_key=context_key,
         )
         s.add(task)
         s.flush()
@@ -1611,11 +2048,11 @@ def tasks_create(
     _try_audit_memory(
         kind="task.created",
         source="web",
-        summary=f"Created task: {title.strip()}",
-        detail=f"Task title:\n\n{title.strip()}\n\nDescription:\n\n{description.strip()}",
+        summary=f"Created task: {title_text}",
+        detail=f"Task title:\n\n{title_text}\n\nDescription:\n\n{description_text}",
         goal_id=goal_id,
         task_public_id=created_task_id or None,
-        metadata={"summary": summary},
+        metadata={"summary": summary, "task_type": task_type, "estimated_minutes": estimated_minutes, "context_key": context_key},
     )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
@@ -1774,26 +2211,34 @@ def tasks_update(
             raise HTTPException(status_code=404, detail="Task not found")
         old_title = str(t.title or "")
         old_description = str(t.description or "")
+        title_text = title.strip()
+        description_text = description.strip()
         provider, _err = _get_llm_provider_or_error()
-        summary = _summarize_items(provider, [title.strip()])[0]
-        t.title = title.strip()
+        summary = _summarize_items(provider, [title_text])[0]
+        task_type = _infer_task_type(title_text, description_text)
+        estimated_minutes = _infer_estimated_minutes(task_type, title_text, description_text)
+        context_key = _infer_context_key(title_text, description_text, goal_id=t.goal_id)
+        t.title = title_text
         t.summary = summary
-        t.description = description.strip()
+        t.description = description_text
+        t.task_type = task_type
+        t.estimated_minutes = estimated_minutes
+        t.context_key = context_key
         goal_id = t.goal_id
         pid = t.public_id
     _try_audit_memory(
         kind="task.edited",
         source="web",
-        summary=f"Edited task: {title.strip()}",
+        summary=f"Edited task: {title_text}",
         detail=(
             f"Previous title: {old_title}\n\n"
             f"Previous description:\n\n{old_description}\n\n"
-            f"Updated title: {title.strip()}\n\n"
-            f"Updated description:\n\n{description.strip()}"
+            f"Updated title: {title_text}\n\n"
+            f"Updated description:\n\n{description_text}"
         ),
         goal_id=goal_id,
         task_public_id=pid,
-        metadata={"summary": summary},
+        metadata={"summary": summary, "task_type": task_type, "estimated_minutes": estimated_minutes, "context_key": context_key},
     )
     # 保持 Dashboard 选中态
     return RedirectResponse(url=f"/goals?task={pid}&goal={goal_id}", status_code=303)
