@@ -487,19 +487,6 @@
         return r;
       }
 
-      async function copyTextFrom(el, errEl){
-        const v = (el && (el.value || el.textContent) || '').trim();
-        if(!v){ if(errEl) errEl.textContent = '内容为空。'; return; }
-        try{
-          await navigator.clipboard.writeText(v);
-          if(errEl){ errEl.textContent = '已复制'; setTimeout(()=>{ if(errEl.textContent==='已复制') errEl.textContent=''; }, 900); }
-          toast('已复制');
-        }catch(e){
-          try{ el.focus(); el.select(); }catch(_){ }
-          if(errEl) errEl.textContent = '复制失败（已选中文本，可手动复制）。';
-        }
-      }
-
       function openNewGoal(e){
         if(e) e.preventDefault();
         if(location.pathname === '/goals'){

@@ -101,10 +101,10 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         assert r.status_code == 200
         assert "reopen by user" in r.text
 
-        # goal detail
-        r = await client.get(f"/goals/{goal_id}")
+        # dashboard detail view
+        r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
-        assert "目标详情" in r.text
+        assert "目标-单测" in r.text
 
         # add task
         r = await client.post(

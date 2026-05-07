@@ -32,29 +32,3 @@ class FocusReportIn(BaseModel):
 class AgentSpaceCreateIn(BaseModel):
     companion_id: int = Field(description="Companion 环境 ID")
     root_path: str = Field(min_length=1, max_length=4000, description="本地工作目录（绝对路径）")
-
-
-class AgentSpaceOut(BaseModel):
-    id: int
-    task_public_id: str
-    root_path: str
-
-
-class FileEntryOut(BaseModel):
-    name: str
-    rel_path: str
-    kind: str  # file/dir
-    size: int | None = None
-    mtime: float | None = None
-
-
-class FileListOut(BaseModel):
-    path: str
-    entries: list[FileEntryOut]
-
-
-class FileReadOut(BaseModel):
-    path: str
-    content: str
-    truncated: bool = False
-    mime: str = "text/plain"

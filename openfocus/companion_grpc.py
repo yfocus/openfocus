@@ -10,7 +10,7 @@ from typing import AsyncIterator, Callable
 import grpc
 
 from .db import session_scope
-from .models import Companion, Event
+from .models import Companion
 
 
 # 由 grpc_tools.protoc 生成
@@ -291,19 +291,6 @@ class CompanionConnection:
             raise CompanionGrpcError(res.error or "agent_send failed")
         return res
 
-    async def request_agent_list_sessions(self, *, timeout_seconds: float = 10.0) -> pb2.AgentListSessionsResponse:
-        rid = str(uuid.uuid4())
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending[rid] = _Pending(fut=fut, kind="agent_list_sessions")
-        await self._out_q.put(pb2.ServerToClient(agent_list_sessions=pb2.AgentListSessionsRequest(request_id=rid)))
-        try:
-            res: pb2.AgentListSessionsResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
-        finally:
-            self._pending.pop(rid, None)
-        if not res.ok:
-            raise CompanionGrpcError(res.error or "agent_list_sessions failed")
-        return res
-
     async def request_terminal_start(
         self, *, terminal_id: str, root_path: str, timeout_seconds: float = 10.0
     ) -> pb2.TerminalStartResponse:
@@ -398,23 +385,6 @@ class CompanionConnection:
             raise CompanionGrpcError(res.error or "terminal_resize failed")
         return res
 
-    async def request_terminal_list_sessions(
-        self, *, timeout_seconds: float = 10.0
-    ) -> pb2.TerminalListSessionsResponse:
-        rid = str(uuid.uuid4())
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending[rid] = _Pending(fut=fut, kind="terminal_list_sessions")
-        await self._out_q.put(
-            pb2.ServerToClient(terminal_list_sessions=pb2.TerminalListSessionsRequest(request_id=rid))
-        )
-        try:
-            res: pb2.TerminalListSessionsResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
-        finally:
-            self._pending.pop(rid, None)
-        if not res.ok:
-            raise CompanionGrpcError(res.error or "terminal_list_sessions failed")
-        return res
-
     def handle_incoming(self, msg: pb2.ClientToServer) -> None:
         self.mark_seen()
         which = msg.WhichOneof("msg")
@@ -481,12 +451,6 @@ class CompanionConnection:
             if p and p.kind == "agent_send" and not p.fut.done():
                 p.fut.set_result(r)
             return
-        if which == "agent_list_sessions_resp":
-            r: pb2.AgentListSessionsResponse = msg.agent_list_sessions_resp
-            p = self._pending.get(r.request_id)
-            if p and p.kind == "agent_list_sessions" and not p.fut.done():
-                p.fut.set_result(r)
-            return
         if which == "agent_chunk":
             ch: pb2.AgentChunk = msg.agent_chunk
             # best-effort 通知监听器（不要在这里阻塞）。
@@ -521,12 +485,6 @@ class CompanionConnection:
             if p and p.kind == "terminal_resize" and not p.fut.done():
                 p.fut.set_result(r)
             return
-        if which == "terminal_list_sessions_resp":
-            r: pb2.TerminalListSessionsResponse = msg.terminal_list_sessions_resp
-            p = self._pending.get(r.request_id)
-            if p and p.kind == "terminal_list_sessions" and not p.fut.done():
-                p.fut.set_result(r)
-            return
         if which == "terminal_output":
             out: pb2.TerminalOutput = msg.terminal_output
             for cb in list(_TERMINAL_OUTPUT_LISTENERS):
@@ -543,7 +501,6 @@ class CompanionRegistry:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._by_companion_id: dict[int, CompanionConnection] = {}
-        self._on_connect: list[Callable[[CompanionConnection, pb2.Hello], None]] = []
 
     def get(self, companion_id: int) -> CompanionConnection | None:
         return self._by_companion_id.get(int(companion_id))
@@ -558,12 +515,10 @@ class CompanionRegistry:
 
     async def set_disconnected(self, companion_id: int, conn: CompanionConnection) -> None:
         cid = int(companion_id)
-        removed = False
         async with self._lock:
             cur = self._by_companion_id.get(cid)
             if cur is conn:
                 self._by_companion_id.pop(cid, None)
-                removed = True
 
         # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 

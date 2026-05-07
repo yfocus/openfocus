@@ -362,42 +362,6 @@
       return n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg') || n.endsWith('.gif') || n.endsWith('.webp');
     }
 
-    function isLikelyMarkdown(name){
-      const n = String(name||'').toLowerCase();
-      return n.endsWith('.md') || n.endsWith('.markdown');
-    }
-
-    function renderMarkdownLite(md){
-      // MVP：非常轻量的 markdown 渲染（标题/段落/代码块），避免引入额外依赖。
-      const lines = String(md||'').split(/\r?\n/);
-      let out = '';
-      let inCode = false;
-      let codeBuf = [];
-      for(const line of lines){
-        if(line.trim().startsWith('```')){
-          if(!inCode){ inCode = true; codeBuf = []; }
-          else{
-            inCode = false;
-            out += '<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>';
-          }
-          continue;
-        }
-        if(inCode){ codeBuf.push(line); continue; }
-        const m = line.match(/^(#{1,6})\s+(.*)$/);
-        if(m){
-          const level = m[1].length;
-          out += `<h${level}>${esc(m[2]||'')}</h${level}>`;
-          continue;
-        }
-        if(!line.trim()){
-          out += '<div style="height: 8px;"></div>';
-          continue;
-        }
-        out += '<p>' + esc(line) + '</p>';
-      }
-      return out || '<div class="muted">—</div>';
-    }
-
     async function fetchJson(url){
       const r = await fetch(url);
       if(!r.ok){

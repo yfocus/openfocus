@@ -1997,23 +1997,6 @@ async def goals_create(
     return RedirectResponse(url="/goals", status_code=303)
 
 
-@app.get("/goals/{goal_id:int}", response_class=HTMLResponse)
-def goals_detail(request: Request, goal_id: int) -> HTMLResponse:
-    with session_scope() as s:
-        goal = s.get(Goal, goal_id)
-        if goal is None:
-            raise HTTPException(status_code=404, detail="Goal not found")
-        tasks = s.query(Task).filter(Task.goal_id == goal_id).order_by(Task.id.asc()).all()
-    return templates.TemplateResponse(
-        request,
-        "goal_detail.html",
-        {
-            "goal": goal,
-            "tasks": tasks,
-        },
-    )
-
-
 @app.post("/goals/{goal_id:int}/tasks", include_in_schema=False)
 def tasks_create(
     goal_id: int,
@@ -2276,21 +2259,6 @@ def tasks_delete(task_id: int) -> RedirectResponse:
         metadata={},
     )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
-
-
-@app.get("/goals/{goal_id:int}/edit", response_class=HTMLResponse)
-def goals_edit(request: Request, goal_id: int) -> HTMLResponse:
-    with session_scope() as s:
-        goal = s.get(Goal, goal_id)
-        if goal is None:
-            raise HTTPException(status_code=404, detail="Goal not found")
-    return templates.TemplateResponse(
-        request,
-        "goal_edit.html",
-        {
-            "goal": goal,
-        },
-    )
 
 
 @app.post("/goals/{goal_id:int}/edit", include_in_schema=False)

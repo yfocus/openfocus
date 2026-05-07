@@ -251,22 +251,6 @@ class _AgentManager:
         if rt and rt._running and not rt._running.done():
             rt._running.cancel()
 
-    async def list_sessions(self) -> list[pb2.AgentSessionInfo]:
-        async with self._lock:
-            items = list(self._sessions.values())
-        out: list[pb2.AgentSessionInfo] = []
-        for rt in items:
-            out.append(
-                pb2.AgentSessionInfo(
-                    session_id=rt.session_id,
-                    agent_type=rt.agent_type,
-                    root_path=rt.root_path,
-                    task_public_id=rt.task_public_id,
-                    created_at=float(rt.created_at.timestamp()),
-                )
-            )
-        return out
-
     async def send(self, *, request_id: str, session_id: str, prompt: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
         rid = (request_id or "").strip()
         if not rid:
@@ -540,18 +524,6 @@ class _TerminalManager:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._sessions: dict[str, _TerminalSession] = {}
-
-    async def list_sessions(self) -> list[pb2.TerminalSessionInfo]:
-        async with self._lock:
-            items = list(self._sessions.values())
-        return [
-            pb2.TerminalSessionInfo(
-                terminal_id=s.terminal_id,
-                root_path=s.root_path,
-                created_at=float(s.created_at.timestamp()),
-            )
-            for s in items
-        ]
 
     async def start(self, *, terminal_id: str, root_path: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> str:
         tid = (terminal_id or "").strip() or str(uuid.uuid4())
@@ -1110,20 +1082,6 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                     await out_q.put(pb2.ClientToServer(agent_terminate_resp=resp))
                     continue
 
-                if which == "agent_list_sessions":
-                    req = msg.agent_list_sessions
-                    try:
-                        sessions = await agent_mgr.list_sessions()
-                        resp = pb2.AgentListSessionsResponse(request_id=req.request_id, ok=True, sessions=sessions)
-                    except Exception as e:
-                        try:
-                            LOG.exception("agent_list_sessions 失败：%s", e)
-                        except Exception:
-                            pass
-                        resp = pb2.AgentListSessionsResponse(request_id=req.request_id, ok=False, error=str(e))
-                    await out_q.put(pb2.ClientToServer(agent_list_sessions_resp=resp))
-                    continue
-
                 if which == "agent_send":
                     req = msg.agent_send
                     try:
@@ -1140,20 +1098,6 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             pass
                         resp = pb2.AgentSendResponse(request_id=req.request_id, ok=False, error=str(e))
                     await out_q.put(pb2.ClientToServer(agent_send_resp=resp))
-                    continue
-
-                if which == "terminal_list_sessions":
-                    req = msg.terminal_list_sessions
-                    try:
-                        sessions = await term_mgr.list_sessions()
-                        resp = pb2.TerminalListSessionsResponse(request_id=req.request_id, ok=True, sessions=sessions)
-                    except Exception as e:
-                        try:
-                            LOG.exception("terminal_list_sessions 失败：%s", e)
-                        except Exception:
-                            pass
-                        resp = pb2.TerminalListSessionsResponse(request_id=req.request_id, ok=False, error=str(e))
-                    await out_q.put(pb2.ClientToServer(terminal_list_sessions_resp=resp))
                     continue
 
                 if which == "terminal_start":
