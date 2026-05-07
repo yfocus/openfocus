@@ -117,7 +117,12 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         from openfocus.models import Task
 
         with session_scope() as s:
-            t = s.query(Task).filter(Task.goal_id == goal_id).order_by(Task.id.desc()).first()
+            t = (
+                s.query(Task)
+                .filter(Task.goal_id == goal_id)
+                .order_by(Task.id.desc())
+                .first()
+            )
             assert t.title == "task-1"
             assert t.description == "task desc"
             assert hasattr(t, "recommended_prompt") is False
@@ -177,7 +182,10 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         r = await client.get("/api/recommendations/next?limit=5")
         assert r.status_code == 200
         data = r.json()
-        assert not any((it.get("target") or {}).get("task_public_id") == task_public_id for it in (data.get("items") or []))
+        assert not any(
+            (it.get("target") or {}).get("task_public_id") == task_public_id
+            for it in (data.get("items") or [])
+        )
 
         # delete goal (should also delete tasks)
         r = await client.post(f"/goals/{goal_id}/delete", follow_redirects=False)
@@ -221,7 +229,7 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
 
         r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
-        assert 'status-dot red' in r.text
+        assert "status-dot red" in r.text
 
         r = await client.post(
             f"/goals/{goal_id}/edit",
@@ -244,14 +252,14 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
 
         r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
-        assert 'status-dot green' in r.text
-        assert 'status-dot red' not in r.text
+        assert "status-dot green" in r.text
+        assert "status-dot red" not in r.text
 
 
 @pytest.mark.anyio
 async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monkeypatch):
-    from openfocus.main import app
     from openfocus.db import session_scope
+    from openfocus.main import app
     from openfocus.models import Event, Goal, Task
 
     transport = ASGITransport(app=app)
@@ -283,7 +291,9 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
 
         now = dt.datetime.now(dt.timezone.utc)
         with session_scope() as s:
-            rows = {t.title: t for t in s.query(Task).filter(Task.goal_id == goal_id).all()}
+            rows = {
+                t.title: t for t in s.query(Task).filter(Task.goal_id == goal_id).all()
+            }
             rows["todo-old"].created_at = now - dt.timedelta(days=3)
             rows["todo-new"].created_at = now - dt.timedelta(days=1)
             rows["doing-mid"].created_at = now - dt.timedelta(days=2)
@@ -301,10 +311,14 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
 
         r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
-        assert '>↻<' in r.text
-        assert '>ref<' not in r.text
+        assert ">↻<" in r.text
+        assert ">ref<" not in r.text
 
-        matched = re.search(rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>', r.text, re.S)
+        matched = re.search(
+            rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
         assert matched is not None
         html = matched.group("html")
 
@@ -325,8 +339,8 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
 async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
-    from openfocus.main import app
     from openfocus.db import session_scope
+    from openfocus.main import app
     from openfocus.models import Goal, NextMoveFeedback
 
     transport = ASGITransport(app=app)
@@ -395,7 +409,9 @@ async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tm
             assert fb.task_public_id == dismissed_pid
             assert fb.reason_code == "too_long"
 
-        r = await client.get("/api/recommendations/next?limit=3&trigger=feedback_submitted")
+        r = await client.get(
+            "/api/recommendations/next?limit=3&trigger=feedback_submitted"
+        )
         assert r.status_code == 200
         data2 = r.json()
         items2 = data2.get("items") or []
@@ -432,7 +448,10 @@ async def test_memory_page_and_save(monkeypatch, tmp_path):
         assert "Audit Files" not in r.text
         assert "Daily Files" not in r.text
         assert ">Summary<" in r.text
-        assert 'href="/goals" class="btn-ghost action-link" role="button">Dashboard</a>' not in r.text
+        assert (
+            'href="/goals" class="btn-ghost action-link" role="button">Dashboard</a>'
+            not in r.text
+        )
 
         r = await client.post(
             "/memory/save",
@@ -454,7 +473,7 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "1")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2")
 
-    from openfocus.main import app, _memory_dir, _memory_maintenance
+    from openfocus.main import _memory_dir, _memory_maintenance, app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -508,7 +527,7 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "3600")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2000")
 
-    from openfocus.main import app, _memory_dir
+    from openfocus.main import _memory_dir, app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -536,7 +555,9 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
 
         daily_files = sorted((mem_dir / "daily").glob("*.md"))
         assert daily_files
-        assert "manual audit summary goal" in daily_files[0].read_text(encoding="utf-8") or "Created goal" in daily_files[0].read_text(encoding="utf-8")
+        assert "manual audit summary goal" in daily_files[0].read_text(
+            encoding="utf-8"
+        ) or "Created goal" in daily_files[0].read_text(encoding="utf-8")
 
         r = await client.get("/memory?tab=audit")
         assert r.status_code == 200

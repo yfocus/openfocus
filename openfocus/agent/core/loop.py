@@ -5,9 +5,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .types import EventSink, Json, ToolRegistry
-from .tooling import openai_tools_payload
 from ..llm.types import ChatMessage, LLMCallResult, LLMProvider
+from .tooling import openai_tools_payload
+from .types import EventSink, Json, ToolRegistry
 
 
 @dataclass
@@ -85,7 +85,11 @@ def run_tool_loop(
             },
         )
 
-        messages.append(ChatMessage(role="assistant", content=last.content, tool_calls=last.tool_calls))
+        messages.append(
+            ChatMessage(
+                role="assistant", content=last.content, tool_calls=last.tool_calls
+            )
+        )
 
         # 无 tool_calls 就结束
         if not last.tool_calls:
@@ -103,16 +107,24 @@ def run_tool_loop(
         # 执行工具，并把结果写回 messages，再进入下一轮
         for tc in last.tool_calls:
             try:
-                fn = (tc.get("function") or {})
+                fn = tc.get("function") or {}
                 name = fn.get("name")
                 args_raw = fn.get("arguments") or "{}"
-                args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                args = (
+                    json.loads(args_raw)
+                    if isinstance(args_raw, str)
+                    else (args_raw or {})
+                )
                 tool_call_id = tc.get("id")
 
                 sink.emit(
                     kind="agent.tool_call.started",
                     agent=agent_name,
-                    payload={"name": name, "arguments": args, "tool_call_id": tool_call_id},
+                    payload={
+                        "name": name,
+                        "arguments": args,
+                        "tool_call_id": tool_call_id,
+                    },
                 )
                 out = tool_registry.call(str(name), args)
                 sink.emit(
@@ -121,7 +133,11 @@ def run_tool_loop(
                     payload={"name": name, "tool_call_id": tool_call_id},
                 )
                 messages.append(
-                    ChatMessage(role="tool", content=str(out), tool_call_id=str(tool_call_id) if tool_call_id else None)
+                    ChatMessage(
+                        role="tool",
+                        content=str(out),
+                        tool_call_id=str(tool_call_id) if tool_call_id else None,
+                    )
                 )
             except Exception as e:
                 sink.emit(

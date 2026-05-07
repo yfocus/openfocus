@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 # 允许直接 import 本仓库的 `openfocus/` 包（无需安装）
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

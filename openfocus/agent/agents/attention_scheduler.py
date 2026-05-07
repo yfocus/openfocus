@@ -73,7 +73,13 @@ class AttentionSchedulerAgent:
         )
 
         user_input = (
-            "Goals:\n" + goals_text + "\n\n" + "Tasks:\n" + tasks_text + "\n\n" + "请输出 JSON。"
+            "Goals:\n"
+            + goals_text
+            + "\n\n"
+            + "Tasks:\n"
+            + tasks_text
+            + "\n\n"
+            + "请输出 JSON。"
         )
 
         sink.emit("agent.started", self.name, {"goal_id": self.goal_id})
@@ -88,7 +94,9 @@ class AttentionSchedulerAgent:
                 sink=sink,
                 tool_registry=tool_registry,
                 response_format={"type": "json_object"},
-                config=AgentLoopConfig(max_iterations=3, temperature=0.0, max_tokens=900),
+                config=AgentLoopConfig(
+                    max_iterations=3, temperature=0.0, max_tokens=900
+                ),
             )
             data = parse_json_strict(res.content)
             if not isinstance(data, dict) or "recommendations" not in data:
@@ -97,5 +105,7 @@ class AttentionSchedulerAgent:
             sink.emit("agent.fallback", self.name, {"error": str(e)})
             data = self._fallback()
 
-        sink.emit("agent.completed", self.name, {"goal_id": self.goal_id, "result": data})
+        sink.emit(
+            "agent.completed", self.name, {"goal_id": self.goal_id, "result": data}
+        )
         return data

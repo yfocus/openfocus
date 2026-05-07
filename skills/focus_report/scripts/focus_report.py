@@ -44,7 +44,9 @@ def send_focus_report(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="focus_report")
-    p.add_argument("--server", default=os.environ.get("OPENFOCUS_SERVER", "http://127.0.0.1:8001"))
+    p.add_argument(
+        "--server", default=os.environ.get("OPENFOCUS_SERVER", "http://127.0.0.1:8001")
+    )
     p.add_argument("--agent", default=os.environ.get("OPENFOCUS_AGENT", "external"))
     p.add_argument("--task-name", required=True)
     p.add_argument("--status", required=True)

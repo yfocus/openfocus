@@ -32,4 +32,3 @@ class LLMProvider(Protocol):
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
     ) -> LLMCallResult: ...
-

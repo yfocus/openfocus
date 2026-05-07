@@ -57,4 +57,3 @@
 - 必须包含：
   - `SKILL.md`（包含 YAML front matter：`name/description/metadata`）
   - `scripts/`（可执行脚本，示例命令使用 `{baseDir}` 占位符）
-

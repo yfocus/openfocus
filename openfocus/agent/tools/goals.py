@@ -36,16 +36,48 @@ def build_goal_tools() -> SimpleToolRegistry:
             parameters_json_schema={
                 "type": "object",
                 "properties": {
-                    "only_unfinished": {"type": "boolean", "description": "仅看未完成 goals（status!=done）"},
-                    "status": {"type": "string", "description": "按 status 过滤，如 active/done/paused"},
-                    "priority": {"type": "string", "description": "按 priority 过滤，如 urgent/normal"},
-                    "importance": {"type": "string", "description": "按 importance 过滤，如 very_important/normal"},
-                    "created_after": {"type": "string", "description": "创建时间下限，YYYY-MM-DD 或 ISO8601"},
-                    "created_before": {"type": "string", "description": "创建时间上限，YYYY-MM-DD 或 ISO8601"},
-                    "due_before": {"type": "string", "description": "完成时间上限，YYYY-MM-DD"},
-                    "due_after": {"type": "string", "description": "完成时间下限，YYYY-MM-DD"},
-                    "order_by": {"type": "string", "description": "排序字段：created_at/due_date", "enum": ["created_at", "due_date"]},
-                    "order": {"type": "string", "description": "排序方向：asc/desc", "enum": ["asc", "desc"]},
+                    "only_unfinished": {
+                        "type": "boolean",
+                        "description": "仅看未完成 goals（status!=done）",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "按 status 过滤，如 active/done/paused",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "按 priority 过滤，如 urgent/normal",
+                    },
+                    "importance": {
+                        "type": "string",
+                        "description": "按 importance 过滤，如 very_important/normal",
+                    },
+                    "created_after": {
+                        "type": "string",
+                        "description": "创建时间下限，YYYY-MM-DD 或 ISO8601",
+                    },
+                    "created_before": {
+                        "type": "string",
+                        "description": "创建时间上限，YYYY-MM-DD 或 ISO8601",
+                    },
+                    "due_before": {
+                        "type": "string",
+                        "description": "完成时间上限，YYYY-MM-DD",
+                    },
+                    "due_after": {
+                        "type": "string",
+                        "description": "完成时间下限，YYYY-MM-DD",
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "排序字段：created_at/due_date",
+                        "enum": ["created_at", "due_date"],
+                    },
+                    "order": {
+                        "type": "string",
+                        "description": "排序方向：asc/desc",
+                        "enum": ["asc", "desc"],
+                    },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
                 },
                 "additionalProperties": False,
@@ -93,10 +125,12 @@ def build_goal_tools() -> SimpleToolRegistry:
 
 
 def _tool_list_goals(args: Json) -> str:
-    only_unfinished = bool(args.get("only_unfinished")) if "only_unfinished" in args else False
-    status = (args.get("status") or None)
-    priority = (args.get("priority") or None)
-    importance = (args.get("importance") or None)
+    only_unfinished = (
+        bool(args.get("only_unfinished")) if "only_unfinished" in args else False
+    )
+    status = args.get("status") or None
+    priority = args.get("priority") or None
+    importance = args.get("importance") or None
     created_after = args.get("created_after")
     created_before = args.get("created_before")
     due_before = args.get("due_before")
@@ -124,7 +158,9 @@ def _tool_list_goals(args: Json) -> str:
         if created_after:
             q = q.filter(Goal.created_at >= _parse_date_or_datetime(str(created_after)))
         if created_before:
-            q = q.filter(Goal.created_at <= _parse_date_or_datetime(str(created_before)))
+            q = q.filter(
+                Goal.created_at <= _parse_date_or_datetime(str(created_before))
+            )
 
         if due_after:
             q = q.filter(Goal.due_date >= dt.date.fromisoformat(str(due_after)))
@@ -139,7 +175,11 @@ def _tool_list_goals(args: Json) -> str:
         goal_ids = [g.id for g in goals]
         tasks = []
         if goal_ids:
-            tasks = s.query(Task.goal_id, Task.status).filter(Task.goal_id.in_(goal_ids)).all()
+            tasks = (
+                s.query(Task.goal_id, Task.status)
+                .filter(Task.goal_id.in_(goal_ids))
+                .all()
+            )
         counts: dict[int, dict[str, int]] = {}
         for gid, st in tasks:
             counts.setdefault(gid, {})
@@ -171,11 +211,18 @@ def _tool_describe_goal(args: Json) -> str:
     with session_scope() as s:
         g = s.get(Goal, goal_id)
         if g is None:
-            return json.dumps({"error": "goal not found", "goal_id": goal_id}, ensure_ascii=False)
+            return json.dumps(
+                {"error": "goal not found", "goal_id": goal_id}, ensure_ascii=False
+            )
 
         tasks_out: list[dict[str, Any]] = []
         if include_tasks:
-            tasks = s.query(Task).filter(Task.goal_id == goal_id).order_by(Task.id.asc()).all()
+            tasks = (
+                s.query(Task)
+                .filter(Task.goal_id == goal_id)
+                .order_by(Task.id.asc())
+                .all()
+            )
             for t in tasks:
                 tasks_out.append(
                     {
@@ -184,7 +231,9 @@ def _tool_describe_goal(args: Json) -> str:
                         "title": t.title,
                         "status": t.status,
                         "created_at": t.created_at.isoformat(),
-                        "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                        "completed_at": t.completed_at.isoformat()
+                        if t.completed_at
+                        else None,
                     }
                 )
 

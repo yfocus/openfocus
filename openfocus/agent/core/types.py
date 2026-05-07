@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-
 Json = dict[str, Any]
 
 
@@ -25,7 +24,13 @@ class ToolRegistry(Protocol):
 
 
 class EventSink(Protocol):
-    def emit(self, kind: str, agent: str, payload: Json | None = None, task_id: str | None = None) -> None: ...
+    def emit(
+        self,
+        kind: str,
+        agent: str,
+        payload: Json | None = None,
+        task_id: str | None = None,
+    ) -> None: ...
 
 
 class Agent(Protocol):
@@ -36,4 +41,3 @@ class Agent(Protocol):
 
     def run(self, *, sink: EventSink) -> Json:
         """执行一次 agent 任务，返回结构化结果。"""
-

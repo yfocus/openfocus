@@ -62,4 +62,3 @@ python3 {baseDir}/scripts/focus_report.py \
 - `assistant_response`：Agent 输出（可选）
 - `goal_id`：关联 goal（可选）
 - `task_public_id`：关联 task（可选，强烈建议）
-

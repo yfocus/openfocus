@@ -42,4 +42,3 @@ def openai_tools_payload(specs: list[ToolSpec]) -> list[dict[str, Any]]:
         }
         for s in specs
     ]
-

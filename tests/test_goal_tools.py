@@ -24,10 +24,11 @@ def test_goal_tools_list_and_describe():
         goal_id = g.id
 
     reg = build_goal_tools()
-    out = reg.call("list_goals", {"only_unfinished": True, "priority": "urgent", "limit": 10})
-    assert "\"goal_id\":" in out
+    out = reg.call(
+        "list_goals", {"only_unfinished": True, "priority": "urgent", "limit": 10}
+    )
+    assert '"goal_id":' in out
     detail = reg.call("describe_goal", {"goal_id": goal_id, "include_tasks": True})
-    assert "\"tasks\":" in detail
+    assert '"tasks":' in detail
     alias = reg.call("describe_gloal", {"goal_id": goal_id, "include_tasks": False})
-    assert "\"goal\":" in alias
-
+    assert '"goal":' in alias

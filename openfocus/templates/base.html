@@ -719,7 +719,7 @@
             const doneN = Number(g.done_tasks||0);
             const totalN = Number(g.total_tasks||0);
 
-            html += '<div class="swim-row" data-goal="' + String(gid) + '">' 
+            html += '<div class="swim-row" data-goal="' + String(gid) + '">'
               + '<div class="swim-name" title="' + esc(title) + '">' + esc(title) + ' <span class="muted">' + doneN + '/' + totalN + '</span></div>'
               + '<div class="swim-track" style="--dim:' + String(dim) + ';">'
               + '<div class="swim-bar" data-goal="' + String(gid) + '" style="left:' + leftPct.toFixed(2) + '%; width:' + widthPct.toFixed(2) + '%;"></div>'

@@ -8,7 +8,9 @@ import os
 from httpx import ASGITransport, AsyncClient
 
 
-async def _wait_until_companion_ready(client: AsyncClient, *, timeout_s: float = 2.0) -> dict:
+async def _wait_until_companion_ready(
+    client: AsyncClient, *, timeout_s: float = 2.0
+) -> dict:
     from openfocus.main import COMPANION_GRPC
 
     deadline = asyncio.get_running_loop().time() + float(timeout_s)
@@ -40,7 +42,12 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
 
         from openfocus.companion import run_companion
         from openfocus.db import get_engine, reset_engine, session_scope
-        from openfocus.main import COMPANION_GRPC, _term_subscribe, _term_unsubscribe, app
+        from openfocus.main import (
+            COMPANION_GRPC,
+            _term_subscribe,
+            _term_unsubscribe,
+            app,
+        )
         from openfocus.models import Base, Goal, Task
 
         reset_engine()
@@ -53,7 +60,9 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             with session_scope() as s:
                 g = Goal(content="g", description="d", due_date=dt.date.today())
@@ -65,13 +74,17 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                 task_pid = t.public_id
 
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
 
                 r = await client.post(f"/api/companions/{cid}/pairing_code")
                 assert r.status_code == 200
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
+                )
                 assert r.status_code == 200
 
                 r = await client.post(
@@ -121,7 +134,9 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                     assert conn is not None
                     # Send >256KB but <1MB to ensure history isn't truncated at 256KB.
                     blob = (b"a" * (320 * 1024)) + b"\n"
-                    await conn.request_terminal_input(terminal_id=tid, data=blob, timeout_seconds=5.0)
+                    await conn.request_terminal_input(
+                        terminal_id=tid, data=blob, timeout_seconds=5.0
+                    )
                     ev = await asyncio.wait_for(q.get(), timeout=2.0)
                     assert ev.get("type") == "output"
                     assert ev.get("terminal_id") == tid
@@ -138,11 +153,15 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                     assert blob[:1024] in hist_b
                     assert r.json().get("truncated") is False
 
-                    await client.post(f"/api/agent_spaces/{space_id}/terminals/{tid}/close")
+                    await client.post(
+                        f"/api/agent_spaces/{space_id}/terminals/{tid}/close"
+                    )
 
                     r = await client.get(f"/api/agent_spaces/{space_id}/terminals")
                     assert r.status_code == 200
-                    tids3 = [t["terminal_id"] for t in (r.json().get("terminals") or [])]
+                    tids3 = [
+                        t["terminal_id"] for t in (r.json().get("terminals") or [])
+                    ]
                     assert tid not in tids3
 
                     closed = None

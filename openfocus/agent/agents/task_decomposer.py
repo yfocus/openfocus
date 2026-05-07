@@ -81,7 +81,9 @@ class TaskDecomposerAgent:
                 obj = Task(goal_id=self.goal_id, title=title, status="todo")
                 s.add(obj)
                 s.flush()
-                created.append({"id": obj.id, "public_id": obj.public_id, "title": obj.title})
+                created.append(
+                    {"id": obj.id, "public_id": obj.public_id, "title": obj.title}
+                )
 
         sink.emit(
             "agent.completed",

@@ -9,13 +9,11 @@ from typing import AsyncIterator, Callable
 
 import grpc
 
-from .db import session_scope
-from .models import Companion
-
-
 # 由 grpc_tools.protoc 生成
 from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
+from .db import session_scope
+from .models import Companion
 
 
 def _utcnow() -> dt.datetime:
@@ -39,7 +37,9 @@ def add_agent_chunk_listener(listener: Callable[[pb2.AgentChunk], None]) -> None
     _AGENT_CHUNK_LISTENERS.append(listener)
 
 
-def add_terminal_output_listener(listener: Callable[[pb2.TerminalOutput], None]) -> None:
+def add_terminal_output_listener(
+    listener: Callable[[pb2.TerminalOutput], None],
+) -> None:
     _TERMINAL_OUTPUT_LISTENERS.append(listener)
 
 
@@ -81,9 +81,13 @@ class CompanionConnection:
         async def _loop() -> None:
             while not self._closed.is_set():
                 await asyncio.sleep(self.PING_INTERVAL_SECONDS)
-                await self._out_q.put(pb2.ServerToClient(ping=pb2.Ping(ts_unix_ms=_now_ms())))
+                await self._out_q.put(
+                    pb2.ServerToClient(ping=pb2.Ping(ts_unix_ms=_now_ms()))
+                )
 
-        self._ping_task = asyncio.create_task(_loop(), name=f"companion-ping:{self.companion_id}")
+        self._ping_task = asyncio.create_task(
+            _loop(), name=f"companion-ping:{self.companion_id}"
+        )
 
     async def outgoing(self) -> AsyncIterator[pb2.ServerToClient]:
         while not self._closed.is_set():
@@ -97,7 +101,9 @@ class CompanionConnection:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = _Pending(fut=fut, kind="pair")
-        await self._out_q.put(pb2.ServerToClient(pair=pb2.PairRequest(request_id=rid, code=code)))
+        await self._out_q.put(
+            pb2.ServerToClient(pair=pb2.PairRequest(request_id=rid, code=code))
+        )
         try:
             res: pb2.PairResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
         finally:
@@ -113,9 +119,15 @@ class CompanionConnection:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = _Pending(fut=fut, kind="choose_directory")
-        await self._out_q.put(pb2.ServerToClient(choose_directory=pb2.ChooseDirectoryRequest(request_id=rid)))
+        await self._out_q.put(
+            pb2.ServerToClient(
+                choose_directory=pb2.ChooseDirectoryRequest(request_id=rid)
+            )
+        )
         try:
-            res: pb2.ChooseDirectoryResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.ChooseDirectoryResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -125,15 +137,23 @@ class CompanionConnection:
             raise CompanionGrpcError("missing path")
         return path
 
-    async def request_pairing_code(self, *, force_new: bool, timeout_seconds: float = 10.0) -> tuple[str, str]:
+    async def request_pairing_code(
+        self, *, force_new: bool, timeout_seconds: float = 10.0
+    ) -> tuple[str, str]:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = _Pending(fut=fut, kind="pairing_code")
         await self._out_q.put(
-            pb2.ServerToClient(pairing_code=pb2.PairingCodeRequest(request_id=rid, force_new=bool(force_new)))
+            pb2.ServerToClient(
+                pairing_code=pb2.PairingCodeRequest(
+                    request_id=rid, force_new=bool(force_new)
+                )
+            )
         )
         try:
-            res: pb2.PairingCodeResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.PairingCodeResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -144,15 +164,23 @@ class CompanionConnection:
             raise CompanionGrpcError("missing code")
         return code, exp
 
-    async def request_files_list(self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0) -> pb2.FilesListResponse:
+    async def request_files_list(
+        self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0
+    ) -> pb2.FilesListResponse:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = _Pending(fut=fut, kind="files_list")
         await self._out_q.put(
-            pb2.ServerToClient(files_list=pb2.FilesListRequest(request_id=rid, root_path=root_path, rel_path=rel_path))
+            pb2.ServerToClient(
+                files_list=pb2.FilesListRequest(
+                    request_id=rid, root_path=root_path, rel_path=rel_path
+                )
+            )
         )
         try:
-            res: pb2.FilesListResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.FilesListResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -181,7 +209,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.FilesReadResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.FilesReadResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -210,7 +240,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.FilesRawResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.FilesRawResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -241,7 +273,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.AgentStartResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.AgentStartResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -256,11 +290,15 @@ class CompanionConnection:
         self._pending[rid] = _Pending(fut=fut, kind="agent_terminate")
         await self._out_q.put(
             pb2.ServerToClient(
-                agent_terminate=pb2.AgentTerminateRequest(request_id=rid, session_id=str(session_id or ""))
+                agent_terminate=pb2.AgentTerminateRequest(
+                    request_id=rid, session_id=str(session_id or "")
+                )
             )
         )
         try:
-            res: pb2.AgentTerminateResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.AgentTerminateResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -268,7 +306,12 @@ class CompanionConnection:
         return res
 
     async def request_agent_send(
-        self, *, request_id: str, session_id: str, prompt: str, timeout_seconds: float = 10.0
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        prompt: str,
+        timeout_seconds: float = 10.0,
     ) -> pb2.AgentSendResponse:
         # request_id 由上层生成（用于 chunk 聚合），此处作为 AgentSendRequest.request_id 下发。
         rid = str(request_id or uuid.uuid4())
@@ -284,7 +327,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.AgentSendResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.AgentSendResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -307,22 +352,32 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.TerminalStartResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.TerminalStartResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
             raise CompanionGrpcError(res.error or "terminal_start failed")
         return res
 
-    async def request_terminal_stop(self, *, terminal_id: str, timeout_seconds: float = 10.0) -> pb2.TerminalStopResponse:
+    async def request_terminal_stop(
+        self, *, terminal_id: str, timeout_seconds: float = 10.0
+    ) -> pb2.TerminalStopResponse:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = _Pending(fut=fut, kind="terminal_stop")
         await self._out_q.put(
-            pb2.ServerToClient(terminal_stop=pb2.TerminalStopRequest(request_id=rid, terminal_id=str(terminal_id or "")))
+            pb2.ServerToClient(
+                terminal_stop=pb2.TerminalStopRequest(
+                    request_id=rid, terminal_id=str(terminal_id or "")
+                )
+            )
         )
         try:
-            res: pb2.TerminalStopResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.TerminalStopResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -349,7 +404,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.TerminalInputResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.TerminalInputResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -378,7 +435,9 @@ class CompanionConnection:
             )
         )
         try:
-            res: pb2.TerminalResizeResponse = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            res: pb2.TerminalResizeResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
         finally:
             self._pending.pop(rid, None)
         if not res.ok:
@@ -513,7 +572,9 @@ class CompanionRegistry:
         if old and old is not conn:
             old.close()
 
-    async def set_disconnected(self, companion_id: int, conn: CompanionConnection) -> None:
+    async def set_disconnected(
+        self, companion_id: int, conn: CompanionConnection
+    ) -> None:
         cid = int(companion_id)
         async with self._lock:
             cur = self._by_companion_id.get(cid)
@@ -527,19 +588,27 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
     def __init__(self, registry: CompanionRegistry) -> None:
         self.registry = registry
 
-    async def Connect(self, request_iterator: AsyncIterator[pb2.ClientToServer], context: grpc.aio.ServicerContext):
+    async def Connect(
+        self,
+        request_iterator: AsyncIterator[pb2.ClientToServer],
+        context: grpc.aio.ServicerContext,
+    ):
         # 约定：第一条必须是 hello
         try:
             first = await request_iterator.__anext__()
         except StopAsyncIteration:
             return
         if first.WhichOneof("msg") != "hello":
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "first message must be hello")
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "first message must be hello"
+            )
 
         hello = first.hello
         device_id = (hello.device_id or "").strip()
         if not device_id:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "device_id is required")
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "device_id is required"
+            )
 
         # upsert DB 记录（优先使用 server_companion_id 复用同一条记录）
         now = _utcnow()
@@ -555,9 +624,15 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
                     c = None
 
             if c is None:
-                c = s.query(Companion).filter(Companion.device_id == device_id).one_or_none()
+                c = (
+                    s.query(Companion)
+                    .filter(Companion.device_id == device_id)
+                    .one_or_none()
+                )
             if c is None:
-                c = Companion(device_id=device_id, name=hello.name or "", base_url="grpc://")
+                c = Companion(
+                    device_id=device_id, name=hello.name or "", base_url="grpc://"
+                )
                 s.add(c)
                 s.flush()
             else:
@@ -583,7 +658,9 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
 
         # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 
-        await conn._out_q.put(pb2.ServerToClient(welcome=pb2.Welcome(companion_id=assigned_id)))
+        await conn._out_q.put(
+            pb2.ServerToClient(welcome=pb2.Welcome(companion_id=assigned_id))
+        )
         await conn.start_ping_loop()
 
         async def _consume() -> None:
@@ -602,7 +679,9 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
                 # 连接断开/异常由 finally 处理
                 pass
 
-        consumer = asyncio.create_task(_consume(), name=f"companion-consume:{assigned_id}")
+        consumer = asyncio.create_task(
+            _consume(), name=f"companion-consume:{assigned_id}"
+        )
         try:
             async for out in conn.outgoing():
                 yield out
@@ -626,8 +705,15 @@ class CompanionGrpcServer:
         host = os.environ.get("OPENFOCUS_GRPC_HOST") or "127.0.0.1"
         port = int(os.environ.get("OPENFOCUS_GRPC_PORT") or "17891")
 
-        server = grpc.aio.server(options=[("grpc.keepalive_time_ms", 20000), ("grpc.keepalive_timeout_ms", 10000)])
-        pb2_grpc.add_CompanionControlServicer_to_server(CompanionControlServicer(self.registry), server)
+        server = grpc.aio.server(
+            options=[
+                ("grpc.keepalive_time_ms", 20000),
+                ("grpc.keepalive_timeout_ms", 10000),
+            ]
+        )
+        pb2_grpc.add_CompanionControlServicer_to_server(
+            CompanionControlServicer(self.registry), server
+        )
         bind = f"{host}:{port}"
         actual_port = server.add_insecure_port(bind)
         if actual_port == 0:

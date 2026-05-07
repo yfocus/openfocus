@@ -120,7 +120,10 @@ def test_openai_compat_fallback_on_400_removes_tools_and_response_format(monkeyp
     import urllib.error
     import urllib.request
 
-    from openfocus.agent.llm.openai_compat import OpenAICompatConfig, OpenAICompatibleProvider
+    from openfocus.agent.llm.openai_compat import (
+        OpenAICompatConfig,
+        OpenAICompatibleProvider,
+    )
 
     calls: list[dict] = []
 
@@ -143,27 +146,44 @@ def test_openai_compat_fallback_on_400_removes_tools_and_response_format(monkeyp
         if len(calls) == 1:
             assert "response_format" in payload
             assert "tools" in payload
-            fp = io.BytesIO(b"{\"error\":\"unsupported response_format/tools\"}")
-            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=fp)
+            fp = io.BytesIO(b'{"error":"unsupported response_format/tools"}')
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", hdrs=None, fp=fp
+            )
         assert "response_format" not in payload
         assert "tools" not in payload
         return _Resp(
             json.dumps(
                 {
-                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    "choices": [
+                        {"message": {"content": "ok"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
                 }
             )
         )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    p = OpenAICompatibleProvider(OpenAICompatConfig(base_url="https://x/v1", api_key="k", model="m", retry_attempts=3))
+    p = OpenAICompatibleProvider(
+        OpenAICompatConfig(
+            base_url="https://x/v1", api_key="k", model="m", retry_attempts=3
+        )
+    )
     res = p.chat_completions(
         messages=[{"role": "user", "content": "hi"}],
         temperature=0.0,
         max_tokens=10,
-        tools=[{"type": "function", "function": {"name": "t", "parameters": {"type": "object"}}}],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "t", "parameters": {"type": "object"}},
+            }
+        ],
         response_format={"type": "json_object"},
     )
     assert res.content == "ok"

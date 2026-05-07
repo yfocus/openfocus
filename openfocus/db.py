@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine

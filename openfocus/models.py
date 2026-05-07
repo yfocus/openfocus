@@ -24,7 +24,9 @@ class Goal(Base):
     # 可先用枚举字符串（后续再做 Enum/字典表）
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     priority: Mapped[str] = mapped_column(String(32), nullable=False, default="normal")
-    importance: Mapped[str] = mapped_column(String(32), nullable=False, default="normal")
+    importance: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="normal"
+    )
 
     due_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -72,7 +74,9 @@ class Task(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
-    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class NextMoveRun(Base):
@@ -82,9 +86,15 @@ class NextMoveRun(Base):
     generated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
-    trigger_kind: Mapped[str] = mapped_column(String(64), nullable=False, default="manual_refresh")
-    context_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    recommendations: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    trigger_kind: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="manual_refresh"
+    )
+    context_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    recommendations: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
@@ -96,10 +106,14 @@ class NextMoveFeedback(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    feedback_type: Mapped[str] = mapped_column(String(32), nullable=False, default="dismiss")
+    feedback_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="dismiss"
+    )
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     reason_text: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
-    learned_summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    learned_summary: Mapped[str] = mapped_column(
+        String(2000), nullable=False, default=""
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
@@ -109,7 +123,9 @@ class GoalPlanSession(Base):
     __tablename__ = "goal_plan_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="in_progress")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="in_progress"
+    )
 
     draft_content: Mapped[str] = mapped_column(String(2000), nullable=False)
     due_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
@@ -119,7 +135,9 @@ class GoalPlanSession(Base):
     source_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    result_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     created_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -155,7 +173,9 @@ class AgentSpace(Base):
     companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
-    agent_type: Mapped[str] = mapped_column(String(64), nullable=False, default="trae-cli")
+    agent_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="trae-cli"
+    )
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
@@ -183,9 +203,13 @@ class AgentSession(Base):
     task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
     companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
-    agent_type: Mapped[str] = mapped_column(String(64), nullable=False, default="trae-cli")
+    agent_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="trae-cli"
+    )
 
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")  # active/terminated
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active"
+    )  # active/terminated
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
@@ -238,7 +262,9 @@ class RemoteTerminalSession(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
 
     terminal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")  # active/closed
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active"
+    )  # active/closed
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
@@ -282,15 +308,21 @@ class Companion(Base):
     base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
 
     # pending_certification | active
-    status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending_certification")
+    status: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="pending_certification"
+    )
 
     # 配对完成后下发/保存的 token（OpenFocus -> Companion 反向代理用）
     auth_token: Mapped[str] = mapped_column(String(256), nullable=False, default="")
 
-    last_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # 输入认证码限流（每分钟最多 3 次）
-    pair_attempt_window_start: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pair_attempt_window_start: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     pair_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     created_at: Mapped[dt.datetime] = mapped_column(

@@ -11,7 +11,13 @@ from ..core.types import EventSink, Json
 class DbEventSink(EventSink):
     default_task_id: str | None = None
 
-    def emit(self, kind: str, agent: str, payload: Json | None = None, task_id: str | None = None) -> None:
+    def emit(
+        self,
+        kind: str,
+        agent: str,
+        payload: Json | None = None,
+        task_id: str | None = None,
+    ) -> None:
         with session_scope() as s:
             s.add(
                 Event(

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import datetime as dt
 import os
 
-import pytest
 from httpx import ASGITransport, AsyncClient
-
 
 _PNG_1x1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6X9G3cAAAAASUVORK5CYII="
 )
 
 
-async def _wait_until_companion_ready(client: AsyncClient, *, timeout_s: float = 2.0) -> dict:
+async def _wait_until_companion_ready(
+    client: AsyncClient, *, timeout_s: float = 2.0
+) -> dict:
     """等待 Companion 完成注册，并且 gRPC 长连接已进入 registry。"""
 
     from openfocus.main import COMPANION_GRPC
@@ -60,7 +60,9 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             # create a goal/task
             with session_scope() as s:
@@ -73,7 +75,9 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 task_pid = t.public_id
 
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
                 assert comp["status"] == "pending_certification"
@@ -86,17 +90,30 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 # 申请配对码事件应落库
                 with session_scope() as s:
                     assert (
-                        s.query(Event).filter(Event.kind == "companion.pairing_code.requested").count() >= 1
+                        s.query(Event)
+                        .filter(Event.kind == "companion.pairing_code.requested")
+                        .count()
+                        >= 1
                     )
 
                 # pair (OpenFocus -> gRPC -> Companion)
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
+                )
                 assert r.status_code == 200
 
                 # 配对尝试 + 配对成功事件应落库
                 with session_scope() as s:
-                    assert s.query(Event).filter(Event.kind == "companion.pair.attempted").count() >= 1
-                    assert s.query(Event).filter(Event.kind == "companion.paired").count() >= 1
+                    assert (
+                        s.query(Event)
+                        .filter(Event.kind == "companion.pair.attempted")
+                        .count()
+                        >= 1
+                    )
+                    assert (
+                        s.query(Event).filter(Event.kind == "companion.paired").count()
+                        >= 1
+                    )
 
                 # choose directory (OpenFocus -> gRPC -> Companion)
                 r = await client.post(f"/api/companions/{cid}/choose_directory")
@@ -147,7 +164,9 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             with session_scope() as s:
                 g = Goal(content="g", description="d", due_date=dt.date.today())
@@ -159,14 +178,18 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
                 pid = t.public_id
 
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
 
                 # pairing
                 r = await client.post(f"/api/companions/{cid}/pairing_code")
                 assert r.status_code == 200
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
+                )
                 assert r.status_code == 200
 
                 # create agent space
@@ -177,21 +200,31 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
                 assert r.status_code == 200
                 space_id = r.json()["space_id"]
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/list", params={"path": ""})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/list", params={"path": ""}
+                )
                 assert r.status_code == 200
                 names = {e["name"] for e in r.json()["entries"]}
                 assert {"hello.py", "README.md", "img.png", "sub"}.issubset(names)
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/read", params={"path": "hello.py"})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/read",
+                    params={"path": "hello.py"},
+                )
                 assert r.status_code == 200
                 assert "print('hi')" in r.json()["content"]
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/list", params={"path": "sub"})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/list", params={"path": "sub"}
+                )
                 assert r.status_code == 200
                 names2 = {e["name"] for e in r.json()["entries"]}
                 assert "a.txt" in names2
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/raw", params={"path": "img.png"})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/raw",
+                    params={"path": "img.png"},
+                )
                 assert r.status_code == 200
                 assert r.headers.get("content-type", "").startswith("image/png")
                 assert r.content[:8] == _PNG_1x1[:8]
@@ -227,7 +260,9 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             with session_scope() as s:
                 g = Goal(content="g", description="d", due_date=dt.date.today())
@@ -239,13 +274,17 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
                 pid = t.public_id
 
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
 
                 r = await client.post(f"/api/companions/{cid}/pairing_code")
                 assert r.status_code == 200
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
+                )
                 assert r.status_code == 200
 
                 r = await client.post(
@@ -255,13 +294,21 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
                 assert r.status_code == 200
                 space_id = r.json()["space_id"]
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/read", params={"path": "../outside.txt"})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/read",
+                    params={"path": "../outside.txt"},
+                )
                 assert r.status_code == 400
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/read", params={"path": str(outside)})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/read",
+                    params={"path": str(outside)},
+                )
                 assert r.status_code == 400
 
-                r = await client.get(f"/api/agent_spaces/{space_id}/files/read", params={"path": "link"})
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/read", params={"path": "link"}
+                )
                 assert r.status_code == 400
         finally:
             stop.set()
@@ -299,7 +346,9 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             with session_scope() as s:
                 g = Goal(content="g", description="d", due_date=dt.date.today())
@@ -311,14 +360,18 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
                 pid = t.public_id
 
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
 
                 # pairing
                 r = await client.post(f"/api/companions/{cid}/pairing_code")
                 assert r.status_code == 200
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
+                )
                 assert r.status_code == 200
 
                 # create agent space
@@ -330,7 +383,9 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
                 space_id = r.json()["space_id"]
 
                 # new session
-                r = await client.post(f"/api/agent_spaces/{space_id}/agent/sessions/new")
+                r = await client.post(
+                    f"/api/agent_spaces/{space_id}/agent/sessions/new"
+                )
                 assert r.status_code == 200
                 sid = r.json()["session"]["session_id"]
                 assert sid
@@ -348,10 +403,16 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
                 deadline = asyncio.get_running_loop().time() + 2.0
                 content = ""
                 while asyncio.get_running_loop().time() < deadline:
-                    rr = await client.get(f"/api/agent_spaces/{space_id}/agent/sessions/{sid}/messages")
+                    rr = await client.get(
+                        f"/api/agent_spaces/{space_id}/agent/sessions/{sid}/messages"
+                    )
                     assert rr.status_code == 200
                     msgs = rr.json().get("messages") or []
-                    hit = [m for m in msgs if m.get("role") == "assistant" and m.get("request_id") == rid]
+                    hit = [
+                        m
+                        for m in msgs
+                        if m.get("role") == "assistant" and m.get("request_id") == rid
+                    ]
                     if hit:
                         m = hit[-1]
                         content = m.get("content") or ""
@@ -380,9 +441,8 @@ def test_agent_space_agent_offline_returns_502(tmp_path):
         reset_engine()
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
 
-        from openfocus.db import session_scope
+        from openfocus.db import get_engine, session_scope
         from openfocus.main import app
-        from openfocus.db import get_engine
         from openfocus.models import Base, Companion, Goal, Task
 
         Base.metadata.create_all(bind=get_engine())
@@ -494,8 +554,6 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
         from openfocus.models import Base
 
         Base.metadata.create_all(bind=get_engine())
-        from openfocus.db import session_scope
-        from openfocus.models import Event
 
         await COMPANION_GRPC.start()
         assert COMPANION_GRPC.bound_addr
@@ -504,7 +562,9 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # 第一次启动
             stop1 = asyncio.Event()
-            t1 = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop1))
+            t1 = asyncio.create_task(
+                run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop1)
+            )
             comp1 = await _wait_until_companion_ready(client)
             cid1 = comp1["id"]
             stop1.set()
@@ -512,7 +572,9 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
 
             # 第二次启动（复用同一份 state）
             stop2 = asyncio.Event()
-            t2 = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop2))
+            t2 = asyncio.create_task(
+                run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop2)
+            )
             comp2 = await _wait_until_companion_ready(client)
             cid2 = comp2["id"]
             assert cid2 == cid1
@@ -539,20 +601,28 @@ def test_companion_pair_rate_limited_per_minute_grpc(tmp_path):
         assert COMPANION_GRPC.bound_addr
 
         stop = asyncio.Event()
-        comp_task = asyncio.create_task(run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop))
+        comp_task = asyncio.create_task(
+            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
+        )
         try:
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 comp = await _wait_until_companion_ready(client)
                 cid = comp["id"]
 
                 # wrong code 10 times => not yet rate limited
                 for _ in range(10):
-                    r = await client.post(f"/api/companions/{cid}/pair", json={"code": "0000000000"})
+                    r = await client.post(
+                        f"/api/companions/{cid}/pair", json={"code": "0000000000"}
+                    )
                     assert r.status_code == 502
 
                 # 11th within same minute => 429
-                r = await client.post(f"/api/companions/{cid}/pair", json={"code": "0000000000"})
+                r = await client.post(
+                    f"/api/companions/{cid}/pair", json={"code": "0000000000"}
+                )
                 assert r.status_code == 429
         finally:
             stop.set()

@@ -51,18 +51,32 @@ class OpenAICompatibleProvider:
         # 1) OpenAI-compatible（优先）
         openai_api_key = _first_env("OPENFOCUS_OPENAI_API_KEY")
         if openai_api_key:
-            base_url = _first_env("OPENFOCUS_OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            base_url = (
+                _first_env("OPENFOCUS_OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            )
             model = _first_env("OPENFOCUS_OPENAI_MODEL") or "gpt-4.1-mini"
-            return cls(OpenAICompatConfig(base_url=base_url.rstrip("/"), api_key=openai_api_key, model=model))
+            return cls(
+                OpenAICompatConfig(
+                    base_url=base_url.rstrip("/"), api_key=openai_api_key, model=model
+                )
+            )
 
         # 2) Ark（OpenAI-compatible 兼容层）
         ark_api_key = _first_env("OPENFOCUS_ARK_API_KEY", "ARK_API_KEY")
         if ark_api_key:
             base_url = (
-                _first_env("OPENFOCUS_ARK_BASE_URL", "ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3"
+                _first_env("OPENFOCUS_ARK_BASE_URL", "ARK_BASE_URL")
+                or "https://ark.cn-beijing.volces.com/api/v3"
             )
-            model = _first_env("OPENFOCUS_ARK_MODEL", "ARK_MODEL", "OPENFOCUS_OPENAI_MODEL") or "doubao-seed-1-6"
-            return cls(OpenAICompatConfig(base_url=base_url.rstrip("/"), api_key=ark_api_key, model=model))
+            model = (
+                _first_env("OPENFOCUS_ARK_MODEL", "ARK_MODEL", "OPENFOCUS_OPENAI_MODEL")
+                or "doubao-seed-1-6"
+            )
+            return cls(
+                OpenAICompatConfig(
+                    base_url=base_url.rstrip("/"), api_key=ark_api_key, model=model
+                )
+            )
 
         raise RuntimeError(
             "缺少 LLM 配置环境变量：请设置 OPENFOCUS_OPENAI_API_KEY，或设置 OPENFOCUS_ARK_API_KEY/ARK_API_KEY（Ark）。"
@@ -102,8 +116,12 @@ class OpenAICompatibleProvider:
         last_err_body: str | None = None
         for attempt in range(1, self.cfg.retry_attempts + 1):
             try:
-                req = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=self.cfg.timeout_seconds) as resp:
+                req = urllib.request.Request(
+                    url=url, data=data, headers=headers, method="POST"
+                )
+                with urllib.request.urlopen(
+                    req, timeout=self.cfg.timeout_seconds
+                ) as resp:
                     raw = resp.read().decode("utf-8")
                 obj = json.loads(raw)
 
@@ -121,7 +139,9 @@ class OpenAICompatibleProvider:
 
                 # cache token（兼容不同网关字段；参考 honcho 的 extract_openai_cache_tokens 思路）
                 prompt_details = usage.get("prompt_tokens_details") or {}
-                cached_tokens = prompt_details.get("cached_tokens") or usage.get("cached_tokens")
+                cached_tokens = prompt_details.get("cached_tokens") or usage.get(
+                    "cached_tokens"
+                )
                 cache_read_input_tokens = usage.get("cache_read_input_tokens")
                 cache_creation_input_tokens = usage.get("cache_creation_input_tokens")
 
@@ -171,7 +191,7 @@ class OpenAICompatibleProvider:
                     data = json.dumps(payload).encode("utf-8")
 
                 if attempt < self.cfg.retry_attempts:
-                    sleep_s = min(10.0, max(4.0, 2 ** attempt))
+                    sleep_s = min(10.0, max(4.0, 2**attempt))
                     time.sleep(sleep_s)
                     continue
                 break
@@ -186,7 +206,7 @@ class OpenAICompatibleProvider:
 
                 if attempt < self.cfg.retry_attempts:
                     # 指数退避（对齐 honcho 的 4~10s 区间）
-                    sleep_s = min(10.0, max(4.0, 2 ** attempt))
+                    sleep_s = min(10.0, max(4.0, 2**attempt))
                     time.sleep(sleep_s)
                     continue
                 break

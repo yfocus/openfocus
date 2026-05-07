@@ -1,22 +1,41 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import datetime as dt
 import json
 import os
-import mimetypes
-import asyncio
-import uuid
-import base64
 import re
 import threading
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
+from .agent.llm.openai_compat import OpenAICompatibleProvider
+from .companion_grpc import (
+    CompanionGrpcError,
+    CompanionGrpcServer,
+    add_agent_chunk_listener,
+    add_terminal_output_listener,
+)
 from .db import get_engine, session_scope
 from .models import (
     AgentMessage,
@@ -30,8 +49,8 @@ from .models import (
     GoalPlanSession,
     NextMoveFeedback,
     NextMoveRun,
-    RemoteTerminalSession,
     RemoteTerminalOutput,
+    RemoteTerminalSession,
     Task,
 )
 from .schemas import (
@@ -39,16 +58,6 @@ from .schemas import (
     AgentSpaceCreateIn,
     FocusReportIn,
 )
-
-from .agent.llm.openai_compat import OpenAICompatibleProvider
-
-from .companion_grpc import (
-    CompanionGrpcError,
-    CompanionGrpcServer,
-    add_agent_chunk_listener,
-    add_terminal_output_listener,
-)
-
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -59,12 +68,18 @@ app = FastAPI(title="OpenFocus", version="0.1.0")
 # 静态资源：远程终端前端（remote-terminal/）
 _REMOTE_TERMINAL_DIR = (APP_DIR.parent / "remote-terminal").resolve()
 if _REMOTE_TERMINAL_DIR.exists() and _REMOTE_TERMINAL_DIR.is_dir():
-    app.mount("/remote-terminal", StaticFiles(directory=str(_REMOTE_TERMINAL_DIR)), name="remote-terminal")
+    app.mount(
+        "/remote-terminal",
+        StaticFiles(directory=str(_REMOTE_TERMINAL_DIR)),
+        name="remote-terminal",
+    )
 
 # 静态资源：内置资源（resources/，例如 icons）
 _RESOURCES_DIR = (APP_DIR.parent / "resources").resolve()
 if _RESOURCES_DIR.exists() and _RESOURCES_DIR.is_dir():
-    app.mount("/resources", StaticFiles(directory=str(_RESOURCES_DIR)), name="resources")
+    app.mount(
+        "/resources", StaticFiles(directory=str(_RESOURCES_DIR)), name="resources"
+    )
 
 
 # OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
@@ -155,7 +170,11 @@ async def _persist_and_publish_agent_chunk(ch) -> None:
             msg.done = True
         s.add(msg)
 
-        sess = s.query(AgentSession).filter(AgentSession.session_id == ch.session_id).one_or_none()
+        sess = (
+            s.query(AgentSession)
+            .filter(AgentSession.session_id == ch.session_id)
+            .one_or_none()
+        )
         if sess is not None:
             sess.updated_at = _utcnow()
             s.add(sess)
@@ -165,7 +184,9 @@ async def _persist_and_publish_agent_chunk(ch) -> None:
             kind="agent.session.chunk",
             source=f"agent:{str(getattr(ch, 'session_id', '') or '').strip() or 'session'}",
             summary="Agent session produced output.",
-            detail=(str(ch.text or "") + (f"\n\nError: {ch.error}" if ch.error else "")).strip(),
+            detail=(
+                str(ch.text or "") + (f"\n\nError: {ch.error}" if ch.error else "")
+            ).strip(),
             metadata={
                 "session_id": str(getattr(ch, "session_id", "") or ""),
                 "request_id": str(getattr(ch, "request_id", "") or ""),
@@ -284,7 +305,9 @@ async def _handle_terminal_output(out) -> None:
                     if total > _TERM_HISTORY_MAX_BYTES:
                         need = int(total - _TERM_HISTORY_MAX_BYTES)
                         rows = (
-                            s.query(RemoteTerminalOutput.id, RemoteTerminalOutput.nbytes)
+                            s.query(
+                                RemoteTerminalOutput.id, RemoteTerminalOutput.nbytes
+                            )
                             .filter(RemoteTerminalOutput.terminal_id == out.terminal_id)
                             .order_by(RemoteTerminalOutput.id.asc())
                             .all()
@@ -297,9 +320,9 @@ async def _handle_terminal_output(out) -> None:
                             if freed >= need:
                                 break
                         if del_ids:
-                            s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.id.in_(del_ids)).delete(
-                                synchronize_session=False
-                            )
+                            s.query(RemoteTerminalOutput).filter(
+                                RemoteTerminalOutput.id.in_(del_ids)
+                            ).delete(synchronize_session=False)
         except Exception:
             pass
         _try_audit_memory(
@@ -441,17 +464,35 @@ def _memory_append_text(path: Path, content: str) -> None:
 def _memory_load_state_unlocked() -> dict:
     raw = _memory_read_text(_memory_state_path()).strip()
     if not raw:
-        return {"current_audit": None, "summarized_audits": [], "finalized_days": [], "last_maintenance_at": None}
+        return {
+            "current_audit": None,
+            "summarized_audits": [],
+            "finalized_days": [],
+            "last_maintenance_at": None,
+        }
     try:
         data = json.loads(raw)
     except Exception:
-        return {"current_audit": None, "summarized_audits": [], "finalized_days": [], "last_maintenance_at": None}
+        return {
+            "current_audit": None,
+            "summarized_audits": [],
+            "finalized_days": [],
+            "last_maintenance_at": None,
+        }
     if not isinstance(data, dict):
         data = {}
     summarized = data.get("summarized_audits")
-    data["summarized_audits"] = [str(x) for x in (summarized if isinstance(summarized, list) else []) if str(x).strip()]
+    data["summarized_audits"] = [
+        str(x)
+        for x in (summarized if isinstance(summarized, list) else [])
+        if str(x).strip()
+    ]
     finalized = data.get("finalized_days")
-    data["finalized_days"] = [str(x) for x in (finalized if isinstance(finalized, list) else []) if str(x).strip()]
+    data["finalized_days"] = [
+        str(x)
+        for x in (finalized if isinstance(finalized, list) else [])
+        if str(x).strip()
+    ]
     if not isinstance(data.get("current_audit"), dict):
         data["current_audit"] = None
     return data
@@ -460,11 +501,21 @@ def _memory_load_state_unlocked() -> dict:
 def _memory_save_state_unlocked(state: dict) -> None:
     payload = {
         "current_audit": state.get("current_audit"),
-        "summarized_audits": list(dict.fromkeys([str(x) for x in state.get("summarized_audits") or [] if str(x).strip()])),
-        "finalized_days": list(dict.fromkeys([str(x) for x in state.get("finalized_days") or [] if str(x).strip()])),
+        "summarized_audits": list(
+            dict.fromkeys(
+                [str(x) for x in state.get("summarized_audits") or [] if str(x).strip()]
+            )
+        ),
+        "finalized_days": list(
+            dict.fromkeys(
+                [str(x) for x in state.get("finalized_days") or [] if str(x).strip()]
+            )
+        ),
         "last_maintenance_at": state.get("last_maintenance_at"),
     }
-    _memory_write_text(_memory_state_path(), json.dumps(payload, ensure_ascii=False, indent=2))
+    _memory_write_text(
+        _memory_state_path(), json.dumps(payload, ensure_ascii=False, indent=2)
+    )
 
 
 def _memory_parse_ts(value: object) -> dt.datetime | None:
@@ -526,7 +577,9 @@ def _memory_entry_markdown(entry: dict) -> str:
     if detail:
         lines.append("")
         lines.append(detail)
-    lines.extend(["", "```json", json.dumps(entry, ensure_ascii=False, indent=2), "```", ""])
+    lines.extend(
+        ["", "```json", json.dumps(entry, ensure_ascii=False, indent=2), "```", ""]
+    )
     return "\n".join(lines)
 
 
@@ -540,7 +593,9 @@ def _memory_render_audit_header(*, started_at: dt.datetime) -> str:
     )
 
 
-def _memory_render_daily_summary(*, day: str, file_label: str, started_at: str, ended_at: str, entries: list[dict]) -> str:
+def _memory_render_daily_summary(
+    *, day: str, file_label: str, started_at: str, ended_at: str, entries: list[dict]
+) -> str:
     counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
     highlights: list[str] = []
@@ -561,9 +616,15 @@ def _memory_render_daily_summary(*, day: str, file_label: str, started_at: str, 
         f"- Entries: {len(entries)}",
     ]
     if top_sources:
-        lines.append("- Sources: " + ", ".join(f"{name} ({count})" for name, count in top_sources))
+        lines.append(
+            "- Sources: "
+            + ", ".join(f"{name} ({count})" for name, count in top_sources)
+        )
     if top_kinds:
-        lines.append("- Top Kinds: " + ", ".join(f"{name} ({count})" for name, count in top_kinds))
+        lines.append(
+            "- Top Kinds: "
+            + ", ".join(f"{name} ({count})" for name, count in top_kinds)
+        )
     if highlights:
         lines.append("")
         lines.append("### Highlights")
@@ -606,7 +667,9 @@ def _memory_extract_long_term_items(day: str, daily_text: str) -> list[str]:
     if "plan mode" in lower:
         items.append(f"- {day}: Uses Plan Mode for task decomposition.")
     if "terminal" in lower or "web shell" in lower:
-        items.append(f"- {day}: Works through AgentSpace terminal / web shell interactions.")
+        items.append(
+            f"- {day}: Works through AgentSpace terminal / web shell interactions."
+        )
     if not items:
         return [f"- {day}: No stable preference or fact extracted yet."]
     return items
@@ -689,7 +752,11 @@ def _memory_mark_summarized_audit_unlocked(state: dict, rel_path: str) -> None:
     rel = str(rel_path or "").strip()
     if not rel:
         return
-    items = [str(x) for x in state.get("summarized_audits") or [] if str(x).strip() and str(x).strip() != rel]
+    items = [
+        str(x)
+        for x in state.get("summarized_audits") or []
+        if str(x).strip() and str(x).strip() != rel
+    ]
     items.append(rel)
     state["summarized_audits"] = items[-2000:]
 
@@ -701,8 +768,14 @@ def _memory_finalize_day_unlocked(day: str, state: dict) -> None:
     current = _memory_read_text(path)
     finalized = _memory_render_daily_final(day, current)
     _memory_write_text(path, finalized)
-    _memory_write_long_term_unlocked(day=day, items=_memory_extract_long_term_items(day, finalized))
-    finalized_days = [str(x) for x in state.get("finalized_days") or [] if str(x).strip() and str(x) != day]
+    _memory_write_long_term_unlocked(
+        day=day, items=_memory_extract_long_term_items(day, finalized)
+    )
+    finalized_days = [
+        str(x)
+        for x in state.get("finalized_days") or []
+        if str(x).strip() and str(x) != day
+    ]
     finalized_days.append(day)
     state["finalized_days"] = finalized_days
 
@@ -714,13 +787,21 @@ def _memory_rotate_current_audit_unlocked(
     force: bool = False,
     create_next: bool = True,
 ) -> tuple[str | None, str | None]:
-    current = state.get("current_audit") if isinstance(state.get("current_audit"), dict) else None
+    current = (
+        state.get("current_audit")
+        if isinstance(state.get("current_audit"), dict)
+        else None
+    )
     if not current:
         return None, None
     started_at = _memory_parse_ts(current.get("started_at")) or now
     entries = int(current.get("entries") or 0)
     age_seconds = max(0, int((now - started_at).total_seconds()))
-    if (not force) and entries < _memory_audit_max_entries() and age_seconds < _memory_audit_window_seconds():
+    if (
+        (not force)
+        and entries < _memory_audit_max_entries()
+        and age_seconds < _memory_audit_window_seconds()
+    ):
         return None, None
     rel_path = str(current.get("rel_path") or "").strip()
     if not rel_path:
@@ -745,11 +826,18 @@ def _memory_rotate_current_audit_unlocked(
         )
         _memory_append_text(daily_path, summary)
         _memory_mark_summarized_audit_unlocked(state, rel_path)
-        state["finalized_days"] = [str(x) for x in state.get("finalized_days") or [] if str(x) != day]
+        state["finalized_days"] = [
+            str(x) for x in state.get("finalized_days") or [] if str(x) != day
+        ]
     state["current_audit"] = None
     next_rel: str | None = None
     if create_next:
-        next_rel = str(_memory_start_audit_file_unlocked(state, now).get("rel_path") or "").strip() or None
+        next_rel = (
+            str(
+                _memory_start_audit_file_unlocked(state, now).get("rel_path") or ""
+            ).strip()
+            or None
+        )
     return rel_path, next_rel
 
 
@@ -805,7 +893,11 @@ def _memory_append_audit_entry(
     with _MEMORY_LOCK:
         state = _memory_load_state_unlocked()
         _memory_rotate_current_audit_unlocked(state, now, force=False, create_next=True)
-        current = state.get("current_audit") if isinstance(state.get("current_audit"), dict) else None
+        current = (
+            state.get("current_audit")
+            if isinstance(state.get("current_audit"), dict)
+            else None
+        )
         if current is None:
             current = _memory_start_audit_file_unlocked(state, now)
         path = _memory_path_from_rel(str(current.get("rel_path") or ""))
@@ -833,10 +925,14 @@ def _memory_file_display_name(path: Path) -> str:
 
 def _memory_collect_file_items(root: Path, pattern: str) -> list[dict]:
     state = _memory_load_state_unlocked()
-    summarized = {str(x) for x in state.get("summarized_audits") or [] if str(x).strip()}
+    summarized = {
+        str(x) for x in state.get("summarized_audits") or [] if str(x).strip()
+    }
     current_rel = ""
     if isinstance(state.get("current_audit"), dict):
-        current_rel = str((state.get("current_audit") or {}).get("rel_path") or "").strip()
+        current_rel = str(
+            (state.get("current_audit") or {}).get("rel_path") or ""
+        ).strip()
     items: list[dict] = []
     for path in sorted(root.glob(pattern), reverse=True):
         if not path.is_file():
@@ -852,7 +948,7 @@ def _memory_collect_file_items(root: Path, pattern: str) -> list[dict]:
                 "name": _memory_file_display_name(path),
                 "rel_path": rel_path,
                 "updated_at": _memory_iso(updated_at),
-                "size": int(getattr(stat, "st_size", 0) if 'stat' in locals() else 0),
+                "size": int(getattr(stat, "st_size", 0) if "stat" in locals() else 0),
                 "summarized": rel_path in summarized,
                 "current": rel_path == current_rel,
             }
@@ -926,7 +1022,6 @@ def _map_companion_files_error(e: CompanionGrpcError) -> HTTPException:
     return HTTPException(status_code=502, detail=f"Companion 文件服务错误：{msg}")
 
 
-
 @app.on_event("startup")
 def _startup() -> None:
     engine = get_engine()
@@ -934,52 +1029,114 @@ def _startup() -> None:
 
     # 轻量 SQLite 迁移：给 goals 表补齐新增字段（避免引入 alembic 的复杂度）
     with engine.begin() as conn:
-        cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goals)").fetchall()]
+        cols = [
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goals)").fetchall()
+        ]
         if "summary" not in cols:
-            conn.execute(text("ALTER TABLE goals ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE goals ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"
+                )
+            )
         if "description" not in cols:
-            conn.execute(text("ALTER TABLE goals ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE goals ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"
+                )
+            )
         if "status" not in cols:
-            conn.execute(text("ALTER TABLE goals ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"))
+            conn.execute(
+                text(
+                    "ALTER TABLE goals ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"
+                )
+            )
         if "priority" not in cols:
-            conn.execute(text("ALTER TABLE goals ADD COLUMN priority VARCHAR(32) NOT NULL DEFAULT 'normal'"))
+            conn.execute(
+                text(
+                    "ALTER TABLE goals ADD COLUMN priority VARCHAR(32) NOT NULL DEFAULT 'normal'"
+                )
+            )
         if "importance" not in cols:
-            conn.execute(text("ALTER TABLE goals ADD COLUMN importance VARCHAR(32) NOT NULL DEFAULT 'normal'"))
+            conn.execute(
+                text(
+                    "ALTER TABLE goals ADD COLUMN importance VARCHAR(32) NOT NULL DEFAULT 'normal'"
+                )
+            )
 
-        task_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(tasks)").fetchall()]
+        task_cols = [
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(tasks)").fetchall()
+        ]
         if "summary" not in task_cols:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"
+                )
+            )
 
         if "description" not in task_cols:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"
+                )
+            )
 
         if "task_type" not in task_cols:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) NOT NULL DEFAULT ''"
+                )
+            )
 
         if "estimated_minutes" not in task_cols:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER NOT NULL DEFAULT 0"))
+            conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER NOT NULL DEFAULT 0"
+                )
+            )
 
         if "context_key" not in task_cols:
-            conn.execute(text("ALTER TABLE tasks ADD COLUMN context_key VARCHAR(256) NOT NULL DEFAULT ''"))
+            conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN context_key VARCHAR(256) NOT NULL DEFAULT ''"
+                )
+            )
 
         # goal_plan_sessions 补字段（用于“已有 goal 进入 plan”）
-        sess_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goal_plan_sessions)").fetchall()]
+        sess_cols = [
+            r[1]
+            for r in conn.exec_driver_sql(
+                "PRAGMA table_info(goal_plan_sessions)"
+            ).fetchall()
+        ]
         if "source_goal_id" not in sess_cols:
-            conn.execute(text("ALTER TABLE goal_plan_sessions ADD COLUMN source_goal_id INTEGER"))
+            conn.execute(
+                text("ALTER TABLE goal_plan_sessions ADD COLUMN source_goal_id INTEGER")
+            )
 
         # agent_spaces 补字段（Companion 架构升级）
-        space_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)").fetchall()]
+        space_cols = [
+            r[1]
+            for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)").fetchall()
+        ]
         if "companion_id" not in space_cols:
-            conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
+            conn.execute(
+                text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER")
+            )
 
         # remote_terminal_sessions 补字段（terminal tab rename）
         try:
             term_cols = [
                 r[1]
-                for r in conn.exec_driver_sql("PRAGMA table_info(remote_terminal_sessions)").fetchall()
+                for r in conn.exec_driver_sql(
+                    "PRAGMA table_info(remote_terminal_sessions)"
+                ).fetchall()
             ]
             if "name" not in term_cols:
-                conn.execute(text("ALTER TABLE remote_terminal_sessions ADD COLUMN name VARCHAR(128) NOT NULL DEFAULT ''"))
+                conn.execute(
+                    text(
+                        "ALTER TABLE remote_terminal_sessions ADD COLUMN name VARCHAR(128) NOT NULL DEFAULT ''"
+                    )
+                )
         except Exception:
             # 表不存在时忽略（首次启动由 create_all 创建）
             pass
@@ -1111,7 +1268,9 @@ def _truncate_zh(text: str, n: int = 20) -> str:
     return s[:n].rstrip() + "…"
 
 
-def _summarize_items(provider: OpenAICompatibleProvider | None, texts: list[str]) -> list[str]:
+def _summarize_items(
+    provider: OpenAICompatibleProvider | None, texts: list[str]
+) -> list[str]:
     """生成 <=20 字摘要（尽量走 LLM；不可用则截断兜底）。"""
 
     cleaned = [(t or "").strip() for t in texts]
@@ -1136,13 +1295,16 @@ def _summarize_items(provider: OpenAICompatibleProvider | None, texts: list[str]
     sys = "你是一个中文摘要生成器。你必须严格输出 JSON（不要 Markdown）。"
     user = (
         "为这些文本生成摘要。\n"
-        "输出格式：{\"items\":[{\"i\":0,\"summary\":\"...\"}, ...]}\n"
+        '输出格式：{"items":[{"i":0,"summary":"..."}, ...]}\n'
         + _json.dumps(payload, ensure_ascii=False)
     )
 
     try:
         res = provider.chat_completions(
-            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": user},
+            ],
             temperature=0.2,
             max_tokens=500,
             response_format={"type": "json_object"},
@@ -1188,7 +1350,12 @@ def goals_list(request: Request) -> HTMLResponse:
         goal_ids = [g.id for g in goals_all]
         tasks = []
         if goal_ids:
-            tasks = s.query(Task).filter(Task.goal_id.in_(goal_ids)).order_by(Task.id.asc()).all()
+            tasks = (
+                s.query(Task)
+                .filter(Task.goal_id.in_(goal_ids))
+                .order_by(Task.id.asc())
+                .all()
+            )
 
         tasks_by_goal: dict[int, list[Task]] = {}
         for t in tasks:
@@ -1198,7 +1365,11 @@ def goals_list(request: Request) -> HTMLResponse:
         public_ids = [t.public_id for t in tasks]
         agent_spaces_by_task: dict[str, AgentSpace] = {}
         if public_ids:
-            spaces = s.query(AgentSpace).filter(AgentSpace.task_public_id.in_(public_ids)).all()
+            spaces = (
+                s.query(AgentSpace)
+                .filter(AgentSpace.task_public_id.in_(public_ids))
+                .all()
+            )
             for sp in spaces:
                 agent_spaces_by_task[sp.task_public_id] = sp
 
@@ -1278,7 +1449,11 @@ def goals_list(request: Request) -> HTMLResponse:
 
             if ev.kind == "goal.confirmed_done_by_user":
                 prev = goal_done_at.get(gid)
-                if prev is None or (hasattr(ev.created_at, "timestamp") and hasattr(prev, "timestamp") and ev.created_at > prev):
+                if prev is None or (
+                    hasattr(ev.created_at, "timestamp")
+                    and hasattr(prev, "timestamp")
+                    and ev.created_at > prev
+                ):
                     goal_done_at[gid] = ev.created_at
 
             goal_events[gid].append(
@@ -1323,7 +1498,11 @@ def goals_list(request: Request) -> HTMLResponse:
 
         def _task_sort_key(t: Task):
             meta = task_meta.get(t.public_id, {}) or {}
-            ui_status = str(meta.get("ui_status") or getattr(t, "status", "") or "todo").strip().lower()
+            ui_status = (
+                str(meta.get("ui_status") or getattr(t, "status", "") or "todo")
+                .strip()
+                .lower()
+            )
             status_rank = {
                 "in_progress": 0,
                 "todo": 1,
@@ -1331,7 +1510,9 @@ def goals_list(request: Request) -> HTMLResponse:
                 "done": 9,
             }.get(ui_status, 3)
             created_at = getattr(t, "created_at", None) or _utcnow()
-            created_ts = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+            created_ts = (
+                created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+            )
             return (status_rank, -created_ts, -int(getattr(t, "id", 0) or 0))
 
         for gid, grouped_tasks in tasks_by_goal.items():
@@ -1367,16 +1548,37 @@ def goals_list(request: Request) -> HTMLResponse:
             # 统一把“已完成”放到下面（grp 参与排序），满足默认要求
             if goal_sort in {"CREATED", "CREATED_AT", "CREATED_EVENT"}:
                 # 新建优先（倒序）
-                return (grp, -(created_at.timestamp() if hasattr(created_at, "timestamp") else 0), -int(g.id))
+                return (
+                    grp,
+                    -(
+                        created_at.timestamp()
+                        if hasattr(created_at, "timestamp")
+                        else 0
+                    ),
+                    -int(g.id),
+                )
             if goal_sort in {"COMPLETED", "COMPLETED_AT", "DONE", "DONE_AT"}:
                 # 完成时间优先（倒序）；未完成放在各自组里按创建时间兜底
-                ts_done = done_at.timestamp() if (done_at and hasattr(done_at, "timestamp")) else -1
-                ts_created = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+                ts_done = (
+                    done_at.timestamp()
+                    if (done_at and hasattr(done_at, "timestamp"))
+                    else -1
+                )
+                ts_created = (
+                    created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+                )
                 return (grp, -ts_done if grp == 2 else -ts_created, -int(g.id))
             # 默认 DDL（due_date 升序；同 DDL 以创建时间倒序）
             due = getattr(g, "due_date", None) or today
-            ts_created = created_at.timestamp() if hasattr(created_at, "timestamp") else 0
-            return (grp, int(due.toordinal()) if hasattr(due, "toordinal") else 0, -ts_created, -int(g.id))
+            ts_created = (
+                created_at.timestamp() if hasattr(created_at, "timestamp") else 0
+            )
+            return (
+                grp,
+                int(due.toordinal()) if hasattr(due, "toordinal") else 0,
+                -ts_created,
+                -int(g.id),
+            )
 
         goals = [g for g in goals_all if _accept_goal(g)]
         goals.sort(key=_sort_key)
@@ -1403,7 +1605,9 @@ def goals_list(request: Request) -> HTMLResponse:
             except Exception:
                 selected_goal = None
         if sel_task_pid:
-            selected_task = s.query(Task).filter(Task.public_id == sel_task_pid).one_or_none()
+            selected_task = (
+                s.query(Task).filter(Task.public_id == sel_task_pid).one_or_none()
+            )
 
     default_due = dt.date.today() + dt.timedelta(days=1)
     return templates.TemplateResponse(
@@ -1455,25 +1659,90 @@ def _next_move_goal_label(goal: Goal) -> str:
 
 
 def _next_move_task_type_label(task_type: str | None) -> str:
-    return _NEXT_MOVE_TASK_TYPE_LABELS.get(str(task_type or "").strip().lower(), "Execution")
+    return _NEXT_MOVE_TASK_TYPE_LABELS.get(
+        str(task_type or "").strip().lower(), "Execution"
+    )
 
 
 def _infer_task_type(title: str, description: str) -> str:
     text = f"{title}\n{description}".lower()
-    if any(k in text for k in ["review", "approve", "comment", "code review", "qa", "test report", "验收", "评审", "reviewer", " pr", " mr"]):
+    if any(
+        k in text
+        for k in [
+            "review",
+            "approve",
+            "comment",
+            "code review",
+            "qa",
+            "test report",
+            "验收",
+            "评审",
+            "reviewer",
+            " pr",
+            " mr",
+        ]
+    ):
         return "review"
-    if any(k in text for k in ["sync", "meeting", "reply", "email", "message", "call", "沟通", "对齐", "联系", "回复", "会议"]):
+    if any(
+        k in text
+        for k in [
+            "sync",
+            "meeting",
+            "reply",
+            "email",
+            "message",
+            "call",
+            "沟通",
+            "对齐",
+            "联系",
+            "回复",
+            "会议",
+        ]
+    ):
         return "communication"
-    if any(k in text for k in ["admin", "ops", "cleanup", "organize", "docs", "document", "整理", "记录", "文档", "行政"]):
+    if any(
+        k in text
+        for k in [
+            "admin",
+            "ops",
+            "cleanup",
+            "organize",
+            "docs",
+            "document",
+            "整理",
+            "记录",
+            "文档",
+            "行政",
+        ]
+    ):
         return "admin"
-    if any(k in text for k in ["design", "investigate", "analysis", "analyze", "refactor", "architecture", "research", "规划", "设计", "排查", "分析", "重构"]):
+    if any(
+        k in text
+        for k in [
+            "design",
+            "investigate",
+            "analysis",
+            "analyze",
+            "refactor",
+            "architecture",
+            "research",
+            "规划",
+            "设计",
+            "排查",
+            "分析",
+            "重构",
+        ]
+    ):
         return "deep_work"
     return "execution"
 
 
 def _infer_estimated_minutes(task_type: str, title: str, description: str) -> int:
     text = f"{title}\n{description}".lower()
-    m = re.search(r"(\d{1,3})\s*(minutes?|mins?|min|小时|小時|hour|hours|hr|hrs|h|分钟|分鐘)", text)
+    m = re.search(
+        r"(\d{1,3})\s*(minutes?|mins?|min|小时|小時|hour|hours|hr|hrs|h|分钟|分鐘)",
+        text,
+    )
     if m:
         try:
             num = max(5, min(240, int(m.group(1))))
@@ -1483,7 +1752,9 @@ def _infer_estimated_minutes(task_type: str, title: str, description: str) -> in
             return num
         except Exception:
             pass
-    if re.search(r"\b(quick|small|tiny|minor|trivial|fast|马上|快速|小改|顺手)\b", text):
+    if re.search(
+        r"\b(quick|small|tiny|minor|trivial|fast|马上|快速|小改|顺手)\b", text
+    ):
         return 20
     if task_type == "review":
         return 25
@@ -1496,7 +1767,9 @@ def _infer_estimated_minutes(task_type: str, title: str, description: str) -> in
     return 45
 
 
-def _infer_context_key(title: str, description: str, *, goal_id: int, root_path: str | None = None) -> str:
+def _infer_context_key(
+    title: str, description: str, *, goal_id: int, root_path: str | None = None
+) -> str:
     rp = str(root_path or "").strip()
     if rp:
         try:
@@ -1509,7 +1782,9 @@ def _infer_context_key(title: str, description: str, *, goal_id: int, root_path:
     m = re.search(r"([a-z0-9_.-]+/[a-z0-9_.-]+)", text)
     if m:
         return f"topic:{m.group(1)[:80]}"
-    tokens = [x for x in re.split(r"[^a-zA-Z0-9\u4e00-\u9fff]+", text) if len(x.strip()) >= 2]
+    tokens = [
+        x for x in re.split(r"[^a-zA-Z0-9\u4e00-\u9fff]+", text) if len(x.strip()) >= 2
+    ]
     seed = (tokens[0] if tokens else "")[:32].strip().lower()
     if seed:
         return f"goal:{goal_id}:{seed}"
@@ -1527,13 +1802,38 @@ def _next_move_memory_context() -> dict:
     long_term_text = _memory_read_text(_memory_long_term_path())
     merged = f"{daily_text}\n{long_term_text}".lower()
     signals: set[str] = set()
-    if any(k in merged for k in ["fast feedback", "quick feedback", "快速反馈", "短反馈", "short task", "short tasks"]):
+    if any(
+        k in merged
+        for k in [
+            "fast feedback",
+            "quick feedback",
+            "快速反馈",
+            "短反馈",
+            "short task",
+            "short tasks",
+        ]
+    ):
         signals.add("fast_feedback")
-    if any(k in merged for k in ["avoid context switch", "reduce context switch", "减少切换", "连续推进", "保持上下文", "stay in the same context"]):
+    if any(
+        k in merged
+        for k in [
+            "avoid context switch",
+            "reduce context switch",
+            "减少切换",
+            "连续推进",
+            "保持上下文",
+            "stay in the same context",
+        ]
+    ):
         signals.add("avoid_context_switch")
-    if any(k in merged for k in ["deep work", "深度工作", "long focus block", "大块时间"]):
+    if any(
+        k in merged for k in ["deep work", "深度工作", "long focus block", "大块时间"]
+    ):
         signals.add("deep_work")
-    if any(k in merged for k in ["review first", "先 review", "prefer review", "喜欢 review"]):
+    if any(
+        k in merged
+        for k in ["review first", "先 review", "prefer review", "喜欢 review"]
+    ):
         signals.add("review")
     return {
         "daily": daily_text[:4000],
@@ -1574,9 +1874,17 @@ def _next_move_feedback_penalty(
         age_hours = max(0.0, (now - created_at).total_seconds() / 3600.0)
         if age_hours > 24 * 14:
             continue
-        freshness = 1.0 if age_hours <= 24 else (0.7 if age_hours <= 72 else (0.4 if age_hours <= 24 * 7 else 0.2))
+        freshness = (
+            1.0
+            if age_hours <= 24
+            else (0.7 if age_hours <= 72 else (0.4 if age_hours <= 24 * 7 else 0.2))
+        )
         meta = _next_move_feedback_meta(getattr(fb, "learned_summary", ""))
-        reason_code = str(getattr(fb, "reason_code", "") or meta.get("reason_code") or "").strip().lower()
+        reason_code = (
+            str(getattr(fb, "reason_code", "") or meta.get("reason_code") or "")
+            .strip()
+            .lower()
+        )
         meta_task_type = str(meta.get("task_type") or "").strip().lower()
         try:
             meta_goal_id = int(meta.get("goal_id") or 0)
@@ -1586,16 +1894,29 @@ def _next_move_feedback_penalty(
         if str(getattr(fb, "task_public_id", "") or "") == task_public_id:
             penalty += 8.0 * freshness
             reasons.append("you recently said not now for this task")
-        if reason_code == "too_long" and estimated_minutes >= max(45, int(meta.get("estimated_minutes") or 45)):
+        if reason_code == "too_long" and estimated_minutes >= max(
+            45, int(meta.get("estimated_minutes") or 45)
+        ):
             penalty += 2.5 * freshness
             reasons.append("recent feedback prefers a shorter block")
-        if reason_code == "wrong_type" and meta_task_type and meta_task_type == task_type:
+        if (
+            reason_code == "wrong_type"
+            and meta_task_type
+            and meta_task_type == task_type
+        ):
             penalty += 2.2 * freshness
             reasons.append("recent feedback deprioritized this task type")
-        if reason_code in {"too_much_context_switch", "lacking_context"} and continuity_score < 1.0:
+        if (
+            reason_code in {"too_much_context_switch", "lacking_context"}
+            and continuity_score < 1.0
+        ):
             penalty += 2.0 * freshness
             reasons.append("recent feedback asked for less context switching")
-        if reason_code == "not_important_now" and meta_goal_id and meta_goal_id == goal_id:
+        if (
+            reason_code == "not_important_now"
+            and meta_goal_id
+            and meta_goal_id == goal_id
+        ):
             penalty += 1.6 * freshness
             reasons.append("this goal was recently deprioritized")
     deduped: list[str] = []
@@ -1616,13 +1937,24 @@ def _next_move_confidence(score: float) -> str:
 def _next_move_sentence(items: list[dict]) -> str | None:
     if not items:
         return None
-    titles = [str((it.get("title") or "")).strip() for it in items[:3] if str((it.get("title") or "")).strip()]
+    titles = [
+        str((it.get("title") or "")).strip()
+        for it in items[:3]
+        if str((it.get("title") or "")).strip()
+    ]
     if not titles:
         return None
     return "Top picks now: " + ", ".join(titles) + "."
 
 
-def _next_move_learning_note(*, task_title: str, task_type: str, reason_code: str, reason_text: str, estimated_minutes: int) -> str:
+def _next_move_learning_note(
+    *,
+    task_title: str,
+    task_type: str,
+    reason_code: str,
+    reason_text: str,
+    estimated_minutes: int,
+) -> str:
     type_label = _next_move_task_type_label(task_type)
     reason_map = {
         "too_much_context_switch": "user wants less context switching",
@@ -1639,24 +1971,36 @@ def _next_move_learning_note(*, task_title: str, task_type: str, reason_code: st
     return note
 
 
-def _next_move_persist_feedback_learning(*, note: str, memory_note: str | None = None) -> None:
+def _next_move_persist_feedback_learning(
+    *, note: str, memory_note: str | None = None
+) -> None:
     now = _utcnow()
     daily_path = _memory_daily_root() / f"{now.date().isoformat()}.md"
     with _MEMORY_LOCK:
         existing_daily = _memory_read_text(daily_path)
         if note and note not in existing_daily:
-            prefix = "\n## Next Move Feedback\n\n" if "## Next Move Feedback" not in existing_daily else "\n"
+            prefix = (
+                "\n## Next Move Feedback\n\n"
+                if "## Next Move Feedback" not in existing_daily
+                else "\n"
+            )
             _memory_append_text(daily_path, prefix + note + "\n")
         if memory_note:
             long_term_path = _memory_long_term_path()
             existing_long_term = _memory_read_text(long_term_path)
             if memory_note not in existing_long_term:
-                prefix = "\n## Learned Preferences\n\n" if "## Learned Preferences" not in existing_long_term else "\n"
+                prefix = (
+                    "\n## Learned Preferences\n\n"
+                    if "## Learned Preferences" not in existing_long_term
+                    else "\n"
+                )
                 _memory_append_text(long_term_path, prefix + memory_note + "\n")
 
 
 @app.get("/api/recommendations/next")
-def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSONResponse:
+def recommendations_next(
+    limit: int = 3, trigger: str = "manual_refresh"
+) -> JSONResponse:
     now = _utcnow()
     today = now.date()
     limit = 3
@@ -1672,7 +2016,9 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
         goal_by_id = {g.id: g for g in goal_rows}
         tasks = (
             s.query(Task)
-            .filter(Task.goal_id.in_(list(goal_by_id.keys())) if goal_by_id else text("1=0"))
+            .filter(
+                Task.goal_id.in_(list(goal_by_id.keys())) if goal_by_id else text("1=0")
+            )
             .filter(Task.status.in_(["todo", "in_progress", "blocked"]))
             .order_by(Task.id.asc())
             .all()
@@ -1680,7 +2026,11 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
         public_ids = [t.public_id for t in tasks]
         spaces_by_task: dict[str, AgentSpace] = {}
         if public_ids:
-            for space in s.query(AgentSpace).filter(AgentSpace.task_public_id.in_(public_ids)).all():
+            for space in (
+                s.query(AgentSpace)
+                .filter(AgentSpace.task_public_id.in_(public_ids))
+                .all()
+            ):
                 spaces_by_task[space.task_public_id] = space
 
         latest_event_by_task: dict[str, Event] = {}
@@ -1695,26 +2045,47 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
             for ev in evs:
                 if ev.task_id and ev.task_id not in latest_event_by_task:
                     latest_event_by_task[ev.task_id] = ev
-                if not recent_focus_task_id and ev.task_id and ev.kind in {"task.started", "task.progress"}:
+                if (
+                    not recent_focus_task_id
+                    and ev.task_id
+                    and ev.kind in {"task.started", "task.progress"}
+                ):
                     recent_focus_task_id = str(ev.task_id)
 
-        feedback_rows = s.query(NextMoveFeedback).order_by(NextMoveFeedback.id.desc()).limit(120).all()
+        feedback_rows = (
+            s.query(NextMoveFeedback)
+            .order_by(NextMoveFeedback.id.desc())
+            .limit(120)
+            .all()
+        )
 
         memory_signals = set(memory_context.get("signals") or [])
-        recent_focus_task = next((t for t in tasks if t.public_id == recent_focus_task_id), None)
-        recent_focus_goal_id = int(recent_focus_task.goal_id) if recent_focus_task is not None else 0
+        recent_focus_task = next(
+            (t for t in tasks if t.public_id == recent_focus_task_id), None
+        )
+        recent_focus_goal_id = (
+            int(recent_focus_task.goal_id) if recent_focus_task is not None else 0
+        )
         recent_focus_type = (
-            str(getattr(recent_focus_task, "task_type", "") or "").strip().lower() if recent_focus_task is not None else ""
+            str(getattr(recent_focus_task, "task_type", "") or "").strip().lower()
+            if recent_focus_task is not None
+            else ""
         )
         recent_focus_context = ""
         if recent_focus_task is not None:
-            recent_focus_context = str(getattr(recent_focus_task, "context_key", "") or "").strip()
+            recent_focus_context = str(
+                getattr(recent_focus_task, "context_key", "") or ""
+            ).strip()
             if not recent_focus_context:
                 recent_focus_context = _infer_context_key(
                     str(recent_focus_task.title or ""),
                     str(recent_focus_task.description or ""),
                     goal_id=int(recent_focus_task.goal_id),
-                    root_path=getattr(spaces_by_task.get(recent_focus_task.public_id), "root_path", None),
+                    root_path=getattr(
+                        spaces_by_task.get(recent_focus_task.public_id),
+                        "root_path",
+                        None,
+                    ),
                 )
 
         scored: list[tuple[float, dict]] = []
@@ -1724,9 +2095,15 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
                 continue
 
             space = spaces_by_task.get(t.public_id)
-            task_type = str(getattr(t, "task_type", "") or "").strip().lower() or _infer_task_type(t.title, t.description)
-            estimated_minutes = int(getattr(t, "estimated_minutes", 0) or 0) or _infer_estimated_minutes(task_type, t.title, t.description)
-            context_key = str(getattr(t, "context_key", "") or "").strip() or _infer_context_key(
+            task_type = str(
+                getattr(t, "task_type", "") or ""
+            ).strip().lower() or _infer_task_type(t.title, t.description)
+            estimated_minutes = int(
+                getattr(t, "estimated_minutes", 0) or 0
+            ) or _infer_estimated_minutes(task_type, t.title, t.description)
+            context_key = str(
+                getattr(t, "context_key", "") or ""
+            ).strip() or _infer_context_key(
                 t.title,
                 t.description,
                 goal_id=int(t.goal_id),
@@ -1734,13 +2111,23 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
             )
 
             days_left = (g.due_date - today).days
-            urgency = 6.5 if days_left <= 0 else (5.2 if days_left <= 1 else (4.1 if days_left <= 3 else (2.8 if days_left <= 7 else 1.0)))
+            urgency = (
+                6.5
+                if days_left <= 0
+                else (
+                    5.2
+                    if days_left <= 1
+                    else (4.1 if days_left <= 3 else (2.8 if days_left <= 7 else 1.0))
+                )
+            )
 
             pri = _score_text_to_weight(g.priority)
             imp = _score_text_to_weight(g.importance)
 
             ev = latest_event_by_task.get(t.public_id)
-            in_progress = (t.status == "in_progress") or (ev is not None and ev.kind in {"task.started", "task.progress"})
+            in_progress = (t.status == "in_progress") or (
+                ev is not None and ev.kind in {"task.started", "task.progress"}
+            )
             continuity_score = 0.0
             if recent_focus_task_id and recent_focus_task_id == t.public_id:
                 continuity_score = 3.0
@@ -1792,9 +2179,21 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
                 now=now,
             )
 
-            score = urgency * 2.7 + pri * 2.0 + imp * 2.2 + continuity_score + time_fit + memory_bonus - feedback_penalty
+            score = (
+                urgency * 2.7
+                + pri * 2.0
+                + imp * 2.2
+                + continuity_score
+                + time_fit
+                + memory_bonus
+                - feedback_penalty
+            )
 
-            context_switch_cost = "low" if continuity_score >= 2.0 else ("medium" if continuity_score >= 0.8 else "high")
+            context_switch_cost = (
+                "low"
+                if continuity_score >= 2.0
+                else ("medium" if continuity_score >= 0.8 else "high")
+            )
             why: list[str] = []
             if days_left <= 0:
                 why.append("Deadline pressure is high.")
@@ -1813,7 +2212,9 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
             elif imp >= 3 or pri >= 3:
                 why.append(f"High goal weight: {g.importance}/{g.priority}.")
             elif feedback_notes:
-                why.append("Kept lower because of recent feedback, but still relevant now.")
+                why.append(
+                    "Kept lower because of recent feedback, but still relevant now."
+                )
 
             scored.append(
                 (
@@ -1854,7 +2255,13 @@ def recommendations_next(limit: int = 3, trigger: str = "manual_refresh") -> JSO
     item = items[0] if items else None
 
     return JSONResponse(
-        {"generated_at": now.isoformat(), "run_id": run_id, "item": item, "items": items, "sentence": sentence},
+        {
+            "generated_at": now.isoformat(),
+            "run_id": run_id,
+            "item": item,
+            "items": items,
+            "sentence": sentence,
+        },
         headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
     )
 
@@ -1868,7 +2275,9 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
     if not task_public_id:
         raise HTTPException(status_code=400, detail="task_public_id is required")
 
-    feedback_type = str(payload.get("feedback_type") or "dismiss").strip().lower() or "dismiss"
+    feedback_type = (
+        str(payload.get("feedback_type") or "dismiss").strip().lower() or "dismiss"
+    )
     reason_code = str(payload.get("reason_code") or "").strip().lower()
     reason_text = str(payload.get("reason_text") or "").strip()
     try:
@@ -1880,12 +2289,21 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
         task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
-        goal = s.get(Goal, int(task.goal_id))
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
 
-        task_type = str(getattr(task, "task_type", "") or "").strip().lower() or _infer_task_type(task.title, task.description)
-        estimated_minutes = int(getattr(task, "estimated_minutes", 0) or 0) or _infer_estimated_minutes(task_type, task.title, task.description)
-        context_key = str(getattr(task, "context_key", "") or "").strip() or _infer_context_key(
+        task_type = str(
+            getattr(task, "task_type", "") or ""
+        ).strip().lower() or _infer_task_type(task.title, task.description)
+        estimated_minutes = int(
+            getattr(task, "estimated_minutes", 0) or 0
+        ) or _infer_estimated_minutes(task_type, task.title, task.description)
+        context_key = str(
+            getattr(task, "context_key", "") or ""
+        ).strip() or _infer_context_key(
             task.title,
             task.description,
             goal_id=int(task.goal_id),
@@ -1930,13 +2348,24 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
         estimated_minutes=estimated_minutes,
     )
     memory_note = None
-    if reason_code and sum(1 for row in similar_rows if _next_move_feedback_meta(getattr(row, "learned_summary", "")).get("task_type") == task_type) >= 2:
+    if (
+        reason_code
+        and sum(
+            1
+            for row in similar_rows
+            if _next_move_feedback_meta(getattr(row, "learned_summary", "")).get(
+                "task_type"
+            )
+            == task_type
+        )
+        >= 2
+    ):
         if reason_code == "too_long":
-            memory_note = f"- Prefer shorter tasks over ~{estimated_minutes}m when dismissing { _next_move_task_type_label(task_type) } work."
+            memory_note = f"- Prefer shorter tasks over ~{estimated_minutes}m when dismissing {_next_move_task_type_label(task_type)} work."
         elif reason_code == "too_much_context_switch":
-            memory_note = f"- Prefer recommendations that continue the current context before suggesting new { _next_move_task_type_label(task_type) } work."
+            memory_note = f"- Prefer recommendations that continue the current context before suggesting new {_next_move_task_type_label(task_type)} work."
         elif reason_code == "wrong_type":
-            memory_note = f"- Avoid prioritizing { _next_move_task_type_label(task_type) } tasks when the user says the work type is wrong for now."
+            memory_note = f"- Avoid prioritizing {_next_move_task_type_label(task_type)} tasks when the user says the work type is wrong for now."
         elif reason_code == "not_important_now":
             memory_note = "- When the user dismisses a recommendation as not important now, reduce near-term priority for similar work."
     _next_move_persist_feedback_learning(note=daily_note, memory_note=memory_note)
@@ -1948,9 +2377,15 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
         detail=f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
         goal_id=int(task.goal_id),
         task_public_id=task_public_id,
-        metadata={"run_id": run_id, "reason_code": reason_code, "learned_summary": learned_summary},
+        metadata={
+            "run_id": run_id,
+            "reason_code": reason_code,
+            "learned_summary": learned_summary,
+        },
     )
-    return JSONResponse({"ok": True, "feedback_id": feedback_id, "task_public_id": task_public_id})
+    return JSONResponse(
+        {"ok": True, "feedback_id": feedback_id, "task_public_id": task_public_id}
+    )
 
 
 @app.get("/goals/new", response_class=HTMLResponse)
@@ -1968,9 +2403,14 @@ async def goals_create(
 ) -> RedirectResponse:
     # Server-side guard: if Plan Mode is ON but JS didn't repoint form action,
     # we should still enter Plan flow instead of creating the goal directly.
-    pm = (str(plan_mode or "").strip().lower())
+    pm = str(plan_mode or "").strip().lower()
     if pm in {"1", "true", "on", "yes"}:
-        return await goal_plan_create_session(due_date=due_date, content=content, description=description, draft_content=None)
+        return await goal_plan_create_session(
+            due_date=due_date,
+            content=content,
+            description=description,
+            draft_content=None,
+        )
 
     parsed_due = dt.date.fromisoformat(due_date)
     provider, _err = _get_llm_provider_or_error()
@@ -2013,7 +2453,9 @@ def tasks_create(
         provider, _err = _get_llm_provider_or_error()
         summary = _summarize_items(provider, [title_text])[0]
         task_type = _infer_task_type(title_text, description_text)
-        estimated_minutes = _infer_estimated_minutes(task_type, title_text, description_text)
+        estimated_minutes = _infer_estimated_minutes(
+            task_type, title_text, description_text
+        )
         context_key = _infer_context_key(title_text, description_text, goal_id=goal_id)
         task = Task(
             goal_id=goal_id,
@@ -2035,7 +2477,12 @@ def tasks_create(
         detail=f"Task title:\n\n{title_text}\n\nDescription:\n\n{description_text}",
         goal_id=goal_id,
         task_public_id=created_task_id or None,
-        metadata={"summary": summary, "task_type": task_type, "estimated_minutes": estimated_minutes, "context_key": context_key},
+        metadata={
+            "summary": summary,
+            "task_type": task_type,
+            "estimated_minutes": estimated_minutes,
+            "context_key": context_key,
+        },
     )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
@@ -2199,8 +2646,12 @@ def tasks_update(
         provider, _err = _get_llm_provider_or_error()
         summary = _summarize_items(provider, [title_text])[0]
         task_type = _infer_task_type(title_text, description_text)
-        estimated_minutes = _infer_estimated_minutes(task_type, title_text, description_text)
-        context_key = _infer_context_key(title_text, description_text, goal_id=t.goal_id)
+        estimated_minutes = _infer_estimated_minutes(
+            task_type, title_text, description_text
+        )
+        context_key = _infer_context_key(
+            title_text, description_text, goal_id=t.goal_id
+        )
         t.title = title_text
         t.summary = summary
         t.description = description_text
@@ -2221,7 +2672,12 @@ def tasks_update(
         ),
         goal_id=goal_id,
         task_public_id=pid,
-        metadata={"summary": summary, "task_type": task_type, "estimated_minutes": estimated_minutes, "context_key": context_key},
+        metadata={
+            "summary": summary,
+            "task_type": task_type,
+            "estimated_minutes": estimated_minutes,
+            "context_key": context_key,
+        },
     )
     # 保持 Dashboard 选中态
     return RedirectResponse(url=f"/goals?task={pid}&goal={goal_id}", status_code=303)
@@ -2239,14 +2695,24 @@ def tasks_delete(task_id: int) -> RedirectResponse:
         deleted_title = str(t.title or "")
         deleted_public_id = str(t.public_id or "")
         # 清理该 task 绑定的 AgentSpace（若存在）
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == t.public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == t.public_id)
+            .one_or_none()
+        )
         if space is not None:
             # 同时清理 Agent 会话/消息（对话持久化属于 AgentSpace 生命周期）
-            sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
+            sessions = (
+                s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
+            )
             sess_ids = [ss.session_id for ss in sessions]
             if sess_ids:
-                s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(synchronize_session=False)
-                s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(synchronize_session=False)
+                s.query(AgentMessage).filter(
+                    AgentMessage.session_id.in_(sess_ids)
+                ).delete(synchronize_session=False)
+                s.query(AgentSession).filter(
+                    AgentSession.session_id.in_(sess_ids)
+                ).delete(synchronize_session=False)
             s.delete(space)
         s.delete(t)
     _try_audit_memory(
@@ -2311,14 +2777,16 @@ def goals_update(
 def api_extract_goal_from_description(payload: dict) -> dict:
     """Extract goal content from the detailed description for New Goal."""
 
-    desc = (payload.get("description") if isinstance(payload, dict) else "")
-    desc = (str(desc or "").strip())
+    desc = payload.get("description") if isinstance(payload, dict) else ""
+    desc = str(desc or "").strip()
     if not desc:
         raise HTTPException(status_code=400, detail="description is required")
 
     provider, err = _get_llm_provider_or_error()
     if provider is None:
-        raise HTTPException(status_code=400, detail=err or "LLM provider not configured")
+        raise HTTPException(
+            status_code=400, detail=err or "LLM provider not configured"
+        )
 
     import json as _json
 
@@ -2336,13 +2804,16 @@ def api_extract_goal_from_description(payload: dict) -> dict:
     ]
 
     res = provider.chat_completions(
-        messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+        messages=[
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user},
+        ],
         temperature=0.2,
         max_tokens=300,
         response_format={"type": "json_object"},
     )
     data = _json.loads(res.content)
-    content = (data.get("content") or data.get("goal") or "")
+    content = data.get("content") or data.get("goal") or ""
     content = str(content).strip().replace("\n", " ")
     if not content:
         raise HTTPException(status_code=502, detail="LLM returned empty content")
@@ -2355,14 +2826,16 @@ def api_extract_goal_from_description(payload: dict) -> dict:
 def api_extract_task_title_from_description(payload: dict) -> dict:
     """Extract a task title from the detailed description for New Task."""
 
-    desc = (payload.get("description") if isinstance(payload, dict) else "")
-    desc = (str(desc or "").strip())
+    desc = payload.get("description") if isinstance(payload, dict) else ""
+    desc = str(desc or "").strip()
     if not desc:
         raise HTTPException(status_code=400, detail="description is required")
 
     provider, err = _get_llm_provider_or_error()
     if provider is None:
-        raise HTTPException(status_code=400, detail=err or "LLM provider not configured")
+        raise HTTPException(
+            status_code=400, detail=err or "LLM provider not configured"
+        )
 
     import json as _json
 
@@ -2379,13 +2852,16 @@ def api_extract_task_title_from_description(payload: dict) -> dict:
     ]
 
     res = provider.chat_completions(
-        messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+        messages=[
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user},
+        ],
         temperature=0.2,
         max_tokens=200,
         response_format={"type": "json_object"},
     )
     data = _json.loads(res.content)
-    title = (data.get("title") or data.get("task") or "")
+    title = data.get("title") or data.get("task") or ""
     title = str(title).strip().replace("\n", " ")
     if not title:
         raise HTTPException(status_code=502, detail="LLM returned empty title")
@@ -2475,8 +2951,8 @@ def _plan_system_prompt(*, remaining_turns: int) -> str:
         "Your job is to clarify the goal through conversation, identify potential goal conflicts and goal relationships, and produce executable tasks.\n"
         "You must return strict JSON only, never Markdown.\n"
         "On each turn you may do exactly one of the following:\n"
-        "1) Ask a follow-up question: {\"type\":\"question\", \"question\":\"...\"}\n"
-        "2) Return a final plan: {\"type\":\"final\", \"goal\":{...}, \"tasks\":[...], \"conflicts\":[...], \"relations\":[...]}\n"
+        '1) Ask a follow-up question: {"type":"question", "question":"..."}\n'
+        '2) Return a final plan: {"type":"final", "goal":{...}, "tasks":[...], "conflicts":[...], "relations":[...]}\n'
         f"Remaining follow-up turns: {remaining_turns}. When remaining_turns <= 0 you must return `final`.\n"
         "`final.goal` must include: content, description, status, priority, importance.\n"
         "Each item in `tasks` must include at least `title` as a string."
@@ -2539,7 +3015,13 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 if sess is None:
                     return
                 sess.status = "error"
-                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=str(err or "LLM is not configured")))
+                s.add(
+                    GoalPlanMessage(
+                        session_id=int(session_id),
+                        role="assistant",
+                        content=str(err or "LLM is not configured"),
+                    )
+                )
             _try_audit_memory(
                 kind="plan.error",
                 source="plan_mode",
@@ -2570,7 +3052,10 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 result_json=sess.result_json,
                 created_goal_id=sess.created_goal_id,
             )
-            msgs_snapshot = [GoalPlanMessage(session_id=m.session_id, role=m.role, content=m.content) for m in msgs]
+            msgs_snapshot = [
+                GoalPlanMessage(session_id=m.session_id, role=m.role, content=m.content)
+                for m in msgs
+            ]
 
         data = await asyncio.to_thread(
             _plan_llm_step,
@@ -2585,15 +3070,25 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 return
 
             if data.get("type") == "question":
-                q = str(data.get("question") or "").strip() or "Please share a bit more detail."
-                s.add(GoalPlanMessage(session_id=int(session_id), role="assistant", content=q))
+                q = (
+                    str(data.get("question") or "").strip()
+                    or "Please share a bit more detail."
+                )
+                s.add(
+                    GoalPlanMessage(
+                        session_id=int(session_id), role="assistant", content=q
+                    )
+                )
                 sess.status = "in_progress"
                 _try_audit_memory(
                     kind="plan.assistant_message",
                     source="plan_mode",
                     summary=f"Plan session {int(session_id)} asked a follow-up question.",
                     detail=q,
-                    metadata={"session_id": int(session_id), "message_type": "question"},
+                    metadata={
+                        "session_id": int(session_id),
+                        "message_type": "question",
+                    },
                 )
                 return
 
@@ -2612,7 +3107,10 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
                 source="plan_mode",
                 summary=f"Plan session {int(session_id)} generated a draft.",
                 detail=json.dumps(data, ensure_ascii=False, indent=2),
-                metadata={"session_id": int(session_id), "tasks": len(data.get("tasks") or [])},
+                metadata={
+                    "session_id": int(session_id),
+                    "tasks": len(data.get("tasks") or []),
+                },
             )
     except Exception as e:
         with session_scope() as s:
@@ -2659,7 +3157,10 @@ async def goal_plan_create_session(
             source="web",
             summary="Requested plan session without available LLM provider.",
             detail=raw,
-            metadata={"due_date": due_date, "error": str(err or "LLM is not configured")},
+            metadata={
+                "due_date": due_date,
+                "error": str(err or "LLM is not configured"),
+            },
         )
         qs = urlencode({"draft_content": raw, "due_date": due_date})
         return RedirectResponse(url="/goals/plan?" + qs, status_code=303)
@@ -2678,12 +3179,20 @@ async def goal_plan_create_session(
         raw = raw[:2000]
 
     with session_scope() as s:
-        sess = GoalPlanSession(status="starting", draft_content=raw, due_date=parsed_due)
+        sess = GoalPlanSession(
+            status="starting", draft_content=raw, due_date=parsed_due
+        )
         s.add(sess)
         s.flush()
         sid = sess.id
         # Seed the session with an assistant intro message.
-        s.add(GoalPlanMessage(session_id=sid, role="assistant", content="I will ask a few questions to clarify the goal, then draft an executable task breakdown."))
+        s.add(
+            GoalPlanMessage(
+                session_id=sid,
+                role="assistant",
+                content="I will ask a few questions to clarify the goal, then draft an executable task breakdown.",
+            )
+        )
 
     _try_audit_memory(
         kind="plan.session_started",
@@ -2694,7 +3203,9 @@ async def goal_plan_create_session(
     )
 
     try:
-        asyncio.get_running_loop().create_task(_kickoff_plan_session_first_step(int(sid)))
+        asyncio.get_running_loop().create_task(
+            _kickoff_plan_session_first_step(int(sid))
+        )
     except RuntimeError:
         # no running loop (should not happen under uvicorn); best-effort fallback
         pass
@@ -2708,7 +3219,12 @@ def goal_plan_view(request: Request, session_id: int) -> HTMLResponse:
         sess = s.get(GoalPlanSession, session_id)
         if sess is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        msgs = s.query(GoalPlanMessage).filter(GoalPlanMessage.session_id == session_id).order_by(GoalPlanMessage.id.asc()).all()
+        msgs = (
+            s.query(GoalPlanMessage)
+            .filter(GoalPlanMessage.session_id == session_id)
+            .order_by(GoalPlanMessage.id.asc())
+            .all()
+        )
     return templates.TemplateResponse(
         request,
         "goal_plan_session.html",
@@ -2721,7 +3237,9 @@ def goal_plan_view(request: Request, session_id: int) -> HTMLResponse:
 
 
 @app.post("/goals/plan/{session_id}/reply", include_in_schema=False)
-def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_length=20000)) -> RedirectResponse:
+def goal_plan_reply(
+    session_id: int, answer: str = Form(..., min_length=1, max_length=20000)
+) -> RedirectResponse:
     provider, err = _get_llm_provider_or_error()
     if provider is None:
         return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
@@ -2732,7 +3250,9 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
             raise HTTPException(status_code=404, detail="Session not found")
         if sess.status != "in_progress":
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-        s.add(GoalPlanMessage(session_id=session_id, role="user", content=answer.strip()))
+        s.add(
+            GoalPlanMessage(session_id=session_id, role="user", content=answer.strip())
+        )
         sess.turns += 1
     _try_audit_memory(
         kind="plan.user_reply",
@@ -2744,13 +3264,21 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
 
     with session_scope() as s:
         sess = s.get(GoalPlanSession, session_id)
-        msgs = s.query(GoalPlanMessage).filter(GoalPlanMessage.session_id == session_id).order_by(GoalPlanMessage.id.asc()).all()
+        msgs = (
+            s.query(GoalPlanMessage)
+            .filter(GoalPlanMessage.session_id == session_id)
+            .order_by(GoalPlanMessage.id.asc())
+            .all()
+        )
         source_goal = None
         existing_tasks = None
         if getattr(sess, "source_goal_id", None):
             source_goal = s.get(Goal, sess.source_goal_id)
             existing_tasks = (
-                s.query(Task).filter(Task.goal_id == sess.source_goal_id).order_by(Task.id.asc()).all()
+                s.query(Task)
+                .filter(Task.goal_id == sess.source_goal_id)
+                .order_by(Task.id.asc())
+                .all()
             )
         data = _plan_llm_step(
             provider=provider,
@@ -2761,7 +3289,10 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
         )
 
         if data.get("type") == "question":
-            q = str(data.get("question") or "").strip() or "Please share a bit more detail."
+            q = (
+                str(data.get("question") or "").strip()
+                or "Please share a bit more detail."
+            )
             s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=q))
             _try_audit_memory(
                 kind="plan.assistant_message",
@@ -2787,7 +3318,10 @@ def goal_plan_reply(session_id: int, answer: str = Form(..., min_length=1, max_l
             source="plan_mode",
             summary=f"Plan session {int(session_id)} generated a draft.",
             detail=json.dumps(data, ensure_ascii=False, indent=2),
-            metadata={"session_id": int(session_id), "tasks": len(data.get("tasks") or [])},
+            metadata={
+                "session_id": int(session_id),
+                "tasks": len(data.get("tasks") or []),
+            },
         )
         return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
@@ -2829,7 +3363,13 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
 
         data = sess.result_json or {}
         if not data:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="There is no draft to create yet. Generate a plan first."))
+            s.add(
+                GoalPlanMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content="There is no draft to create yet. Generate a plan first.",
+                )
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         tasks = data.get("tasks") or []
 
@@ -2853,7 +3393,13 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
 
         # If nothing is selected, return to the session without making changes.
         if not picked:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="No tasks were selected. No changes were made."))
+            s.add(
+                GoalPlanMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content="No tasks were selected. No changes were made.",
+                )
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         target_goal_id: int
@@ -2887,12 +3433,23 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
         provider, _err = _get_llm_provider_or_error()
         summaries = _summarize_items(provider, picked)
         for i, title in enumerate(picked):
-            s.add(Task(goal_id=target_goal_id, title=title, summary=summaries[i], status="todo"))
+            s.add(
+                Task(
+                    goal_id=target_goal_id,
+                    title=title,
+                    summary=summaries[i],
+                    status="todo",
+                )
+            )
 
         sess.status = "completed"
         if sess.created_goal_id is None:
             sess.created_goal_id = target_goal_id
-        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Applied to the goal."))
+        s.add(
+            GoalPlanMessage(
+                session_id=session_id, role="assistant", content="Applied to the goal."
+            )
+        )
 
     _try_audit_memory(
         kind="plan.confirmed",
@@ -2907,7 +3464,9 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
 
 
 @app.post("/goals/plan/{session_id}/step/{step_index}/create", include_in_schema=False)
-async def goal_plan_create_single_task(request: Request, session_id: int, step_index: int) -> RedirectResponse:
+async def goal_plan_create_single_task(
+    request: Request, session_id: int, step_index: int
+) -> RedirectResponse:
     """Create a single task from one step in the Plan draft.
 
     - Create the goal first if the session has not created one yet.
@@ -2924,11 +3483,19 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
         data = sess.result_json or {}
         tasks = data.get("tasks") or []
         if not isinstance(tasks, list) or step_index < 0 or step_index >= len(tasks):
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Invalid step."))
+            s.add(
+                GoalPlanMessage(
+                    session_id=session_id, role="assistant", content="Invalid step."
+                )
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
         t_item = tasks[step_index]
         if not isinstance(t_item, dict):
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="Invalid step."))
+            s.add(
+                GoalPlanMessage(
+                    session_id=session_id, role="assistant", content="Invalid step."
+                )
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         # Prefer edited title from UI if present.
@@ -2939,7 +3506,13 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
             edited_title = ""
         title = edited_title or str(t_item.get("title") or "").strip()
         if not title:
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content="The step title is empty, so the task cannot be created."))
+            s.add(
+                GoalPlanMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content="The step title is empty, so the task cannot be created.",
+                )
+            )
             return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
 
         # Ensure a goal exists.
@@ -2972,11 +3545,19 @@ async def goal_plan_create_single_task(request: Request, session_id: int, step_i
 
         provider, _err = _get_llm_provider_or_error()
         t_summary = _summarize_items(provider, [title])[0]
-        task = Task(goal_id=target_goal_id, title=title, summary=t_summary, status="todo")
+        task = Task(
+            goal_id=target_goal_id, title=title, summary=t_summary, status="todo"
+        )
         s.add(task)
         s.flush()
 
-        s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=f"Created task: {title}"))
+        s.add(
+            GoalPlanMessage(
+                session_id=session_id,
+                role="assistant",
+                content=f"Created task: {title}",
+            )
+        )
         # Keep session in progress for further iterations.
         sess.status = "in_progress"
 
@@ -3073,7 +3654,9 @@ def _companion_display_status(c: Companion, *, now: dt.datetime | None = None) -
     参数 now 保留仅为兼容旧调用方（当前不再基于心跳时间计算）。
     """
 
-    if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
+    if (c.status or "").strip() == "pending_certification" or not (
+        c.auth_token or ""
+    ).strip():
         return "pending_certification"
 
     cid = int(getattr(c, "id", 0) or 0)
@@ -3130,11 +3713,18 @@ def companions_list(limit: int = 50) -> dict:
         ids = [c.id for c in comps]
         spaces_by_comp: dict[int, list[dict]] = {cid: [] for cid in ids}
         if ids:
-            spaces = s.query(AgentSpace).filter(AgentSpace.companion_id.in_(ids)).order_by(AgentSpace.id.desc()).all()
+            spaces = (
+                s.query(AgentSpace)
+                .filter(AgentSpace.companion_id.in_(ids))
+                .order_by(AgentSpace.id.desc())
+                .all()
+            )
             for sp in spaces:
                 cid = int(getattr(sp, "companion_id", 0) or 0)
                 if cid in spaces_by_comp:
-                    spaces_by_comp[cid].append({"id": sp.id, "task_public_id": sp.task_public_id})
+                    spaces_by_comp[cid].append(
+                        {"id": sp.id, "task_public_id": sp.task_public_id}
+                    )
 
     items: list[dict] = []
     for c in comps:
@@ -3145,8 +3735,12 @@ def companions_list(limit: int = 50) -> dict:
                 "name": c.name,
                 "base_url": c.base_url,
                 "status": _companion_display_status(c),
-                "last_seen_at": (c.last_seen_at.isoformat() if c.last_seen_at else None),
-                "created_at": (c.created_at.isoformat() if getattr(c, "created_at", None) else None),
+                "last_seen_at": (
+                    c.last_seen_at.isoformat() if c.last_seen_at else None
+                ),
+                "created_at": (
+                    c.created_at.isoformat() if getattr(c, "created_at", None) else None
+                ),
                 "agent_spaces": spaces_by_comp.get(c.id, []),
             }
         )
@@ -3196,7 +3790,11 @@ def companion_delete(companion_id: int) -> dict:
                 kind="companion.deleted",
                 agent="openfocus/ui",
                 task_id=None,
-                payload={"companion_id": cid, "device_id": device_id, "unbound_spaces": unbound},
+                payload={
+                    "companion_id": cid,
+                    "device_id": device_id,
+                    "unbound_spaces": unbound,
+                },
             )
         )
 
@@ -3221,11 +3819,17 @@ async def companion_pair(companion_id: int, payload: dict) -> dict:
 
         # 每分钟最多 10 次尝试
         ws = c.pair_attempt_window_start
-        if ws is None or (ws.replace(tzinfo=dt.timezone.utc) if ws.tzinfo is None else ws) != minute_start:
+        if (
+            ws is None
+            or (ws.replace(tzinfo=dt.timezone.utc) if ws.tzinfo is None else ws)
+            != minute_start
+        ):
             c.pair_attempt_window_start = minute_start
             c.pair_attempt_count = 0
         if c.pair_attempt_count >= 10:
-            raise HTTPException(status_code=429, detail="本分钟认证尝试次数已达上限（10 次）")
+            raise HTTPException(
+                status_code=429, detail="本分钟认证尝试次数已达上限（10 次）"
+            )
         c.pair_attempt_count += 1
         s.add(c)
 
@@ -3244,7 +3848,9 @@ async def companion_pair(companion_id: int, payload: dict) -> dict:
     # 通过 gRPC 长连接下发配对确认
     conn = COMPANION_GRPC.registry.get(companion_id)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
     try:
         token = await conn.request_pair(code, timeout_seconds=10.0)
     except CompanionGrpcError as e:
@@ -3298,10 +3904,14 @@ async def companion_pairing_code(companion_id: int) -> dict:
 
     conn = COMPANION_GRPC.registry.get(companion_id)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
 
     try:
-        _code, expires_at = await conn.request_pairing_code(force_new=True, timeout_seconds=10.0)
+        _code, expires_at = await conn.request_pairing_code(
+            force_new=True, timeout_seconds=10.0
+        )
     except CompanionGrpcError as e:
         raise HTTPException(status_code=502, detail=f"Companion 获取配对码失败：{e}")
 
@@ -3315,13 +3925,16 @@ async def companion_choose_directory_proxy(companion_id: int) -> dict:
         c = s.get(Companion, companion_id)
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (
+            c.auth_token or ""
+        ).strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-        device_id = c.device_id
 
     conn = COMPANION_GRPC.registry.get(companion_id)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
     try:
         path = await conn.request_choose_directory(timeout_seconds=30.0)
     except CompanionGrpcError as e:
@@ -3400,7 +4013,9 @@ def recent_events(limit: int = 30) -> dict:
     items: list[dict] = []
     for ev in evs:
         payload = ev.payload or {}
-        task_public_id = ev.task_id if (ev.task_id and ev.task_id in existing_task_ids) else None
+        task_public_id = (
+            ev.task_id if (ev.task_id and ev.task_id in existing_task_ids) else None
+        )
         items.append(
             {
                 "id": ev.id,
@@ -3409,7 +4024,9 @@ def recent_events(limit: int = 30) -> dict:
                 "source_label": _event_source_label(ev.agent),
                 "task_id": ev.task_id,
                 "task_public_id": task_public_id,
-                "created_at": ev.created_at.isoformat() if hasattr(ev.created_at, "isoformat") else str(ev.created_at),
+                "created_at": ev.created_at.isoformat()
+                if hasattr(ev.created_at, "isoformat")
+                else str(ev.created_at),
                 "summary": _event_summary(ev.kind, payload),
             }
         )
@@ -3449,8 +4066,12 @@ def calendar_month(ym: str | None = None) -> dict:
     else:
         month_end = dt.date(y, m + 1, 1)
 
-    start_dt = dt.datetime(month_start.year, month_start.month, month_start.day, tzinfo=dt.timezone.utc)
-    end_dt = dt.datetime(month_end.year, month_end.month, month_end.day, tzinfo=dt.timezone.utc)
+    start_dt = dt.datetime(
+        month_start.year, month_start.month, month_start.day, tzinfo=dt.timezone.utc
+    )
+    end_dt = dt.datetime(
+        month_end.year, month_end.month, month_end.day, tzinfo=dt.timezone.utc
+    )
 
     with session_scope() as s:
         done_tasks = (
@@ -3482,7 +4103,9 @@ def calendar_month(ym: str | None = None) -> dict:
                 "task_title": t.title,
                 "goal_id": int(t.goal_id),
                 "goal_title": (g.content if g is not None else ""),
-                "completed_at": t.completed_at.isoformat() if hasattr(t.completed_at, "isoformat") else str(t.completed_at),
+                "completed_at": t.completed_at.isoformat()
+                if hasattr(t.completed_at, "isoformat")
+                else str(t.completed_at),
             }
         )
 
@@ -3496,8 +4119,12 @@ def calendar_month(ym: str | None = None) -> dict:
                 "id": gid,
                 "title": g.content,
                 "status": g.status,
-                "created_at": g.created_at.isoformat() if hasattr(g.created_at, "isoformat") else str(g.created_at),
-                "due_date": g.due_date.isoformat() if hasattr(g.due_date, "isoformat") else str(g.due_date),
+                "created_at": g.created_at.isoformat()
+                if hasattr(g.created_at, "isoformat")
+                else str(g.created_at),
+                "due_date": g.due_date.isoformat()
+                if hasattr(g.due_date, "isoformat")
+                else str(g.due_date),
                 "total_tasks": len(ts),
                 "done_tasks": done_n,
                 "tasks": [
@@ -3506,7 +4133,9 @@ def calendar_month(ym: str | None = None) -> dict:
                         "public_id": t.public_id,
                         "title": t.title,
                         "status": t.status,
-                        "completed_at": t.completed_at.isoformat() if (t.completed_at and hasattr(t.completed_at, "isoformat")) else (str(t.completed_at) if t.completed_at else None),
+                        "completed_at": t.completed_at.isoformat()
+                        if (t.completed_at and hasattr(t.completed_at, "isoformat"))
+                        else (str(t.completed_at) if t.completed_at else None),
                     }
                     for t in ts
                 ],
@@ -3622,7 +4251,7 @@ def _event_summary(kind: str, payload: object) -> str:
 
 
 def _status_label(status: object) -> str:
-    x = (str(status or "").strip().lower())
+    x = str(status or "").strip().lower()
     if not x:
         return ""
     if x in {"succeeded", "success", "ok", "done", "completed"}:
@@ -3681,7 +4310,11 @@ def agent_space_view(request: Request, task_public_id: str) -> HTMLResponse:
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         goal = s.query(Goal).filter(Goal.id == task.goal_id).one_or_none()
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
         companion = None
         if space is not None and getattr(space, "companion_id", None):
             companion = s.get(Companion, int(space.companion_id))
@@ -3701,7 +4334,11 @@ def agent_space_view(request: Request, task_public_id: str) -> HTMLResponse:
 @app.get("/api/tasks/{task_public_id}/agent_space")
 def get_agent_space(task_public_id: str) -> dict:
     with session_scope() as s:
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
         if space is None:
             return {"ok": True, "space": None}
         return {
@@ -3732,7 +4369,11 @@ def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict
         if comp.status != "active" or not (comp.auth_token or "").strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
-        existing = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        existing = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
         if existing is not None:
             # 简化：已存在则更新（方便快速迭代）
             existing.companion_id = int(payload.companion_id)
@@ -3758,7 +4399,11 @@ def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict
 async def delete_agent_space(task_public_id: str) -> dict:
     # 释放 AgentSpace 时：尽力清理所有远端资源（Remote Terminal），并删除 OpenFocus 侧记录。
     with session_scope() as s:
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
         if space is None:
             return {"ok": True}
 
@@ -3769,34 +4414,55 @@ async def delete_agent_space(task_public_id: str) -> dict:
         sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
         sess_ids = [ss.session_id for ss in sessions]
 
-        terms = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.space_id == space.id).all()
+        terms = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == space.id)
+            .all()
+        )
         term_ids = [t.terminal_id for t in terms]
 
     # best-effort stop on Companion
     cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
     conn = COMPANION_GRPC.registry.get(cid) if cid else None
     if conn is not None and term_ids:
+
         async def _stop_one(tid: str) -> None:
             try:
-                await conn.request_terminal_stop(terminal_id=str(tid), timeout_seconds=5.0)
+                await conn.request_terminal_stop(
+                    terminal_id=str(tid), timeout_seconds=5.0
+                )
             except Exception:
                 # Companion 离线/失败时允许终端丢失；OpenFocus 侧仍清理记录。
                 pass
 
-        await asyncio.gather(*[_stop_one(tid) for tid in term_ids], return_exceptions=True)
+        await asyncio.gather(
+            *[_stop_one(tid) for tid in term_ids], return_exceptions=True
+        )
 
     with session_scope() as s:
-        space = s.query(AgentSpace).filter(AgentSpace.task_public_id == task_public_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == task_public_id)
+            .one_or_none()
+        )
         if space is None:
             return {"ok": True}
 
         if sess_ids:
-            s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(synchronize_session=False)
-            s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(synchronize_session=False)
+            s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(
+                synchronize_session=False
+            )
+            s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(
+                synchronize_session=False
+            )
 
         # 先清理终端输出日志，再清理 session 元信息
-        s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.space_id == space.id).delete(synchronize_session=False)
-        s.query(RemoteTerminalSession).filter(RemoteTerminalSession.space_id == space.id).delete(synchronize_session=False)
+        s.query(RemoteTerminalOutput).filter(
+            RemoteTerminalOutput.space_id == space.id
+        ).delete(synchronize_session=False)
+        s.query(RemoteTerminalSession).filter(
+            RemoteTerminalSession.space_id == space.id
+        ).delete(synchronize_session=False)
         s.delete(space)
 
     return {"ok": True}
@@ -3815,7 +4481,9 @@ async def agent_space_files_list(space_id: int, path: str = "") -> dict:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (
+            c.auth_token or ""
+        ).strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -3823,10 +4491,14 @@ async def agent_space_files_list(space_id: int, path: str = "") -> dict:
 
     conn = COMPANION_GRPC.registry.get(cid)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
 
     try:
-        res = await conn.request_files_list(root_path=root_path, rel_path=str(path or ""), timeout_seconds=10.0)
+        res = await conn.request_files_list(
+            root_path=root_path, rel_path=str(path or ""), timeout_seconds=10.0
+        )
     except CompanionGrpcError as e:
         raise _map_companion_files_error(e)
 
@@ -3855,7 +4527,9 @@ async def agent_space_files_read(space_id: int, path: str) -> dict:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (
+            c.auth_token or ""
+        ).strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -3863,10 +4537,14 @@ async def agent_space_files_read(space_id: int, path: str) -> dict:
 
     conn = COMPANION_GRPC.registry.get(cid)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
 
     try:
-        res = await conn.request_files_read(root_path=root_path, rel_path=str(path or ""), max_bytes=256 * 1024)
+        res = await conn.request_files_read(
+            root_path=root_path, rel_path=str(path or ""), max_bytes=256 * 1024
+        )
     except CompanionGrpcError as e:
         raise _map_companion_files_error(e)
 
@@ -3891,7 +4569,9 @@ async def agent_space_files_raw(space_id: int, path: str) -> Response:
         c = s.get(Companion, int(sp.companion_id))
         if c is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (c.auth_token or "").strip():
+        if (c.status or "").strip() == "pending_certification" or not (
+            c.auth_token or ""
+        ).strip():
             raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
 
         root_path = str(sp.root_path or "")
@@ -3899,14 +4579,20 @@ async def agent_space_files_raw(space_id: int, path: str) -> Response:
 
     conn = COMPANION_GRPC.registry.get(cid)
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
 
     try:
-        res = await conn.request_files_raw(root_path=root_path, rel_path=str(path or ""), max_bytes=2 * 1024 * 1024)
+        res = await conn.request_files_raw(
+            root_path=root_path, rel_path=str(path or ""), max_bytes=2 * 1024 * 1024
+        )
     except CompanionGrpcError as e:
         raise _map_companion_files_error(e)
 
-    return Response(content=bytes(res.data), media_type=(res.mime or "application/octet-stream"))
+    return Response(
+        content=bytes(res.data), media_type=(res.mime or "application/octet-stream")
+    )
 
 
 def _openfocus_base_url(request: Request) -> str:
@@ -3916,7 +4602,9 @@ def _openfocus_base_url(request: Request) -> str:
         return "http://127.0.0.1:8001"
 
 
-def _inject_openfocus_prompt(*, base_url: str, task_public_id: str, session_id: str, user_prompt: str) -> str:
+def _inject_openfocus_prompt(
+    *, base_url: str, task_public_id: str, session_id: str, user_prompt: str
+) -> str:
     # 轻量注入：每次 send 时拼接，避免依赖 agent 侧的“系统 prompt”能力。
     head = (
         "你在 OpenFocus 的 AgentSpace 中工作。\n"
@@ -3930,7 +4618,9 @@ def _inject_openfocus_prompt(*, base_url: str, task_public_id: str, session_id: 
     return head + str(user_prompt or "")
 
 
-def _load_space_and_optional_companion(space_id: int) -> tuple[AgentSpace, Companion | None]:
+def _load_space_and_optional_companion(
+    space_id: int,
+) -> tuple[AgentSpace, Companion | None]:
     with session_scope() as s:
         sp = s.get(AgentSpace, int(space_id))
         if sp is None:
@@ -3944,11 +4634,15 @@ def _load_space_and_optional_companion(space_id: int) -> tuple[AgentSpace, Compa
 def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
     if comp is None:
         raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-    if (comp.status or "").strip() == "pending_certification" or not (comp.auth_token or "").strip():
+    if (comp.status or "").strip() == "pending_certification" or not (
+        comp.auth_token or ""
+    ).strip():
         raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
     conn = COMPANION_GRPC.registry.get(int(comp.id))
     if conn is None:
-        raise HTTPException(status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）")
+        raise HTTPException(
+            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+        )
     return conn
 
 
@@ -3978,7 +4672,9 @@ def terminals_list(space_id: int) -> dict:
                 "terminal_id": t.terminal_id,
                 "name": (t.name or ""),
                 "status": t.status,
-                "created_at": t.created_at.isoformat() if hasattr(t.created_at, "isoformat") else str(t.created_at),
+                "created_at": t.created_at.isoformat()
+                if hasattr(t.created_at, "isoformat")
+                else str(t.created_at),
             }
             for t in terms
         ],
@@ -3992,7 +4688,11 @@ async def terminals_new(space_id: int) -> dict:
 
     terminal_id = str(uuid.uuid4())
     try:
-        res = await conn.request_terminal_start(terminal_id=terminal_id, root_path=str(sp.root_path or ""), timeout_seconds=10.0)
+        res = await conn.request_terminal_start(
+            terminal_id=terminal_id,
+            root_path=str(sp.root_path or ""),
+            timeout_seconds=10.0,
+        )
     except CompanionGrpcError as e:
         raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
 
@@ -4005,7 +4705,9 @@ async def terminals_new(space_id: int) -> dict:
             .filter(RemoteTerminalSession.space_id == int(sp.id))
             .all()
         )
-        used = {str((t.name or "").strip()) for t in existing if str((t.name or "").strip())}
+        used = {
+            str((t.name or "").strip()) for t in existing if str((t.name or "").strip())
+        }
         base = "terminal"
         name = base
         if name in used:
@@ -4057,7 +4759,11 @@ async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> di
         raise HTTPException(status_code=400, detail="name 过长（<=128）")
 
     with session_scope() as s:
-        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
         if t is None or int(t.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Terminal not found")
 
@@ -4086,7 +4792,11 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
         raise HTTPException(status_code=400, detail="terminal_id is required")
 
     with session_scope() as s:
-        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
         if t is None or int(t.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Terminal not found")
 
@@ -4101,12 +4811,12 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
 
     with session_scope() as s:
         # 关闭即删除记录（避免刷新后重新出现 tab）
-        s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).delete(
-            synchronize_session=False
-        )
-        s.query(RemoteTerminalOutput).filter(RemoteTerminalOutput.terminal_id == tid).delete(
-            synchronize_session=False
-        )
+        s.query(RemoteTerminalSession).filter(
+            RemoteTerminalSession.terminal_id == tid
+        ).delete(synchronize_session=False)
+        s.query(RemoteTerminalOutput).filter(
+            RemoteTerminalOutput.terminal_id == tid
+        ).delete(synchronize_session=False)
 
     _try_audit_memory(
         kind="terminal.closed",
@@ -4121,7 +4831,9 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
 
 
 @app.get("/api/agent_spaces/{space_id}/terminals/{terminal_id}/history")
-def terminals_history(space_id: int, terminal_id: str, max_bytes: int = _TERM_HISTORY_PUBLIC_MAX_BYTES) -> dict:
+def terminals_history(
+    space_id: int, terminal_id: str, max_bytes: int = _TERM_HISTORY_PUBLIC_MAX_BYTES
+) -> dict:
     sp, _ = _load_space_and_optional_companion(space_id)
 
     tid = str(terminal_id or "").strip()
@@ -4132,7 +4844,11 @@ def terminals_history(space_id: int, terminal_id: str, max_bytes: int = _TERM_HI
     max_bytes = max(1024, min(int(max_bytes or 0), _TERM_HISTORY_PUBLIC_MAX_BYTES))
 
     with session_scope() as s:
-        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
         if t is None or int(t.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Terminal not found")
 
@@ -4222,7 +4938,11 @@ async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) ->
         return
 
     with session_scope() as s:
-        t = s.query(RemoteTerminalSession).filter(RemoteTerminalSession.terminal_id == tid).one_or_none()
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
         if t is None or int(t.space_id) != int(sp.id):
             await websocket.close(code=1008)
             return
@@ -4243,7 +4963,9 @@ async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) ->
             if typ == "ping":
                 # keepalive
                 try:
-                    await websocket.send_json({"type": "pong", "ts": int(msg.get("ts") or 0)})
+                    await websocket.send_json(
+                        {"type": "pong", "ts": int(msg.get("ts") or 0)}
+                    )
                 except Exception:
                     pass
                 continue
@@ -4266,10 +4988,14 @@ async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) ->
                         metadata={"space_id": int(sp.id), "terminal_id": tid},
                     )
                     try:
-                        await conn.request_terminal_input(terminal_id=tid, data=raw, timeout_seconds=10.0)
+                        await conn.request_terminal_input(
+                            terminal_id=tid, data=raw, timeout_seconds=10.0
+                        )
                     except Exception as e:
                         # Companion 侧 session 可能已丢失（例如 Companion 重启），避免前端进入“立刻断开-重连”死循环。
-                        await websocket.send_json({"type": "error", "error": f"terminal unavailable: {e}"})
+                        await websocket.send_json(
+                            {"type": "error", "error": f"terminal unavailable: {e}"}
+                        )
                         await websocket.close(code=4404)
                         return
             elif typ == "resize":
@@ -4277,16 +5003,22 @@ async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) ->
                 rows = int(msg.get("rows") or 0)
                 if cols > 0 and rows > 0:
                     try:
-                        await conn.request_terminal_resize(terminal_id=tid, cols=cols, rows=rows, timeout_seconds=10.0)
+                        await conn.request_terminal_resize(
+                            terminal_id=tid, cols=cols, rows=rows, timeout_seconds=10.0
+                        )
                     except Exception as e:
-                        await websocket.send_json({"type": "error", "error": f"terminal unavailable: {e}"})
+                        await websocket.send_json(
+                            {"type": "error", "error": f"terminal unavailable: {e}"}
+                        )
                         await websocket.close(code=4404)
                         return
 
     sender = asyncio.create_task(_sender(), name=f"term-ws-send:{tid}")
     receiver = asyncio.create_task(_receiver(), name=f"term-ws-recv:{tid}")
     try:
-        done, pending = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_EXCEPTION)
+        done, pending = await asyncio.wait(
+            {sender, receiver}, return_when=asyncio.FIRST_EXCEPTION
+        )
         for tsk in pending:
             tsk.cancel()
         for tsk in done:
@@ -4323,8 +5055,12 @@ def agent_sessions_list(space_id: int) -> dict:
                 "session_id": ss.session_id,
                 "status": ss.status,
                 "agent_type": ss.agent_type,
-                "created_at": ss.created_at.isoformat() if hasattr(ss.created_at, "isoformat") else str(ss.created_at),
-                "updated_at": ss.updated_at.isoformat() if hasattr(ss.updated_at, "isoformat") else str(ss.updated_at),
+                "created_at": ss.created_at.isoformat()
+                if hasattr(ss.created_at, "isoformat")
+                else str(ss.created_at),
+                "updated_at": ss.updated_at.isoformat()
+                if hasattr(ss.updated_at, "isoformat")
+                else str(ss.updated_at),
             }
             for ss in sessions
         ],
@@ -4380,7 +5116,9 @@ def agent_session_messages(space_id: int, session_id: str) -> dict:
         raise HTTPException(status_code=400, detail="session_id is required")
 
     with session_scope() as s:
-        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        sess = (
+            s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        )
         if sess is None or int(sess.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Agent session not found")
         msgs = (
@@ -4401,7 +5139,9 @@ def agent_session_messages(space_id: int, session_id: str) -> dict:
                 "content": m.content,
                 "done": bool(m.done),
                 "error": m.error,
-                "created_at": m.created_at.isoformat() if hasattr(m.created_at, "isoformat") else str(m.created_at),
+                "created_at": m.created_at.isoformat()
+                if hasattr(m.created_at, "isoformat")
+                else str(m.created_at),
             }
             for m in msgs
         ],
@@ -4417,7 +5157,9 @@ async def agent_session_terminate(space_id: int, session_id: str) -> dict:
         raise HTTPException(status_code=400, detail="session_id is required")
 
     with session_scope() as s:
-        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        sess = (
+            s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        )
         if sess is None or int(sess.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Agent session not found")
 
@@ -4427,7 +5169,9 @@ async def agent_session_terminate(space_id: int, session_id: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Companion Agent 终止失败：{e}")
 
     with session_scope() as s:
-        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        sess = (
+            s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        )
         if sess is not None:
             sess.status = "terminated"
             s.add(sess)
@@ -4463,15 +5207,21 @@ async def agent_session_send(request: Request, space_id: int, session_id: str) -
 
     # 校验 session 归属
     with session_scope() as s:
-        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        sess = (
+            s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        )
         if sess is None or int(sess.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Agent session not found")
 
-        user_msg = AgentMessage(session_id=sid, role="user", content=user_text, request_id="", done=True)
+        user_msg = AgentMessage(
+            session_id=sid, role="user", content=user_text, request_id="", done=True
+        )
         s.add(user_msg)
 
         rid = str(uuid.uuid4())
-        asst_msg = AgentMessage(session_id=sid, role="assistant", content="", request_id=rid, done=False)
+        asst_msg = AgentMessage(
+            session_id=sid, role="assistant", content="", request_id=rid, done=False
+        )
         s.add(asst_msg)
         s.flush()
 
@@ -4492,7 +5242,9 @@ async def agent_session_send(request: Request, space_id: int, session_id: str) -
     )
 
     try:
-        await conn.request_agent_send(request_id=rid, session_id=sid, prompt=injected, timeout_seconds=10.0)
+        await conn.request_agent_send(
+            request_id=rid, session_id=sid, prompt=injected, timeout_seconds=10.0
+        )
     except CompanionGrpcError as e:
         # 标记 assistant 消息失败并通过 SSE 通知
         with session_scope() as s:
@@ -4533,14 +5285,21 @@ async def agent_session_sse(space_id: int, session_id: str) -> StreamingResponse
         raise HTTPException(status_code=400, detail="session_id is required")
 
     with session_scope() as s:
-        sess = s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        sess = (
+            s.query(AgentSession).filter(AgentSession.session_id == sid).one_or_none()
+        )
         if sess is None or int(sess.space_id) != int(sp.id):
             raise HTTPException(status_code=404, detail="Agent session not found")
 
     async def _gen():
         q = await _agent_sse_subscribe(sid)
         try:
-            yield "event: hello\n" + "data: " + json.dumps({"session_id": sid}, ensure_ascii=False) + "\n\n"
+            yield (
+                "event: hello\n"
+                + "data: "
+                + json.dumps({"session_id": sid}, ensure_ascii=False)
+                + "\n\n"
+            )
             while True:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=15.0)
@@ -4548,7 +5307,14 @@ async def agent_session_sse(space_id: int, session_id: str) -> StreamingResponse
                     yield ": ping\n\n"
                     continue
                 et = str(ev.get("type") or "message")
-                yield "event: " + et + "\n" + "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
+                yield (
+                    "event: "
+                    + et
+                    + "\n"
+                    + "data: "
+                    + json.dumps(ev, ensure_ascii=False)
+                    + "\n\n"
+                )
         finally:
             await _agent_sse_unsubscribe(sid, q)
 

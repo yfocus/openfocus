@@ -1,37 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import logging
-import os
 import mimetypes
+import os
+import pty
 import secrets
 import string
+import struct
 import subprocess
 import sys
-import threading
-import time
-from pathlib import Path
-import uuid
-import contextlib
-
-import fcntl
-import pty
-import struct
 import termios
+import threading
+import uuid
+from pathlib import Path
+from typing import AsyncIterator
 
 import grpc
 
 from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
 
-
 LOG = logging.getLogger("openfocus.companion")
 
 
 def _setup_logging() -> None:
-    level_s = str(os.environ.get("OPENFOCUS_COMPANION_LOG_LEVEL") or "INFO").upper().strip()
+    level_s = (
+        str(os.environ.get("OPENFOCUS_COMPANION_LOG_LEVEL") or "INFO").upper().strip()
+    )
     level = getattr(logging, level_s, logging.INFO)
     # Companion 通常作为独立进程运行：直接输出到 stdout，便于用户排查。
     logging.basicConfig(
@@ -49,7 +49,9 @@ def _now_ms() -> int:
 
 
 def _state_path() -> Path:
-    p = Path(os.environ.get("OPENFOCUS_COMPANION_STATE", "~/.openfocus/companion_state.json"))
+    p = Path(
+        os.environ.get("OPENFOCUS_COMPANION_STATE", "~/.openfocus/companion_state.json")
+    )
     p = p.expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -91,7 +93,9 @@ class _CompanionRuntime:
         self.server_companion_id = int(st.get("server_companion_id") or 0)
         self.device_id = str(st.get("device_id") or _gen_device_id())
         self.auth_token = str(st.get("auth_token") or "")
-        self.name = str(st.get("name") or os.environ.get("OPENFOCUS_COMPANION_NAME") or "local")
+        self.name = str(
+            st.get("name") or os.environ.get("OPENFOCUS_COMPANION_NAME") or "local"
+        )
 
         # 配对码：
         # - 每次用户点击“认证”后生成一个，有效期 10 分钟
@@ -138,7 +142,12 @@ class _CompanionRuntime:
                 self._emit_pair_code()
             return
 
-        if not force and self._pair_code and self._pair_code_expire_at and _utcnow() < self._pair_code_expire_at:
+        if (
+            not force
+            and self._pair_code
+            and self._pair_code_expire_at
+            and _utcnow() < self._pair_code_expire_at
+        ):
             return
 
         old = self._pair_code
@@ -158,13 +167,23 @@ class _CompanionRuntime:
         - force_new=False：仅确保未过期
         """
         with self._lock:
-            if force_new or (not self._pair_code) or (self._pair_code_expire_at and _utcnow() >= self._pair_code_expire_at):
+            if (
+                force_new
+                or (not self._pair_code)
+                or (
+                    self._pair_code_expire_at and _utcnow() >= self._pair_code_expire_at
+                )
+            ):
                 self._rotate_code(force=True)
             else:
                 self._rotate_code(force=False)
             exp = self._pair_code_expire_at or (_utcnow() + dt.timedelta(minutes=10))
             try:
-                LOG.info("生成/返回配对码 force_new=%s expires_at=%s", bool(force_new), exp.isoformat())
+                LOG.info(
+                    "生成/返回配对码 force_new=%s expires_at=%s",
+                    bool(force_new),
+                    exp.isoformat(),
+                )
             except Exception:
                 pass
             return self._pair_code, exp
@@ -193,7 +212,10 @@ class _CompanionRuntime:
                 self.auth_token = _gen_token()
                 self._persist()
             try:
-                LOG.info("配对成功：已生成/复用 auth_token（长度=%s）", len(self.auth_token or ""))
+                LOG.info(
+                    "配对成功：已生成/复用 auth_token（长度=%s）",
+                    len(self.auth_token or ""),
+                )
             except Exception:
                 pass
             return self.auth_token
@@ -204,7 +226,9 @@ _setup_logging()
 
 
 def _openfocus_grpc_addr() -> str:
-    return str(os.environ.get("OPENFOCUS_SERVER_GRPC_ADDR") or "127.0.0.1:17891").strip()
+    return str(
+        os.environ.get("OPENFOCUS_SERVER_GRPC_ADDR") or "127.0.0.1:17891"
+    ).strip()
 
 
 def _capabilities() -> list[str]:
@@ -217,7 +241,9 @@ def _coco_bin() -> str:
 
 
 class _AgentSessionRuntime:
-    def __init__(self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str) -> None:
+    def __init__(
+        self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str
+    ) -> None:
         self.session_id = session_id
         self.root_path = root_path
         self.agent_type = agent_type
@@ -231,7 +257,9 @@ class _AgentManager:
         self._lock = asyncio.Lock()
         self._sessions: dict[str, _AgentSessionRuntime] = {}
 
-    async def start(self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str) -> str:
+    async def start(
+        self, *, session_id: str, root_path: str, agent_type: str, task_public_id: str
+    ) -> str:
         sid = (session_id or "").strip() or str(uuid.uuid4())
         async with self._lock:
             self._sessions[sid] = _AgentSessionRuntime(
@@ -251,7 +279,14 @@ class _AgentManager:
         if rt and rt._running and not rt._running.done():
             rt._running.cancel()
 
-    async def send(self, *, request_id: str, session_id: str, prompt: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+    async def send(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        prompt: str,
+        out_q: asyncio.Queue[pb2.ClientToServer],
+    ) -> None:
         rid = (request_id or "").strip()
         if not rid:
             rid = str(uuid.uuid4())
@@ -294,7 +329,13 @@ class _AgentManager:
         if (os.environ.get("OPENFOCUS_TEST_AGENT_ECHO") or "").strip() == "1":
             await out_q.put(
                 pb2.ClientToServer(
-                    agent_chunk=pb2.AgentChunk(request_id=rid, session_id=rt.session_id, ok=True, text=prompt, done=True)
+                    agent_chunk=pb2.AgentChunk(
+                        request_id=rid,
+                        session_id=rt.session_id,
+                        ok=True,
+                        text=prompt,
+                        done=True,
+                    )
                 )
             )
             return
@@ -428,8 +469,12 @@ class _AgentManager:
                     )
 
         # stdout/stderr 都作为可见文本 chunk 上报（便于排查）
-        pump_out = asyncio.create_task(_pump(proc.stdout), name=f"agent-stdout:{rt.session_id}")
-        pump_err = asyncio.create_task(_pump(proc.stderr), name=f"agent-stderr:{rt.session_id}")
+        pump_out = asyncio.create_task(
+            _pump(proc.stdout), name=f"agent-stdout:{rt.session_id}"
+        )
+        pump_err = asyncio.create_task(
+            _pump(proc.stderr), name=f"agent-stderr:{rt.session_id}"
+        )
 
         try:
             timeout_s = int(os.environ.get("OPENFOCUS_AGENT_TIMEOUT_SECONDS") or "600")
@@ -438,7 +483,11 @@ class _AgentManager:
                 rc = await asyncio.wait_for(proc.wait(), timeout=float(timeout_s))
             except asyncio.TimeoutError:
                 try:
-                    LOG.error("agent 超时：timeout_s=%s session_id=%s", timeout_s, rt.session_id)
+                    LOG.error(
+                        "agent 超时：timeout_s=%s session_id=%s",
+                        timeout_s,
+                        rt.session_id,
+                    )
                 except Exception:
                     pass
                 try:
@@ -447,7 +496,9 @@ class _AgentManager:
                     pass
                 # 尽量等待 pump 结束，避免任务泄露
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(asyncio.gather(pump_out, pump_err), timeout=1.0)
+                    await asyncio.wait_for(
+                        asyncio.gather(pump_out, pump_err), timeout=1.0
+                    )
                 await out_q.put(
                     pb2.ClientToServer(
                         agent_chunk=pb2.AgentChunk(
@@ -525,7 +576,13 @@ class _TerminalManager:
         self._lock = asyncio.Lock()
         self._sessions: dict[str, _TerminalSession] = {}
 
-    async def start(self, *, terminal_id: str, root_path: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> str:
+    async def start(
+        self,
+        *,
+        terminal_id: str,
+        root_path: str,
+        out_q: asyncio.Queue[pb2.ClientToServer],
+    ) -> str:
         tid = (terminal_id or "").strip() or str(uuid.uuid4())
         rp = str(root_path or "").strip()
         if not rp:
@@ -546,7 +603,9 @@ class _TerminalManager:
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
             await out_q.put(
                 pb2.ClientToServer(
-                    terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"terminal-ready\n", closed=False)
+                    terminal_output=pb2.TerminalOutput(
+                        terminal_id=tid, data=b"terminal-ready\n", closed=False
+                    )
                 )
             )
             return tid
@@ -602,7 +661,9 @@ class _TerminalManager:
         loop.add_reader(fd, _on_readable)
         return tid
 
-    async def stop(self, *, terminal_id: str, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+    async def stop(
+        self, *, terminal_id: str, out_q: asyncio.Queue[pb2.ClientToServer]
+    ) -> None:
         tid = (terminal_id or "").strip()
         if not tid:
             raise ValueError("terminal_id is required")
@@ -616,7 +677,13 @@ class _TerminalManager:
             return
 
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
-            await out_q.put(pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"", closed=True)))
+            await out_q.put(
+                pb2.ClientToServer(
+                    terminal_output=pb2.TerminalOutput(
+                        terminal_id=tid, data=b"", closed=True
+                    )
+                )
+            )
             return
 
         try:
@@ -630,9 +697,17 @@ class _TerminalManager:
         except Exception:
             pass
         sess.close()
-        await out_q.put(pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=b"", closed=True)))
+        await out_q.put(
+            pb2.ClientToServer(
+                terminal_output=pb2.TerminalOutput(
+                    terminal_id=tid, data=b"", closed=True
+                )
+            )
+        )
 
-    async def input(self, *, terminal_id: str, data: bytes, out_q: asyncio.Queue[pb2.ClientToServer]) -> None:
+    async def input(
+        self, *, terminal_id: str, data: bytes, out_q: asyncio.Queue[pb2.ClientToServer]
+    ) -> None:
         tid = (terminal_id or "").strip()
         if not tid:
             raise ValueError("terminal_id is required")
@@ -652,7 +727,11 @@ class _TerminalManager:
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
             # echo：直接把输入回传
             await out_q.put(
-                pb2.ClientToServer(terminal_output=pb2.TerminalOutput(terminal_id=tid, data=raw, closed=False))
+                pb2.ClientToServer(
+                    terminal_output=pb2.TerminalOutput(
+                        terminal_id=tid, data=raw, closed=False
+                    )
+                )
             )
             return
 
@@ -679,7 +758,9 @@ class _TerminalManager:
             return
         if LOG.isEnabledFor(logging.DEBUG):
             try:
-                LOG.debug("terminal_resize：terminal_id=%s cols=%s rows=%s", tid, cols, rows)
+                LOG.debug(
+                    "terminal_resize：terminal_id=%s cols=%s rows=%s", tid, cols, rows
+                )
             except Exception:
                 pass
         winsz = struct.pack("HHHH", rows, cols, 0, 0)
@@ -731,7 +812,7 @@ def _resolve_inside_root(*, root_path: str, rel_path: str) -> Path:
         raise ValueError("invalid path")
 
     rel = raw.lstrip("/")
-    p = (root / rel)
+    p = root / rel
 
     # 先 normalize，再做 resolve（包含 symlink）检查越界
     try:
@@ -778,7 +859,9 @@ def _list_dir(*, root_path: str, rel_path: str) -> tuple[str, list[pb2.FileEntry
     return str(rel_path or ""), entries
 
 
-def _read_text(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, str, bool, str]:
+def _read_text(
+    *, root_path: str, rel_path: str, max_bytes: int
+) -> tuple[str, str, bool, str]:
     p = _resolve_inside_root(root_path=root_path, rel_path=rel_path)
     if not p.exists() or not p.is_file():
         raise ValueError("file not found")
@@ -799,7 +882,9 @@ def _read_text(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, s
     return str(rel_path or ""), text, bool(truncated), mime
 
 
-def _read_raw(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, bytes, str]:
+def _read_raw(
+    *, root_path: str, rel_path: str, max_bytes: int
+) -> tuple[str, bytes, str]:
     p = _resolve_inside_root(root_path=root_path, rel_path=rel_path)
     if not p.exists() or not p.is_file():
         raise ValueError("file not found")
@@ -815,7 +900,9 @@ def _read_raw(*, root_path: str, rel_path: str, max_bytes: int) -> tuple[str, by
     return str(rel_path or ""), raw, mime
 
 
-async def run_companion(*, grpc_addr: str | None = None, stop_event: asyncio.Event | None = None) -> None:
+async def run_companion(
+    *, grpc_addr: str | None = None, stop_event: asyncio.Event | None = None
+) -> None:
     """运行 Companion 主循环（gRPC 客户端）。
 
     - Companion 作为客户端发起到 OpenFocus 的长连接
@@ -883,7 +970,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
 
             get_task = asyncio.create_task(out_q.get())
             stop_task = asyncio.create_task(stop_event.wait())
-            done, pending = await asyncio.wait({get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(
+                {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
             for t in pending:
                 t.cancel()
 
@@ -902,7 +991,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
             except Exception:
                 pass
 
-        cancel_task = asyncio.create_task(_cancel_on_stop(), name="companion-cancel-on-stop")
+        cancel_task = asyncio.create_task(
+            _cancel_on_stop(), name="companion-cancel-on-stop"
+        )
         try:
             async for msg in call:
                 which = msg.WhichOneof("msg")
@@ -919,7 +1010,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                 if which == "pairing_code":
                     req = msg.pairing_code
                     try:
-                        LOG.info("收到 pairing_code 请求：force_new=%s", bool(req.force_new))
+                        LOG.info(
+                            "收到 pairing_code 请求：force_new=%s", bool(req.force_new)
+                        )
                         code, exp = RUNTIME.current_code(force_new=bool(req.force_new))
                         resp = pb2.PairingCodeResponse(
                             request_id=req.request_id,
@@ -932,14 +1025,18 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             LOG.exception("pairing_code 处理失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.PairingCodeResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.PairingCodeResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(pairing_code_resp=resp))
                     continue
                 if which == "ping":
                     p = msg.ping
                     await out_q.put(
                         pb2.ClientToServer(
-                            pong=pb2.Pong(ts_unix_ms=_now_ms(), ping_ts_unix_ms=p.ts_unix_ms)
+                            pong=pb2.Pong(
+                                ts_unix_ms=_now_ms(), ping_ts_unix_ms=p.ts_unix_ms
+                            )
                         )
                     )
                     continue
@@ -949,13 +1046,17 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                     try:
                         LOG.info("收到 pair 请求")
                         token = RUNTIME.confirm_pair(req.code)
-                        resp = pb2.PairResponse(request_id=req.request_id, ok=True, auth_token=token)
+                        resp = pb2.PairResponse(
+                            request_id=req.request_id, ok=True, auth_token=token
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("pair 处理失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.PairResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.PairResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(pair_resp=resp))
                     continue
 
@@ -966,35 +1067,52 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                         if not (RUNTIME.auth_token or "").strip():
                             raise RuntimeError("Companion 尚未配对")
                         path = _choose_directory()
-                        resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=True, path=path)
+                        resp = pb2.ChooseDirectoryResponse(
+                            request_id=req.request_id, ok=True, path=path
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("choose_directory 处理失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.ChooseDirectoryResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.ChooseDirectoryResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(choose_directory_resp=resp))
                     continue
 
                 if which == "files_list":
                     req = msg.files_list
                     try:
-                        LOG.info("收到 files_list：rel_path=%s", str(req.rel_path or ""))
-                        path, entries = _list_dir(root_path=req.root_path, rel_path=req.rel_path)
-                        resp = pb2.FilesListResponse(request_id=req.request_id, ok=True, path=path, entries=entries)
+                        LOG.info(
+                            "收到 files_list：rel_path=%s", str(req.rel_path or "")
+                        )
+                        path, entries = _list_dir(
+                            root_path=req.root_path, rel_path=req.rel_path
+                        )
+                        resp = pb2.FilesListResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            path=path,
+                            entries=entries,
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("files_list 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.FilesListResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.FilesListResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(files_list_resp=resp))
                     continue
 
                 if which == "files_read":
                     req = msg.files_read
                     try:
-                        LOG.info("收到 files_read：rel_path=%s", str(req.rel_path or ""))
+                        LOG.info(
+                            "收到 files_read：rel_path=%s", str(req.rel_path or "")
+                        )
                         path, content, truncated, mime = _read_text(
                             root_path=req.root_path,
                             rel_path=req.rel_path,
@@ -1013,7 +1131,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             LOG.exception("files_read 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.FilesReadResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.FilesReadResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(files_read_resp=resp))
                     continue
 
@@ -1038,7 +1158,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             LOG.exception("files_raw 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.FilesRawResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.FilesRawResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(files_raw_resp=resp))
                     continue
 
@@ -1057,112 +1179,167 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             agent_type=req.agent_type,
                             task_public_id=req.task_public_id,
                         )
-                        resp = pb2.AgentStartResponse(request_id=req.request_id, ok=True, session_id=sid)
+                        resp = pb2.AgentStartResponse(
+                            request_id=req.request_id, ok=True, session_id=sid
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("agent_start 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.AgentStartResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.AgentStartResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(agent_start_resp=resp))
                     continue
 
                 if which == "agent_terminate":
                     req = msg.agent_terminate
                     try:
-                        LOG.info("agent_terminate: session_id=%s", str(req.session_id or ""))
+                        LOG.info(
+                            "agent_terminate: session_id=%s", str(req.session_id or "")
+                        )
                         await agent_mgr.terminate(session_id=req.session_id)
-                        resp = pb2.AgentTerminateResponse(request_id=req.request_id, ok=True)
+                        resp = pb2.AgentTerminateResponse(
+                            request_id=req.request_id, ok=True
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("agent_terminate 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.AgentTerminateResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.AgentTerminateResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(agent_terminate_resp=resp))
                     continue
 
                 if which == "agent_send":
                     req = msg.agent_send
                     try:
-                        LOG.info("agent_send: request_id=%s session_id=%s", str(req.request_id or ""), str(req.session_id or ""))
+                        LOG.info(
+                            "agent_send: request_id=%s session_id=%s",
+                            str(req.request_id or ""),
+                            str(req.session_id or ""),
+                        )
                         if not (RUNTIME.auth_token or "").strip():
                             raise RuntimeError("Companion 尚未配对")
                         # 先 ACK，再异步跑 agent 并通过 AgentChunk 回传
-                        await agent_mgr.send(request_id=req.request_id, session_id=req.session_id, prompt=req.prompt, out_q=out_q)
+                        await agent_mgr.send(
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            prompt=req.prompt,
+                            out_q=out_q,
+                        )
                         resp = pb2.AgentSendResponse(request_id=req.request_id, ok=True)
                     except Exception as e:
                         try:
                             LOG.exception("agent_send 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.AgentSendResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.AgentSendResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(agent_send_resp=resp))
                     continue
 
                 if which == "terminal_start":
                     req = msg.terminal_start
                     try:
-                        LOG.info("terminal_start: terminal_id=%s", str(req.terminal_id or ""))
+                        LOG.info(
+                            "terminal_start: terminal_id=%s", str(req.terminal_id or "")
+                        )
                         if not (RUNTIME.auth_token or "").strip():
                             raise RuntimeError("Companion 尚未配对")
-                        tid = await term_mgr.start(terminal_id=req.terminal_id, root_path=req.root_path, out_q=out_q)
-                        resp = pb2.TerminalStartResponse(request_id=req.request_id, ok=True, terminal_id=tid)
+                        tid = await term_mgr.start(
+                            terminal_id=req.terminal_id,
+                            root_path=req.root_path,
+                            out_q=out_q,
+                        )
+                        resp = pb2.TerminalStartResponse(
+                            request_id=req.request_id, ok=True, terminal_id=tid
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("terminal_start 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.TerminalStartResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.TerminalStartResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(terminal_start_resp=resp))
                     continue
 
                 if which == "terminal_stop":
                     req = msg.terminal_stop
                     try:
-                        LOG.info("terminal_stop: terminal_id=%s", str(req.terminal_id or ""))
+                        LOG.info(
+                            "terminal_stop: terminal_id=%s", str(req.terminal_id or "")
+                        )
                         await term_mgr.stop(terminal_id=req.terminal_id, out_q=out_q)
-                        resp = pb2.TerminalStopResponse(request_id=req.request_id, ok=True)
+                        resp = pb2.TerminalStopResponse(
+                            request_id=req.request_id, ok=True
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("terminal_stop 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.TerminalStopResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.TerminalStopResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(terminal_stop_resp=resp))
                     continue
 
                 if which == "terminal_input":
                     req = msg.terminal_input
                     try:
-                        await term_mgr.input(terminal_id=req.terminal_id, data=bytes(req.data), out_q=out_q)
-                        resp = pb2.TerminalInputResponse(request_id=req.request_id, ok=True)
+                        await term_mgr.input(
+                            terminal_id=req.terminal_id,
+                            data=bytes(req.data),
+                            out_q=out_q,
+                        )
+                        resp = pb2.TerminalInputResponse(
+                            request_id=req.request_id, ok=True
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("terminal_input 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.TerminalInputResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.TerminalInputResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(terminal_input_resp=resp))
                     continue
 
                 if which == "terminal_resize":
                     req = msg.terminal_resize
                     try:
-                        await term_mgr.resize(terminal_id=req.terminal_id, cols=req.cols, rows=req.rows)
-                        resp = pb2.TerminalResizeResponse(request_id=req.request_id, ok=True)
+                        await term_mgr.resize(
+                            terminal_id=req.terminal_id, cols=req.cols, rows=req.rows
+                        )
+                        resp = pb2.TerminalResizeResponse(
+                            request_id=req.request_id, ok=True
+                        )
                     except Exception as e:
                         try:
                             LOG.exception("terminal_resize 失败：%s", e)
                         except Exception:
                             pass
-                        resp = pb2.TerminalResizeResponse(request_id=req.request_id, ok=False, error=str(e))
+                        resp = pb2.TerminalResizeResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
                     await out_q.put(pb2.ClientToServer(terminal_resize_resp=resp))
                     continue
         except grpc.aio.AioRpcError as e:
             # 连接断开/服务端关闭
             try:
-                LOG.warning("gRPC 连接断开：code=%s detail=%s", getattr(e, "code", lambda: None)(), getattr(e, "details", lambda: "")())
+                LOG.warning(
+                    "gRPC 连接断开：code=%s detail=%s",
+                    getattr(e, "code", lambda: None)(),
+                    getattr(e, "details", lambda: "")(),
+                )
             except Exception:
                 pass
             return
