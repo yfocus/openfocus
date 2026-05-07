@@ -1,0 +1,17 @@
+.idea/
+.data/
+.env
+.env.*
+!.env-default
+
+.DS_Store
+Thumbs.db
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+.coverage
+htmlcov/
