@@ -80,7 +80,7 @@
         align-items: center;
         gap: 10px;
       }
-      .brand .brand-logo{ width: 36px; height: 36px; display:block; flex: 0 0 auto; }
+      .brand .brand-logo{ width: 72px; height: 72px; display:block; flex: 0 0 auto; }
       .brand .name { letter-spacing: 0.2px; font-size: 20px; line-height: 1; }
       .brand .brand-open { color: rgba(120, 165, 186, 0.92); }
       .brand .brand-focus { color: var(--warn); }
@@ -411,7 +411,7 @@
     </style>
   </head>
   {% set _path = (request.url.path if request and request.url else '') %}
-  <body class="{{ 'fullscreen' if _path == '/goals' else ('fullscreen wide' if _path.endswith('/agent_space') else '') }}">
+  <body class="{{ 'fullscreen' if _path in ['/goals', '/inspirations'] else ('fullscreen wide' if _path.endswith('/agent_space') else '') }}">
     <div class="app">
       <div class="topbar">
         <div class="brand">
@@ -422,6 +422,8 @@
           <a href="/goals">Dashboard</a>
           <span class="nav-sep">|</span>
           <a href="/goals?new=1" id="nav-new-goal">New Goal</a>
+          <span class="nav-sep">|</span>
+          <a href="/inspirations">Inspiration</a>
           <span class="nav-sep">|</span>
           <a href="/memory">Memory</a>
           <span class="nav-sep">|</span>

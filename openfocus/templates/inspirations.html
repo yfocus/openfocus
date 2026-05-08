@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block content %}
+  <style>
+    .insp-page{ display:grid; grid-template-columns: 360px 1fr; gap: 18px; align-items:start; }
+    .insp-panel{ border: 1px solid rgba(255,255,255,0.14); border-radius: 16px; background: rgba(0,0,0,0.34); overflow: hidden; }
+    .insp-pad{ padding: 16px; }
+    .insp-title{ font-size: 18px; font-weight: 700; color: rgba(255,209,102,0.92); }
+    .insp-sub{ margin-top: 6px; color: rgba(215,255,233,0.58); font-size: 12px; }
+    .insp-list{ display:flex; flex-direction:column; gap: 10px; }
+    .insp-card{ display:block; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.03); color: inherit; text-decoration: none; }
+    .insp-card:hover{ background: rgba(255,255,255,0.05); }
+    .insp-card-title{ font-weight: 700; }
+    .insp-card-meta{ margin-top: 6px; font-size: 12px; color: rgba(215,255,233,0.58); display:flex; gap: 8px; flex-wrap:wrap; }
+    .insp-form{ display:flex; flex-direction:column; gap: 12px; }
+    .insp-empty{ padding: 16px; border-radius: 14px; border: 1px dashed rgba(255,255,255,0.14); color: rgba(215,255,233,0.6); }
+    @media (max-width: 960px){ .insp-page{ grid-template-columns: 1fr; } }
+  </style>
+
+  <div class="insp-page">
+    <section class="insp-panel">
+      <div class="insp-pad">
+        <div class="insp-title">New Inspiration</div>
+        <div class="insp-sub">Create a workspace for idea incubation, draft generation, and publish-ready planning.</div>
+      </div>
+      <div class="divider"></div>
+      <div class="insp-pad">
+        <form id="create-inspiration-form" class="insp-form">
+          <div>
+            <label for="insp-title">Title</label>
+            <textarea id="insp-title" rows="2" maxlength="512" placeholder="A concise topic or direction..."></textarea>
+          </div>
+          <div>
+            <label for="insp-message">First Note</label>
+            <textarea id="insp-message" rows="7" maxlength="20000" placeholder="What are you exploring, what context matters, and what should this become?"></textarea>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:10px; align-items:center;">
+            <span id="insp-create-hint" class="muted2" style="display:none;"><span class="spin"></span> Creating…</span>
+            <button type="submit" id="insp-create-btn" class="btn-primary">Create Space</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="insp-panel">
+      <div class="insp-pad">
+        <div class="insp-title">Inspiration Spaces</div>
+        <div class="insp-sub">Published spaces stay read-only. Fork them to continue thinking in a new branch.</div>
+      </div>
+      <div class="divider"></div>
+      <div class="insp-pad">
+        {% if spaces %}
+          <div class="insp-list">
+            {% for space in spaces %}
+              <a href="/inspirations/{{ space.id }}" class="insp-card">
+                <div class="insp-card-title">{{ space.title }}</div>
+                <div class="insp-card-meta">
+                  <span>{{ space.status }}</span>
+                  <span>{{ space.message_turn_count or 0 }} turns</span>
+                  {% if space.published_goal_id %}<span>Goal #{{ space.published_goal_id }}</span>{% endif %}
+                  <span>{{ space.last_activity_at|human_since if space.last_activity_at else 'just now' }}</span>
+                </div>
+              </a>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="insp-empty">No Inspiration space exists yet. Create one to start collecting context, discussing options, and turning the discussion into a publishable draft.</div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function(){
+      const form = document.getElementById('create-inspiration-form');
+      const btn = document.getElementById('insp-create-btn');
+      const hint = document.getElementById('insp-create-hint');
+      if(!form || !btn || !hint) return;
+      form.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const title = String(document.getElementById('insp-title')?.value || '').trim();
+        const initialMessage = String(document.getElementById('insp-message')?.value || '').trim();
+        if(!title && !initialMessage){
+          toast('请填写 Title 或 First Note');
+          return;
+        }
+        btn.disabled = true;
+        hint.style.display = 'inline-flex';
+        try{
+          const r = await fetch('/api/inspirations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, initial_message: initialMessage })
+          });
+          if(!r.ok) throw new Error(await r.text().catch(()=> 'create failed'));
+          const data = await r.json();
+          const id = data && data.item ? data.item.id : 0;
+          if(!id) throw new Error('missing space id');
+          location.href = '/inspirations/' + id;
+        }catch(err){
+          toast(String(err && err.message ? err.message : err || 'create failed'));
+          btn.disabled = false;
+          hint.style.display = 'none';
+        }
+      });
+    })();
+  </script>
+{% endblock %}

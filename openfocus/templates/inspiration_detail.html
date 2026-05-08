@@ -1,0 +1,987 @@
+{% extends "base.html" %}
+{% block content %}
+  {% set is_busy = is_waiting or is_publishing %}
+  <style>
+    #insp-page-root{ display:flex; flex-direction:column; min-height:0; }
+    .insp-detail{ display:grid; grid-template-columns: 300px minmax(0, 1fr); gap:16px; align-items:stretch; min-height:0; height:calc(100vh - 124px); }
+    .insp-shell{ border: 1px solid rgba(255,255,255,0.14); border-radius:16px; background:rgba(0,0,0,0.34); overflow:hidden; }
+    .insp-shell.stretch{ display:flex; flex-direction:column; height:100%; min-height:0; }
+    .insp-shell > .divider{ height:1px; margin:0; background:rgba(255,255,255,0.10); }
+    .insp-head{ padding:10px 12px 8px; display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+    .insp-head.compact{ padding:8px 12px 6px; }
+    .insp-title{ font-size:18px; font-weight:700; color:rgba(255,209,102,0.92); }
+    .insp-meta{ margin-top:6px; font-size:12px; color:rgba(215,255,233,0.58); display:flex; flex-wrap:wrap; gap:8px; }
+    .insp-pad{ padding:12px; }
+    .insp-panel-body{ flex:1; min-height:0; display:flex; flex-direction:column; gap:8px; padding:8px 12px 12px; overflow:hidden; }
+    .insp-list{ display:flex; flex-direction:column; gap:10px; }
+    .insp-list-scroll{ flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; }
+    .insp-link{ display:block; padding:12px 14px; border-radius:14px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.03); color:inherit; text-decoration:none; }
+    .insp-link.active{ border-color:rgba(0,229,255,0.40); background:rgba(0,229,255,0.08); }
+    .insp-link[aria-disabled="true"]{ pointer-events:none; opacity:0.72; }
+    .insp-link-title{ display:flex; align-items:center; gap:8px; }
+    .insp-status-dot{ width:8px; height:8px; border-radius:999px; flex:0 0 auto; margin-top:1px; }
+    .insp-status-dot.open{ background:#29d17d; box-shadow:0 0 0 2px rgba(41,209,125,0.16); }
+    .insp-status-dot.closed{ background:#ff5b5b; box-shadow:0 0 0 2px rgba(255,91,91,0.14); }
+    .insp-status-dot.published{ background:#8c949e; box-shadow:0 0 0 2px rgba(140,148,158,0.12); }
+    .insp-create-btn{ background:rgba(41,209,125,0.24); border:1px solid rgba(41,209,125,0.55); color:#fff; }
+    .insp-create-btn:hover{ background:rgba(41,209,125,0.30); }
+    .stack{ display:flex; flex-direction:column; gap:14px; min-height:0; }
+    .insp-work-area{ position:relative; display:grid; grid-template-columns:minmax(0, 1fr) 360px; gap:16px; align-items:stretch; min-height:0; height:100%; }
+    .insp-work-area.compact{ grid-template-columns:minmax(0, 1fr); }
+    .chat{ display:flex; flex:1; min-height:220px; flex-direction:column; gap:10px; overflow:auto; padding:14px 16px; }
+    .msg-row{ display:flex; }
+    .msg-row.user{ justify-content:flex-end; }
+    .msg{ max-width:92%; border-radius:14px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.03); }
+    .msg.user{ background:rgba(0,229,255,0.07); border-color:rgba(0,229,255,0.26); }
+    .msg.system{ background:rgba(255,209,102,0.07); border-color:rgba(255,209,102,0.26); }
+    .msg.pending{ background:rgba(255,255,255,0.05); border-color:rgba(255,255,255,0.18); }
+    .msg.error{ background:rgba(255,59,92,0.08); border-color:rgba(255,59,92,0.28); }
+    .msg .pad{ padding:10px 12px; }
+    .msg-role{ font-size:12px; color:rgba(215,255,233,0.58); text-transform:uppercase; }
+    .msg-text{ margin-top:6px; white-space:pre-wrap; }
+    .composer{ padding:14px 16px; border-top:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.22); }
+    .composer textarea{ width:100%; min-height:96px; }
+    .composer-input-row{ display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:12px; align-items:end; }
+    .composer-submit{ min-width:120px; min-height:42px; }
+    .composer-tools{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+    .composer-tool-btn{ padding:4px 10px; font-size:12px; line-height:1.4; border-radius:999px; }
+    .composer-actions{ margin-top:10px; display:flex; justify-content:flex-start; gap:10px; flex-wrap:wrap; align-items:center; }
+    .card{ border:1px solid rgba(255,255,255,0.12); border-radius:14px; background:rgba(255,255,255,0.03); }
+    .card .pad{ padding:10px 10px 8px; }
+    .card-title{ font-weight:700; color:rgba(255,255,255,0.92); }
+    .mini{ margin-top:6px; font-size:12px; color:rgba(215,255,233,0.58); }
+    .resource-preview{ margin-top:4px; position:relative; color:rgba(255,255,255,0.82); font-size:12px; line-height:1.35; white-space:pre-wrap; }
+    .resource-preview a{ color:inherit; text-decoration:none; }
+    .resource-preview-link.collapsed{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .resource-preview-text.collapsed{ max-height:calc(1.35em * 4); overflow:hidden; }
+    .resource-preview-text.collapsed::after{ content:""; position:absolute; left:0; right:0; bottom:0; height:20px; background:linear-gradient(to bottom, rgba(0,0,0,0), rgba(12,18,26,0.96)); pointer-events:none; }
+    .resource-media-preview{ margin-top:6px; position:relative; overflow:hidden; border-radius:10px; }
+    .resource-media-preview.collapsed{ max-height:84px; }
+    .resource-media-preview.collapsed::after{ content:""; position:absolute; left:0; right:0; bottom:0; height:20px; background:linear-gradient(to bottom, rgba(0,0,0,0), rgba(12,18,26,0.96)); }
+    .resource-image{ display:block; width:100%; height:auto; border-radius:10px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.02); }
+    .resource-toolbar{ width:100%; margin-top:6px; display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:8px; align-items:end; }
+    .resource-actions{ display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:flex-end; gap:2px 4px; }
+    .resource-actions .btn-ghost,
+    .resource-actions a.btn-ghost{
+      padding:2px 5px;
+      font-size:11px;
+      line-height:1.05;
+      border-radius:6px;
+      white-space:nowrap;
+    }
+    .resource-toggle{ padding:0; border:none; background:none; color:rgba(0,229,255,0.86); cursor:pointer; justify-self:start; align-self:end; text-align:left; line-height:1.15; }
+    .resource-toggle[hidden]{ display:none; }
+    .resource-send-btn{ min-width:auto; justify-self:end; align-self:flex-end; }
+    .insp-side{ min-height:0; height:100%; }
+    .resources-scroll{ flex:1; min-height:0; overflow:hidden; padding-right:0; }
+    .resources-items-scroll{ flex:1; min-height:0; height:100%; overflow-y:auto; overflow-x:hidden; padding-right:4px; display:flex; flex-direction:column; gap:6px; }
+    .task-list{ display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+    .task-row{ display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.03); }
+    .task-row .desc{ display:block; margin-top:4px; font-size:12px; color:rgba(215,255,233,0.58); white-space:pre-wrap; }
+    .actions{ display:flex; gap:10px; flex-wrap:wrap; }
+    .draft-card{ margin-top:10px; border:1px solid rgba(255,255,255,0.12); border-radius:12px; background:rgba(255,255,255,0.03); }
+    .draft-card .pad{ padding:12px; }
+    .draft-head{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .draft-title{ font-size:16px; font-weight:700; color:rgba(255,209,102,0.92); }
+    .waiting-note,.busy-note{ color:rgba(255,209,102,0.92); }
+    .empty{ padding:20px; border:1px dashed rgba(255,255,255,0.14); border-radius:12px; color:rgba(215,255,233,0.6); }
+    .empty.center{ min-height:360px; display:flex; align-items:center; justify-content:center; text-align:center; }
+    .modal-backdrop{ position:fixed; inset:0; background:rgba(4,9,14,0.62); display:flex; align-items:center; justify-content:center; z-index:60; }
+    .modal-backdrop[hidden]{ display:none; }
+    .modal-card{ width:min(560px, calc(100vw - 32px)); border:1px solid rgba(255,255,255,0.14); border-radius:18px; background:rgba(10,16,24,0.96); box-shadow:0 18px 48px rgba(0,0,0,0.36); }
+    .modal-pad{ padding:16px; }
+    .modal-form{ display:flex; flex-direction:column; gap:12px; }
+    .modal-actions{ display:flex; justify-content:flex-end; gap:10px; align-items:center; }
+    .publish-mask{ position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; background:rgba(4,9,14,0.38); backdrop-filter:blur(2px); border-radius:18px; }
+    .publish-mask[hidden]{ display:none; }
+    .publish-mask-card{ min-width:240px; padding:18px 20px; border-radius:16px; border:1px solid rgba(255,255,255,0.16); background:rgba(10,16,24,0.94); text-align:center; box-shadow:0 18px 48px rgba(0,0,0,0.30); }
+    .publish-mask-title{ font-size:18px; font-weight:700; color:rgba(255,255,255,0.95); }
+    @media (max-width: 1220px){ .insp-detail{ grid-template-columns:260px 1fr; height:auto; } .insp-work-area{ grid-template-columns:1fr; height:auto; } .insp-side{ height:auto; } }
+    @media (max-width: 840px){ .insp-detail{ grid-template-columns:1fr; height:auto; } }
+  </style>
+
+  <div id="insp-page-root" data-has-space="{{ 'true' if space else 'false' }}" data-is-waiting="{{ 'true' if is_waiting else 'false' }}" data-is-publishing="{{ 'true' if is_publishing else 'false' }}">
+    <div id="insp-create-modal" class="modal-backdrop" hidden>
+      <div class="modal-card">
+        <div class="insp-head">
+          <div><div class="insp-title">Create Space</div></div>
+          <button type="button" class="btn-ghost" id="insp-create-cancel">Cancel</button>
+        </div>
+        <div class="divider"></div>
+        <div class="modal-pad">
+          <form id="create-inspiration-form" class="modal-form">
+            <div>
+              <label for="insp-title">Title</label>
+              <textarea id="insp-title" rows="2" maxlength="512" placeholder="A concise topic or direction..."></textarea>
+            </div>
+            <div>
+              <label for="insp-message">First Note</label>
+              <textarea id="insp-message" rows="7" maxlength="20000" placeholder="What are you exploring, what context matters, and what should this become?"></textarea>
+            </div>
+            <div class="modal-actions">
+              <span id="insp-create-hint" class="muted2" style="display:none;"><span class="spin"></span> Creating…</span>
+              <button type="submit" id="insp-create-btn" class="btn-primary insp-create-btn">Create Space</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div id="insp-resource-modal" class="modal-backdrop" hidden>
+      <div class="modal-card">
+        <div class="insp-head">
+          <div><div class="insp-title" id="insp-resource-modal-title">Add Resource</div></div>
+          <button type="button" class="btn-ghost" id="insp-resource-cancel">Cancel</button>
+        </div>
+        <div class="divider"></div>
+        <div class="modal-pad">
+          <form id="insp-resource-form" class="modal-form">
+            <input id="insp-resource-id" name="resource_id" type="hidden" value="" />
+            <div id="insp-resource-type-wrap">
+              <label for="insp-resource-type">Type</label>
+              <select id="insp-resource-type" name="type" {% if is_busy %}disabled{% endif %}>
+                <option value="text">text</option>
+                <option value="url">url</option>
+                <option value="image">image</option>
+              </select>
+            </div>
+            <div>
+              <label for="insp-resource-name">Name</label>
+              <input id="insp-resource-name" name="name" type="text" maxlength="512" placeholder="Optional label" {% if is_busy %}disabled{% endif %} />
+            </div>
+            <div id="insp-resource-text-wrap">
+              <label for="insp-resource-text">Text</label>
+              <textarea id="insp-resource-text" name="text_content" rows="5" placeholder="Paste notes or supporting context..." {% if is_busy %}readonly disabled{% endif %}></textarea>
+            </div>
+            <div id="insp-resource-url-wrap" style="display:none;">
+              <label for="insp-resource-url">URL</label>
+              <input id="insp-resource-url" name="url_content" type="url" placeholder="https://..." {% if is_busy %}disabled{% endif %} />
+            </div>
+            <div id="insp-resource-file-wrap" style="display:none;">
+              <label for="insp-resource-file">Image</label>
+              <input id="insp-resource-file" name="file" type="file" accept="image/*" {% if is_busy %}disabled{% endif %} />
+            </div>
+            <div class="modal-actions">
+              <span id="insp-resource-hint" class="muted2" style="display:none;"><span class="spin"></span> Uploading…</span>
+              <button type="submit" id="insp-resource-btn" class="btn-primary" {% if is_busy %}disabled{% endif %}>Add Resource</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="insp-detail">
+      <aside class="insp-shell stretch">
+        <div class="insp-head compact">
+          <div><div class="insp-title">Inspiration</div></div>
+        </div>
+        <div class="divider"></div>
+        <div class="insp-panel-body">
+          {% if spaces %}
+            <div class="insp-list insp-list-scroll">
+              {% for item in spaces %}
+                <a href="/inspirations/{{ item.id }}" class="insp-link {{ 'active' if space and item.id == space.id else '' }}">
+                  <div class="insp-link-title">
+                    <span class="insp-status-dot {{ 'published' if item.status == 'published' else ('closed' if item.status == 'closed' else 'open') }}"></span>
+                    <span>{{ item.title }}</span>
+                  </div>
+                  <div class="mini">
+                    {{ item.message_turn_count or 0 }} turns
+                    {% if item.published_goal_id %} · Goal #{{ item.published_goal_id }}{% endif %}
+                  </div>
+                </a>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty">No Inspiration space exists yet. Create one to start collecting context, discussing options, and turning the discussion into a publishable draft.</div>
+          {% endif %}
+          <button type="button" class="btn-primary insp-create-btn" id="insp-open-create-modal" style="margin-top:auto;">Create Space</button>
+        </div>
+      </aside>
+
+      <div class="insp-work-area {{ 'compact' if not space else '' }}" id="insp-work-area">
+        <div id="insp-publish-mask" class="publish-mask" {% if not is_publishing %}hidden{% endif %}>
+          <div class="publish-mask-card">
+            <div class="publish-mask-title"><span class="spin"></span> Publishing...</div>
+            <div class="mini">Locking this Inspiration space and creating the goal/tasks. Please wait.</div>
+          </div>
+        </div>
+
+        <main class="insp-shell stretch">
+          {% if space %}
+            <div class="insp-head">
+              <div>
+                <div class="insp-title">{{ space.title }}</div>
+                <div class="insp-meta">
+                  <span>{{ space.status }}</span>
+                  <span>{{ space.message_turn_count or 0 }} turns</span>
+                  {% if is_waiting %}<span class="waiting-note">waiting for agent</span>{% endif %}
+                  {% if is_publishing %}<span id="insp-publish-state" class="busy-note">publishing</span>{% endif %}
+                  {% if space.forked_from_space_id %}<span>Forked from #{{ space.forked_from_space_id }}</span>{% endif %}
+                  {% if published_goal %}<a href="/goals?goal={{ published_goal.id }}">Goal #{{ published_goal.id }}</a>{% endif %}
+                </div>
+              </div>
+              <div class="actions">
+                {% if space.status == 'open' %}
+                  <button type="button" class="btn-ghost" id="insp-close-space" {% if is_busy %}disabled{% endif %}>Close</button>
+                {% elif space.status == 'closed' %}
+                  <button type="button" class="btn-ghost" id="insp-reopen-space" {% if is_busy %}disabled{% endif %}>Reopen</button>
+                {% endif %}
+                {% if space.status == 'published' %}
+                  <button type="button" class="btn-ghost" id="insp-fork-space" {% if is_publishing %}disabled{% endif %}>Fork</button>
+                {% endif %}
+                {% if space.status != 'published' %}
+                  <button type="button" class="btn-ghost" id="insp-delete-space" {% if is_busy %}disabled{% endif %}>Delete</button>
+                {% endif %}
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div class="chat" id="insp-chat">
+              {% for message in messages %}
+                {% set is_user = (message.role == 'user') %}
+                {% set msg_cls = 'user' if is_user else ('pending' if message.kind == 'pending' else ('error' if message.kind == 'error' else ('system' if message.kind in ['system','published','draft_generated','title_suggestions'] else 'agent'))) %}
+                <div class="msg-row {{ 'user' if is_user else 'agent' }}">
+                  <div class="msg {{ msg_cls }}">
+                    <div class="pad">
+                      <div class="msg-role">{{ 'you' if is_user else message.kind }}</div>
+                      <div class="msg-text">{{ message.content }}</div>
+                      {% if message.kind == 'draft_generated' %}
+                        {% set draft = (message.payload or {}).get('draft') or {} %}
+                        <div class="draft-card">
+                          <div class="pad">
+                            <div class="draft-head">
+                              <div>
+                                <div class="draft-title">{{ draft.get('goal_title') or 'Untitled Goal' }}</div>
+                                <div class="mini">Draft v{{ draft.get('version') or message.draft_version or '?' }}</div>
+                              </div>
+                            </div>
+                            {% if draft.get('goal_description') %}
+                              <div class="resource-preview">{{ draft.get('goal_description') }}</div>
+                            {% endif %}
+                            <div class="task-list">
+                              {% for task in draft.get('tasks') or [] %}
+                                <div class="task-row">
+                                  <div>{{ loop.index }}.</div>
+                                  <div>
+                                    <strong>{{ task.get('title') }}</strong>
+                                    {% if task.get('description') %}<span class="desc">{{ task.get('description') }}</span>{% endif %}
+                                  </div>
+                                </div>
+                              {% endfor %}
+                            </div>
+                            {% if draft.get('open_questions') %}
+                              <div class="mini" style="margin-top:10px; white-space:pre-wrap;">Open questions:
+{% for item in draft.get('open_questions') or [] %}- {{ item }}
+{% endfor %}</div>
+                            {% endif %}
+                            {% if draft.get('rejected_or_deferred_ideas') %}
+                              <div class="mini" style="margin-top:10px; white-space:pre-wrap;">Deferred ideas:
+{% for item in draft.get('rejected_or_deferred_ideas') or [] %}- {{ item }}
+{% endfor %}</div>
+                            {% endif %}
+                            {% if space.status in ['open', 'closed'] and not is_busy %}
+                              <form class="insp-publish-form" style="margin-top:12px;">
+                                <input type="hidden" name="draft_id" value="{{ draft.get('id') }}" />
+                                <div>
+                                  <label for="draft-due-{{ draft.get('id') }}">Goal DDL</label>
+                                  <input id="draft-due-{{ draft.get('id') }}" type="date" name="due_date" value="{{ default_due }}" />
+                                </div>
+                                <div style="margin-top:10px; display:flex; justify-content:flex-end;">
+                                  <button type="submit" class="btn-primary insp-publish-btn" data-default-label="Publish">Publish</button>
+                                </div>
+                              </form>
+                            {% endif %}
+                          </div>
+                        </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+            <div class="composer">
+              {% if space.status == 'open' %}
+                <form id="insp-message-form">
+                  <div class="composer-tools">
+                    <button type="button" class="btn-ghost composer-tool-btn insp-command-btn" id="insp-title-suggest" {% if is_busy %}disabled{% endif %}>Suggest Titles</button>
+                    <button type="button" class="btn-ghost composer-tool-btn insp-command-btn" id="insp-generate-draft" {% if is_busy %}disabled{% endif %}>Generate Draft</button>
+                  </div>
+                  <div class="composer-input-row">
+                    <textarea id="insp-message-input" placeholder="Add the next clarification, decision, or idea..." required {% if is_busy %}readonly disabled{% endif %}></textarea>
+                    <button type="submit" id="insp-message-btn" class="btn-primary insp-create-btn composer-submit" {% if is_busy %}disabled{% endif %}>Send</button>
+                  </div>
+                  <div class="composer-actions">
+                    <span id="insp-message-hint" class="muted2 {% if is_busy %}waiting-note{% endif %}" style="display:inline-flex; {% if not is_busy %}visibility:hidden;{% endif %}">
+                      <span class="spin"></span> {% if is_publishing %}Publishing...{% elif is_waiting %}Waiting for agent…{% else %}Sending…{% endif %}
+                    </span>
+                  </div>
+                </form>
+              {% else %}
+                <div class="mini">This space is read-only. Fork it to continue exploring another direction.</div>
+              {% endif %}
+            </div>
+          {% else %}
+            <div class="insp-head">
+              <div>
+                <div class="insp-title">Inspiration</div>
+                <div class="mini">Select a space on the left, or create a new one to start exploring.</div>
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div class="insp-pad">
+              <div class="empty center">No Inspiration space is selected yet.</div>
+            </div>
+          {% endif %}
+        </main>
+
+        {% if space %}
+          <aside class="stack insp-side">
+            <section class="insp-shell stretch">
+              <div class="insp-head compact">
+                <div><div class="insp-title" style="font-size:16px;">Resources</div></div>
+              </div>
+              <div class="divider"></div>
+              <div class="insp-panel-body">
+                <div class="resources-scroll">
+                  <div class="resources-items-scroll" id="insp-resources-scroll">
+                  {% if resources %}
+                  {% for resource in resources %}
+                    <div class="card" data-resource-card data-resource-id="{{ resource.id }}" data-resource-type="{{ resource.type }}">
+                      <div class="pad">
+                        <div class="card-title">#{{ resource.resource_seq_id }} · {{ resource.name }}</div>
+                        <div class="mini">{{ resource.type }}{% if resource.is_system_generated %} · system{% endif %}</div>
+                        {% if resource.type == 'url' %}
+                          {% set resource_text = resource.url_content or '' %}
+                          <input type="hidden" data-resource-name value="{{ resource.name }}" />
+                          <input type="hidden" data-resource-url value="{{ resource.url_content }}" />
+                          <div class="resource-preview resource-preview-link {% if resource_text|length > 180 %}collapsed{% endif %}" data-resource-preview data-collapsed="{{ 'true' if resource_text|length > 180 else 'false' }}"><a href="{{ resource.url_content }}" target="_blank" rel="noreferrer">{{ resource.url_content }}</a></div>
+                          <div class="resource-toolbar">
+                            <button type="button" class="resource-toggle" data-resource-toggle {% if resource_text|length <= 180 %}hidden{% endif %}>Expand</button>
+                            <div class="resource-actions">
+                              <button type="button" class="btn-ghost" data-resource-edit {% if is_busy or space.status != 'open' %}disabled{% endif %}>Edit</button>
+                              <button type="button" class="btn-ghost" data-resource-copy>Copy</button>
+                              <button type="button" class="btn-ghost" data-resource-delete {% if is_busy or space.status != 'open' %}disabled{% endif %}>Delete</button>
+                              <button type="button" class="btn-ghost resource-send-btn" data-resource-send="[#{{ resource.resource_seq_id }} {{ resource.name }}] " {% if is_busy or space.status != 'open' %}disabled{% endif %}>Send</button>
+                            </div>
+                          </div>
+                        {% elif resource.type == 'image' and resource.file_path %}
+                          <input type="hidden" data-resource-name value="{{ resource.name }}" />
+                          <div class="resource-media-preview collapsed" data-resource-preview data-media-preview data-collapsed="true">
+                            <img class="resource-image" data-resource-image src="/api/inspirations/{{ space.id }}/resources/{{ resource.id }}/raw" alt="{{ resource.name }}" />
+                          </div>
+                          <div class="resource-toolbar">
+                            <button type="button" class="resource-toggle" data-resource-toggle hidden data-collapse-threshold="84">Expand</button>
+                            <div class="resource-actions">
+                              <button type="button" class="btn-ghost" data-resource-replace {% if is_busy or space.status != 'open' %}disabled{% endif %}>Replace</button>
+                              <a class="btn-ghost" href="/api/inspirations/{{ space.id }}/resources/{{ resource.id }}/raw" download="{{ resource.name }}">Download</a>
+                              <button type="button" class="btn-ghost" data-resource-delete {% if is_busy or space.status != 'open' %}disabled{% endif %}>Delete</button>
+                              <button type="button" class="btn-ghost resource-send-btn" data-resource-send="[#{{ resource.resource_seq_id }} {{ resource.name }}] " {% if is_busy or space.status != 'open' %}disabled{% endif %}>Send</button>
+                            </div>
+                          </div>
+                        {% else %}
+                          {% set resource_text = resource.text_content or '' %}
+                          <input type="hidden" data-resource-name value="{{ resource.name }}" />
+                          <textarea hidden data-resource-text>{{ resource.text_content }}</textarea>
+                          <div class="resource-preview resource-preview-text {% if resource_text|length > 220 %}collapsed{% endif %}" data-resource-preview data-auto-collapse="true" data-collapse-threshold="64" data-collapsed="{{ 'true' if resource_text|length > 220 else 'false' }}">{{ resource.text_content }}</div>
+                          <div class="resource-toolbar">
+                            <button type="button" class="resource-toggle" data-resource-toggle data-collapse-threshold="64" {% if resource_text|length <= 220 %}hidden{% endif %}>Expand</button>
+                            <div class="resource-actions">
+                              <button type="button" class="btn-ghost" data-resource-edit {% if is_busy or space.status != 'open' %}disabled{% endif %}>Edit</button>
+                              <button type="button" class="btn-ghost" data-resource-copy>Copy</button>
+                              <button type="button" class="btn-ghost" data-resource-delete {% if is_busy or space.status != 'open' %}disabled{% endif %}>Delete</button>
+                              <button type="button" class="btn-ghost resource-send-btn" data-resource-send="[#{{ resource.resource_seq_id }} {{ resource.name }}] " {% if is_busy or space.status != 'open' %}disabled{% endif %}>Send</button>
+                            </div>
+                          </div>
+                        {% endif %}
+                      </div>
+                    </div>
+                  {% endfor %}
+                  {% else %}
+                    <div class="empty">No resources yet.</div>
+                  {% endif %}
+                  </div>
+                </div>
+                {% if space.status == 'open' %}
+                  <button type="button" class="btn-primary insp-create-btn" id="insp-open-resource-modal" style="margin-top:auto;">Add Resource</button>
+                {% endif %}
+              </div>
+            </section>
+          </aside>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      let hasSpace = {{ 'true' if space else 'false' }};
+      const spaceId = {{ space.id if space else 0 }};
+      let waiting = {{ 'true' if is_waiting else 'false' }};
+      let publishing = {{ 'true' if is_publishing else 'false' }};
+      let busyPollTimer = null;
+      let resourceModalMode = 'create';
+      let resourceModalResourceId = 0;
+
+      async function callJson(url, options){
+        const r = await fetch(url, options || {});
+        if(!r.ok){
+          const t = await r.text().catch(()=> 'request failed');
+          throw new Error(t || ('HTTP ' + r.status));
+        }
+        const ct = String(r.headers.get('content-type') || '');
+        return ct.includes('application/json') ? await r.json() : {};
+      }
+
+      function getRoot(){
+        return document.getElementById('insp-page-root');
+      }
+
+      function syncStateFromRoot(){
+        const root = getRoot();
+        if(!root) return;
+        hasSpace = root.dataset.hasSpace === 'true';
+        waiting = root.dataset.isWaiting === 'true';
+        publishing = root.dataset.isPublishing === 'true';
+      }
+
+      function scrollChat(){
+        const chat = document.getElementById('insp-chat');
+        if(chat){ try{ chat.scrollTop = chat.scrollHeight; }catch(_){ } }
+      }
+
+      function captureScrollState(){
+        return {
+          windowY: window.scrollY || 0,
+          chatY: document.getElementById('insp-chat')?.scrollTop || 0,
+          resourcesY: document.getElementById('insp-resources-scroll')?.scrollTop || 0,
+        };
+      }
+
+      function restoreScrollState(state){
+        if(!state) return;
+        try{ window.scrollTo(0, Number(state.windowY || 0)); }catch(_){ }
+        const chat = document.getElementById('insp-chat');
+        if(chat){ try{ chat.scrollTop = Number(state.chatY || 0); }catch(_){ } }
+        const resources = document.getElementById('insp-resources-scroll');
+        if(resources){ try{ resources.scrollTop = Number(state.resourcesY || 0); }catch(_){ } }
+      }
+
+      async function refreshPageFromServer(options){
+        const opts = options || {};
+        const prevScroll = captureScrollState();
+        const r = await fetch(window.location.pathname, { headers: { 'X-Requested-With': 'fetch' } });
+        if(!r.ok) throw new Error(await r.text().catch(()=> 'refresh failed'));
+        const html = await r.text();
+        const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+        const nextRoot = nextDoc.getElementById('insp-page-root');
+        const currentRoot = getRoot();
+        if(!nextRoot || !currentRoot) throw new Error('missing inspiration root');
+        currentRoot.replaceWith(nextRoot);
+        syncStateFromRoot();
+        bindUI();
+        restoreScrollState(prevScroll);
+        if(opts.scrollChat){ scrollChat(); }
+      }
+
+      function setPublishingUI(on, activeButton){
+        publishing = !!on;
+        const mask = document.getElementById('insp-publish-mask');
+        const state = document.getElementById('insp-publish-state');
+        if(mask) mask.hidden = !publishing;
+        if(state) state.style.display = publishing ? 'inline' : 'none';
+        document.querySelectorAll('.insp-work-area button, .insp-work-area input, .insp-work-area textarea, .insp-work-area select').forEach((el)=>{
+          if(activeButton && el === activeButton){
+            el.disabled = publishing;
+            el.textContent = publishing ? 'Publishing...' : String(el.dataset.defaultLabel || 'Publish');
+            return;
+          }
+          el.disabled = publishing || (waiting && (el.id !== 'insp-open-create-modal'));
+          if('readOnly' in el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')){
+            el.readOnly = publishing || waiting;
+          }
+        });
+        document.querySelectorAll('[data-resource-send]').forEach((el)=>{ el.disabled = publishing || waiting || !hasSpace; });
+      }
+
+      function setWaitingUI(on){
+        waiting = !!on;
+        const hint = document.getElementById('insp-message-hint');
+        if(hint){
+          hint.style.visibility = (waiting || publishing) ? 'visible' : 'hidden';
+          hint.innerHTML = '<span class="spin"></span> ' + (publishing ? 'Publishing...' : (waiting ? 'Waiting for agent…' : 'Sending…'));
+        }
+        if(!publishing){
+          document.querySelectorAll('.insp-work-area button, .insp-work-area input, .insp-work-area textarea, .insp-work-area select').forEach((el)=>{
+            el.disabled = waiting;
+            if('readOnly' in el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')){
+              el.readOnly = waiting;
+            }
+          });
+        }
+        document.querySelectorAll('[data-resource-send]').forEach((el)=>{ el.disabled = waiting || publishing || !hasSpace; });
+      }
+
+      function scheduleBusyPoll(delay){
+        if(busyPollTimer){ clearTimeout(busyPollTimer); }
+        if(!hasSpace || !spaceId || (!waiting && !publishing)) return;
+        busyPollTimer = setTimeout(async ()=>{
+          try{
+            const data = await callJson('/api/inspirations/' + spaceId);
+            const nextWaiting = !!data.is_waiting;
+            const nextPublishing = !!data.is_publishing;
+            if(nextWaiting || nextPublishing){
+              waiting = nextWaiting;
+              publishing = nextPublishing;
+              setWaitingUI(waiting);
+              setPublishingUI(publishing);
+              scheduleBusyPoll(900);
+              return;
+            }
+            await refreshPageFromServer({ preserveScroll: true, scrollChat: true });
+          }catch(_){
+            scheduleBusyPoll(1400);
+          }
+        }, Number(delay || 900));
+      }
+
+      function appendResourceReference(reference){
+        if(waiting || publishing || !hasSpace) return;
+        const input = document.getElementById('insp-message-input');
+        if(!input || input.disabled || input.readOnly) return;
+        const ref = String(reference || '');
+        const current = String(input.value || '');
+        input.value = current ? (current.endsWith(' ') || current.endsWith('\n') ? current + ref : current + ' ' + ref) : ref;
+        input.focus();
+        const len = input.value.length;
+        try{ input.setSelectionRange(len, len); }catch(_){ }
+      }
+
+      function appendPendingTurn(userText, pendingText){
+        const chat = document.getElementById('insp-chat');
+        if(!chat) return;
+        const userRow = document.createElement('div');
+        userRow.className = 'msg-row user';
+        userRow.innerHTML = '<div class="msg user"><div class="pad"><div class="msg-role">you</div><div class="msg-text"></div></div></div>';
+        userRow.querySelector('.msg-text').textContent = userText;
+        chat.appendChild(userRow);
+
+        const agentRow = document.createElement('div');
+        agentRow.className = 'msg-row agent';
+        agentRow.innerHTML = '<div class="msg pending"><div class="pad"><div class="msg-role">pending</div><div class="msg-text"><span class="spin"></span> ' + pendingText + '</div></div></div>';
+        chat.appendChild(agentRow);
+        scrollChat();
+      }
+
+      function setCreateModal(open){
+        const modal = document.getElementById('insp-create-modal');
+        if(modal) modal.hidden = !open;
+      }
+
+      function setResourceModal(open){
+        const modal = document.getElementById('insp-resource-modal');
+        if(modal) modal.hidden = !open;
+      }
+
+      function resourceCardFromNode(node){
+        return node?.closest?.('[data-resource-card]') || null;
+      }
+
+      function resourceCardValue(card, selector){
+        const el = card?.querySelector(selector);
+        if(!el) return '';
+        if('value' in el) return String(el.value || '');
+        return String(el.textContent || '');
+      }
+
+      function configureResourceModal(options){
+        const opts = options || {};
+        const mode = String(opts.mode || 'create');
+        const resourceType = String(opts.type || 'text');
+        resourceModalMode = mode;
+        resourceModalResourceId = Number(opts.resourceId || 0);
+        const form = document.getElementById('insp-resource-form');
+        const title = document.getElementById('insp-resource-modal-title');
+        const hint = document.getElementById('insp-resource-hint');
+        const btn = document.getElementById('insp-resource-btn');
+        const resourceIdInput = document.getElementById('insp-resource-id');
+        const typeWrap = document.getElementById('insp-resource-type-wrap');
+        const typeInput = document.getElementById('insp-resource-type');
+        const nameInput = document.getElementById('insp-resource-name');
+        const textInput = document.getElementById('insp-resource-text');
+        const urlInput = document.getElementById('insp-resource-url');
+        const fileInput = document.getElementById('insp-resource-file');
+        form?.reset();
+        if(resourceIdInput) resourceIdInput.value = resourceModalResourceId ? String(resourceModalResourceId) : '';
+        if(typeWrap) typeWrap.style.display = mode === 'create' ? 'block' : 'none';
+        if(typeInput){
+          typeInput.value = resourceType;
+          typeInput.disabled = mode !== 'create' || waiting || publishing;
+        }
+        if(nameInput) nameInput.value = String(opts.name || '');
+        if(textInput) textInput.value = String(opts.text || '');
+        if(urlInput) urlInput.value = String(opts.url || '');
+        if(fileInput) fileInput.value = '';
+        if(title) title.textContent = mode === 'edit' ? 'Edit Resource' : (mode === 'replace' ? 'Replace Image' : 'Add Resource');
+        if(btn) btn.textContent = mode === 'edit' ? 'Save' : (mode === 'replace' ? 'Replace' : 'Add Resource');
+        if(hint) hint.innerHTML = '<span class="spin"></span> ' + (mode === 'edit' ? 'Saving…' : (mode === 'replace' ? 'Replacing…' : 'Uploading…'));
+        syncResourceForm();
+      }
+
+      function openCreateResourceModal(){
+        configureResourceModal({ mode: 'create', type: 'text' });
+        setResourceModal(true);
+      }
+
+      function openEditResourceModal(card){
+        if(waiting || publishing || !card) return;
+        const resourceType = String(card.dataset.resourceType || 'text');
+        const formType = resourceType === 'summary' ? 'text' : resourceType;
+        configureResourceModal({
+          mode: 'edit',
+          resourceId: Number(card.dataset.resourceId || 0),
+          type: formType,
+          name: resourceCardValue(card, '[data-resource-name]'),
+          text: resourceType === 'url' ? '' : resourceCardValue(card, '[data-resource-text]'),
+          url: resourceType === 'url' ? resourceCardValue(card, '[data-resource-url]') : '',
+        });
+        setResourceModal(true);
+      }
+
+      function openReplaceResourceModal(card){
+        if(waiting || publishing || !card) return;
+        configureResourceModal({
+          mode: 'replace',
+          resourceId: Number(card.dataset.resourceId || 0),
+          type: 'image',
+          name: resourceCardValue(card, '[data-resource-name]'),
+        });
+        setResourceModal(true);
+      }
+
+      async function copyResourceContent(card){
+        if(!card) return;
+        const resourceType = String(card.dataset.resourceType || 'text');
+        const text = resourceType === 'url'
+          ? resourceCardValue(card, '[data-resource-url]')
+          : resourceCardValue(card, '[data-resource-text]');
+        if(!text.trim()){ toast('Nothing to copy'); return; }
+        try{
+          if(navigator.clipboard?.writeText){
+            await navigator.clipboard.writeText(text);
+          }else{
+            const temp = document.createElement('textarea');
+            temp.value = text;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand('copy');
+            temp.remove();
+          }
+          toast('Copied');
+        }catch(err){
+          toast(String(err && err.message ? err.message : err || 'copy failed'));
+        }
+      }
+
+      function syncResourceForm(){
+        const t = String(document.getElementById('insp-resource-type')?.value || 'text');
+        const textWrap = document.getElementById('insp-resource-text-wrap');
+        const urlWrap = document.getElementById('insp-resource-url-wrap');
+        const fileWrap = document.getElementById('insp-resource-file-wrap');
+        if(resourceModalMode === 'replace'){
+          if(textWrap) textWrap.style.display = 'none';
+          if(urlWrap) urlWrap.style.display = 'none';
+          if(fileWrap) fileWrap.style.display = 'block';
+          return;
+        }
+        if(textWrap) textWrap.style.display = (t === 'text') ? 'block' : 'none';
+        if(urlWrap) urlWrap.style.display = (t === 'url') ? 'block' : 'none';
+        if(fileWrap) fileWrap.style.display = (resourceModalMode === 'create' && t === 'image') ? 'block' : 'none';
+      }
+
+      function syncToggleButton(btn){
+        const preview = btn?.closest('.pad')?.querySelector('[data-resource-preview]');
+        if(!btn || !preview) return;
+        const threshold = Number(btn.dataset.collapseThreshold || preview.dataset.collapseThreshold || (preview.hasAttribute('data-media-preview') ? 168 : 64));
+        const isMedia = preview.hasAttribute('data-media-preview');
+        const collapsible = isMedia
+          ? (preview.scrollHeight > threshold + 2)
+          : (preview.scrollHeight > threshold + 2 || preview.scrollWidth > preview.clientWidth + 2);
+        if(preview.dataset.autoCollapse === 'true' && preview.dataset.collapseInitialized !== 'true'){
+          if(collapsible){ preview.classList.add('collapsed'); }
+          preview.dataset.collapseInitialized = 'true';
+        }
+        btn.hidden = !collapsible;
+        if(!collapsible){ preview.classList.remove('collapsed'); }
+        btn.textContent = preview.classList.contains('collapsed') ? 'Expand' : 'Collapse';
+      }
+
+      function bindResourceControls(){
+        document.querySelectorAll('[data-resource-toggle]').forEach((btn)=>{
+          syncToggleButton(btn);
+          btn.addEventListener('click', ()=>{
+            const preview = btn.closest('.pad')?.querySelector('[data-resource-preview]');
+            if(!preview) return;
+            preview.classList.toggle('collapsed');
+            syncToggleButton(btn);
+          });
+        });
+
+        document.querySelectorAll('[data-resource-image]').forEach((img)=>{
+          const sync = ()=>{
+            const btn = img.closest('.pad')?.querySelector('[data-resource-toggle]');
+            if(btn) syncToggleButton(btn);
+          };
+          if(img.complete){ sync(); }
+          else{ img.addEventListener('load', sync, { once: true }); }
+        });
+
+        document.querySelectorAll('[data-resource-send]').forEach((btn)=>{
+          btn.addEventListener('click', ()=>{
+            if(btn.disabled) return;
+            appendResourceReference(btn.getAttribute('data-resource-send') || '');
+          });
+        });
+
+        document.querySelectorAll('[data-resource-edit]').forEach((btn)=>{
+          btn.addEventListener('click', ()=>{
+            if(btn.disabled) return;
+            openEditResourceModal(resourceCardFromNode(btn));
+          });
+        });
+
+        document.querySelectorAll('[data-resource-replace]').forEach((btn)=>{
+          btn.addEventListener('click', ()=>{
+            if(btn.disabled) return;
+            openReplaceResourceModal(resourceCardFromNode(btn));
+          });
+        });
+
+        document.querySelectorAll('[data-resource-copy]').forEach((btn)=>{
+          btn.addEventListener('click', async ()=>{
+            await copyResourceContent(resourceCardFromNode(btn));
+          });
+        });
+
+        document.querySelectorAll('[data-resource-delete]').forEach((btn)=>{
+          btn.addEventListener('click', async ()=>{
+            if(btn.disabled || waiting || publishing) return;
+            const card = resourceCardFromNode(btn);
+            const resourceId = Number(card?.dataset.resourceId || 0);
+            const resourceType = String(card?.dataset.resourceType || 'resource');
+            if(!resourceId) return;
+            if(!confirm('Delete this ' + resourceType + ' resource?')) return;
+            try{
+              await callJson('/api/inspirations/' + spaceId + '/resources/' + resourceId, { method: 'DELETE' });
+              await refreshPageFromServer({ preserveScroll: true });
+            }catch(err){
+              toast(String(err && err.message ? err.message : err || 'delete failed'));
+            }
+          });
+        });
+      }
+
+      async function submitTurn(content){
+        const text = String(content || '').trim();
+        if(!text || !hasSpace) return;
+        const pendingText = text === '/summary_title' ? 'Generating title suggestions…' : (text === '/plan' ? 'Generating a publish-ready draft…' : 'Thinking…');
+        appendPendingTurn(text, pendingText);
+        setWaitingUI(true);
+        try{
+          await callJson('/api/inspirations/' + spaceId + '/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: text }),
+            keepalive: true
+          });
+          scheduleBusyPoll(400);
+        }catch(err){
+          toast(String(err && err.message ? err.message : err || 'send failed'));
+          try{ await refreshPageFromServer({ preserveScroll: true, scrollChat: true }); }
+          catch(_){ setWaitingUI(false); }
+        }
+      }
+
+      function bindUI(){
+        const createModal = document.getElementById('insp-create-modal');
+        const resourceModal = document.getElementById('insp-resource-modal');
+
+        document.getElementById('insp-open-create-modal')?.addEventListener('click', ()=> setCreateModal(true));
+        document.getElementById('insp-create-cancel')?.addEventListener('click', ()=> setCreateModal(false));
+        createModal?.addEventListener('click', (e)=>{ if(e.target === createModal) setCreateModal(false); });
+
+        document.getElementById('insp-open-resource-modal')?.addEventListener('click', ()=>{
+          if(waiting || publishing) return;
+          openCreateResourceModal();
+        });
+        document.getElementById('insp-resource-cancel')?.addEventListener('click', ()=> setResourceModal(false));
+        resourceModal?.addEventListener('click', (e)=>{ if(e.target === resourceModal) setResourceModal(false); });
+
+        const createForm = document.getElementById('create-inspiration-form');
+        const createBtn = document.getElementById('insp-create-btn');
+        const createHint = document.getElementById('insp-create-hint');
+        createForm?.addEventListener('submit', async (e)=>{
+          e.preventDefault();
+          const title = String(document.getElementById('insp-title')?.value || '').trim();
+          const initialMessage = String(document.getElementById('insp-message')?.value || '').trim();
+          if(!title && !initialMessage){ toast('请填写 Title 或 First Note'); return; }
+          if(createBtn) createBtn.disabled = true;
+          if(createHint) createHint.style.display = 'inline-flex';
+          try{
+            const data = await callJson('/api/inspirations', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title, initial_message: initialMessage })
+            });
+            const id = data && data.item ? data.item.id : 0;
+            if(!id) throw new Error('missing space id');
+            location.href = '/inspirations/' + id;
+          }catch(err){
+            toast(String(err && err.message ? err.message : err || 'create failed'));
+            if(createBtn) createBtn.disabled = false;
+            if(createHint) createHint.style.display = 'none';
+          }
+        });
+
+        document.getElementById('insp-resource-type')?.addEventListener('change', syncResourceForm);
+        syncResourceForm();
+
+        const resourceForm = document.getElementById('insp-resource-form');
+        const resourceHint = document.getElementById('insp-resource-hint');
+        resourceForm?.addEventListener('submit', async (e)=>{
+          e.preventDefault();
+          if(waiting || publishing || !hasSpace) return;
+          const fd = new FormData(resourceForm);
+          const resourceId = Number(document.getElementById('insp-resource-id')?.value || 0);
+          const nextType = String(document.getElementById('insp-resource-type')?.value || 'text');
+          if(resourceHint) resourceHint.style.display = 'inline-flex';
+          const btn = document.getElementById('insp-resource-btn');
+          if(btn) btn.disabled = true;
+          try{
+            if(resourceModalMode === 'edit'){
+              const payload = {
+                name: String(fd.get('name') || '').trim(),
+              };
+              if(nextType === 'url') payload.url_content = String(fd.get('url_content') || '');
+              else payload.text_content = String(fd.get('text_content') || '');
+              await callJson('/api/inspirations/' + spaceId + '/resources/' + resourceId, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+            }else if(resourceModalMode === 'replace'){
+              await callJson('/api/inspirations/' + spaceId + '/resources/' + resourceId + '/replace', {
+                method: 'POST',
+                body: fd,
+              });
+            }else{
+              const r = await fetch('/api/inspirations/' + spaceId + '/resources', { method: 'POST', body: fd });
+              if(!r.ok) throw new Error(await r.text().catch(()=> 'upload failed'));
+            }
+            resourceForm.reset();
+            configureResourceModal({ mode: 'create', type: 'text' });
+            syncResourceForm();
+            setResourceModal(false);
+            if(resourceHint) resourceHint.style.display = 'none';
+            if(btn) btn.disabled = false;
+            await refreshPageFromServer({ preserveScroll: true });
+          }catch(err){
+            toast(String(err && err.message ? err.message : err || 'upload failed'));
+            if(btn) btn.disabled = false;
+            if(resourceHint) resourceHint.style.display = 'none';
+          }
+        });
+
+        if(hasSpace){
+          const messageForm = document.getElementById('insp-message-form');
+          messageForm?.addEventListener('submit', async (e)=>{
+            e.preventDefault();
+            if(waiting || publishing) return;
+            const input = document.getElementById('insp-message-input');
+            const content = String(input?.value || '').trim();
+            if(!content){ toast('请输入消息'); return; }
+            if(input) input.value = '';
+            await submitTurn(content);
+          });
+
+          document.getElementById('insp-title-suggest')?.addEventListener('click', async ()=>{
+            if(waiting || publishing) return;
+            await submitTurn('/summary_title');
+          });
+
+          document.getElementById('insp-generate-draft')?.addEventListener('click', async ()=>{
+            if(waiting || publishing) return;
+            await submitTurn('/plan');
+          });
+
+          document.getElementById('insp-close-space')?.addEventListener('click', async ()=>{
+            if(publishing) return;
+            try{ await callJson('/api/inspirations/' + spaceId + '/close', { method: 'POST' }); location.reload(); }
+            catch(err){ toast(String(err && err.message ? err.message : err || 'request failed')); }
+          });
+
+          document.getElementById('insp-reopen-space')?.addEventListener('click', async ()=>{
+            if(publishing) return;
+            try{ await callJson('/api/inspirations/' + spaceId + '/reopen', { method: 'POST' }); location.reload(); }
+            catch(err){ toast(String(err && err.message ? err.message : err || 'request failed')); }
+          });
+
+          document.getElementById('insp-delete-space')?.addEventListener('click', async ()=>{
+            if(publishing) return;
+            if(!confirm('Delete this unpublished Inspiration space?')) return;
+            try{ await callJson('/api/inspirations/' + spaceId, { method: 'DELETE' }); location.href = '/inspirations'; }
+            catch(err){ toast(String(err && err.message ? err.message : err || 'delete failed')); }
+          });
+
+          document.getElementById('insp-fork-space')?.addEventListener('click', async ()=>{
+            if(publishing) return;
+            const title = window.prompt('Fork title', {{ ((space.title if space else 'Inspiration') ~ ' / Follow-up')|tojson }});
+            if(title === null) return;
+            try{
+              const data = await callJson('/api/inspirations/' + spaceId + '/fork', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title: String(title || '').trim(), include_all_resources: true })
+              });
+              const newId = data && data.item ? data.item.id : 0;
+              if(newId) location.href = '/inspirations/' + newId;
+            }catch(err){ toast(String(err && err.message ? err.message : err || 'fork failed')); }
+          });
+
+          document.querySelectorAll('.insp-publish-form').forEach((form)=>{
+            form.addEventListener('submit', async (e)=>{
+              e.preventDefault();
+              if(waiting || publishing) return;
+              if(!confirm('Publish this draft and lock this Inspiration space?')) return;
+              const fd = new FormData(form);
+              const draftId = Number(fd.get('draft_id') || 0);
+              const dueDate = String(fd.get('due_date') || '').trim();
+              const btn = form.querySelector('.insp-publish-btn');
+              setPublishingUI(true, btn);
+              try{
+                await callJson('/api/inspirations/' + spaceId + '/publish', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ draft_id: draftId, due_date: dueDate })
+                });
+                scheduleBusyPoll(350);
+              }catch(err){
+                setPublishingUI(false, btn);
+                toast(String(err && err.message ? err.message : err || 'publish failed'));
+              }
+            });
+          });
+
+          bindResourceControls();
+        }
+
+        setWaitingUI(waiting);
+        setPublishingUI(publishing);
+      }
+
+      syncStateFromRoot();
+      bindUI();
+      scrollChat();
+      if(waiting || publishing){ scheduleBusyPoll(900); }
+    })();
+  </script>
+{% endblock %}

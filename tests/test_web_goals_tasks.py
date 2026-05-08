@@ -39,7 +39,10 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         from openfocus.models import Goal
 
         with session_scope() as s:
-            goal_id = s.query(Goal).order_by(Goal.id.desc()).first().id
+            goal = s.query(Goal).order_by(Goal.id.desc()).first()
+            assert goal is not None
+            goal.source_inspiration_space_id = 42
+            goal_id = goal.id
 
         # mark goal done
         r = await client.post(f"/goals/{goal_id}/done", follow_redirects=False)
@@ -105,6 +108,8 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
         assert "目标-单测" in r.text
+        assert 'href="/inspirations/42"' in r.text
+        assert ">Inspiration</a>" in r.text
 
         # add task
         r = await client.post(

@@ -29,6 +29,12 @@ class Goal(Base):
     )
 
     due_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    source_inspiration_space_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    source_inspiration_draft_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
@@ -70,6 +76,12 @@ class Task(Base):
     task_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_key: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    source_inspiration_space_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    source_inspiration_draft_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
@@ -157,6 +169,124 @@ class GoalPlanMessage(Base):
     session_id: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)  # user/assistant
     content: Mapped[str] = mapped_column(String(20000), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class InspirationSpace(Base):
+    __tablename__ = "inspiration_spaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    published_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    forked_from_space_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_activity_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    message_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_phase_summary_turn: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    last_phase_summary_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+    closed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class InspirationMessage(Base):
+    __tablename__ = "inspiration_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, default="message")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    draft_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class InspirationResource(Base):
+    __tablename__ = "inspiration_resources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    resource_seq_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    url_content: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    file_path: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    is_system_generated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class InspirationDraft(Base):
+    __tablename__ = "inspiration_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    goal_title: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    goal_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tasks: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    open_questions: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    rejected_or_deferred_ideas: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    source_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+
+
+class InspirationPublishRecord(Base):
+    __tablename__ = "inspiration_publish_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    space_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    draft_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_goal_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_task_ids: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    deferred_tasks: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    summary_resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )

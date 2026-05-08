@@ -4,21 +4,26 @@ import asyncio
 import base64
 import datetime as dt
 import json
+import mimetypes
 import os
 import re
+import shutil
 import threading
 import uuid
 from pathlib import Path
 
 from fastapi import (
     FastAPI,
+    File,
     Form,
     HTTPException,
     Request,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -47,6 +52,11 @@ from .models import (
     Goal,
     GoalPlanMessage,
     GoalPlanSession,
+    InspirationDraft,
+    InspirationMessage,
+    InspirationPublishRecord,
+    InspirationResource,
+    InspirationSpace,
     NextMoveFeedback,
     NextMoveRun,
     RemoteTerminalOutput,
@@ -1062,6 +1072,14 @@ def _startup() -> None:
                     "ALTER TABLE goals ADD COLUMN importance VARCHAR(32) NOT NULL DEFAULT 'normal'"
                 )
             )
+        if "source_inspiration_space_id" not in cols:
+            conn.execute(
+                text("ALTER TABLE goals ADD COLUMN source_inspiration_space_id INTEGER")
+            )
+        if "source_inspiration_draft_id" not in cols:
+            conn.execute(
+                text("ALTER TABLE goals ADD COLUMN source_inspiration_draft_id INTEGER")
+            )
 
         task_cols = [
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(tasks)").fetchall()
@@ -1099,6 +1117,14 @@ def _startup() -> None:
                 text(
                     "ALTER TABLE tasks ADD COLUMN context_key VARCHAR(256) NOT NULL DEFAULT ''"
                 )
+            )
+        if "source_inspiration_space_id" not in task_cols:
+            conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN source_inspiration_space_id INTEGER")
+            )
+        if "source_inspiration_draft_id" not in task_cols:
+            conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN source_inspiration_draft_id INTEGER")
             )
 
         # goal_plan_sessions 补字段（用于“已有 goal 进入 plan”）
@@ -1329,6 +1355,1189 @@ def _summarize_items(
         for i in needs:
             out[i] = _truncate_zh(cleaned[i], 20)
         return out
+
+
+def _openfocus_data_root() -> Path:
+    env_path = str(os.environ.get("OPENFOCUS_DB_PATH") or "").strip()
+    if env_path:
+        try:
+            return Path(env_path).expanduser().resolve().parent
+        except Exception:
+            pass
+    return APP_DIR.parent / ".data"
+
+
+def _inspiration_files_root() -> Path:
+    root = _openfocus_data_root() / "inspirations"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _inspiration_space_files_dir(space_id: int) -> Path:
+    path = _inspiration_files_root() / f"space_{int(space_id)}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def _inspiration_store_uploaded_resource_file(
+    *, space_id: int, seq_id: int, file: UploadFile
+) -> tuple[Path, str]:
+    original_name = str(file.filename or "image")
+    ext = Path(original_name).suffix or ".bin"
+    target_dir = _inspiration_space_files_dir(int(space_id))
+    target_path = target_dir / f"resource_{int(seq_id)}{ext}"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="uploaded file is empty")
+    target_path.write_bytes(content)
+    return target_path, original_name[:512]
+
+
+def _guess_media_type(path: Path) -> str:
+    guessed, _enc = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
+def _inspiration_resource_reference(res: InspirationResource) -> str:
+    rid = int(getattr(res, "resource_seq_id", 0) or 0)
+    name = str(getattr(res, "name", "") or f"resource-{rid}")
+    kind = str(getattr(res, "type", "") or "resource")
+    hint = ""
+    if kind == "url":
+        hint = str(getattr(res, "url_content", "") or "").strip()
+    elif kind == "text":
+        body = str(getattr(res, "text_content", "") or "").strip()
+        hint = body[:160] + ("…" if len(body) > 160 else "")
+    elif kind == "summary":
+        body = str(getattr(res, "text_content", "") or "").strip()
+        hint = body[:160] + ("…" if len(body) > 160 else "")
+    else:
+        hint = "Use this image as supporting context."
+    return (f"[Resource #{rid}]\nName: {name}\nType: {kind}\nHint: {hint}").strip()
+
+
+def _inspiration_resource_preview(res: InspirationResource) -> str:
+    kind = str(getattr(res, "type", "") or "")
+    if kind == "url":
+        return str(getattr(res, "url_content", "") or "").strip()
+    return str(getattr(res, "text_content", "") or "").strip()
+
+
+def _inspiration_non_deleted_resources(
+    s, space_id: int, *, include_summary: bool = True
+) -> list[InspirationResource]:
+    q = (
+        s.query(InspirationResource)
+        .filter(InspirationResource.space_id == int(space_id))
+        .filter(InspirationResource.deleted_at.is_(None))
+    )
+    if not include_summary:
+        q = q.filter(InspirationResource.type != "summary")
+    return q.order_by(
+        InspirationResource.updated_at.desc(), InspirationResource.id.desc()
+    ).all()
+
+
+def _inspiration_messages_page(
+    s, space_id: int, *, before_id: int | None = None, page_size: int = 60
+) -> tuple[list[InspirationMessage], int | None]:
+    q = s.query(InspirationMessage).filter(InspirationMessage.space_id == int(space_id))
+    if before_id:
+        q = q.filter(InspirationMessage.id < int(before_id))
+    rows = q.order_by(InspirationMessage.id.desc()).limit(int(page_size) + 1).all()
+    has_more = len(rows) > int(page_size)
+    rows = rows[: int(page_size)]
+    rows.reverse()
+    next_before = rows[0].id if rows and has_more else None
+    return rows, next_before
+
+
+def _inspiration_context_lines(
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+    *,
+    max_messages: int = 18,
+) -> str:
+    lines = [f"Space title: {space.title}"]
+    if resources:
+        lines.append("Resources:")
+        for res in resources[:20]:
+            lines.append(
+                f"- {_inspiration_resource_reference(res).replace(chr(10), ' | ')}"
+            )
+    if messages:
+        lines.append("Conversation:")
+        for msg in messages[-max_messages:]:
+            role = str(getattr(msg, "role", "assistant") or "assistant")
+            body = str(getattr(msg, "content", "") or "").strip()
+            if not body:
+                continue
+            lines.append(f"{role}: {body}")
+    return "\n".join(lines)[:16000]
+
+
+def _inspiration_fallback_reply(space: InspirationSpace, user_text: str) -> str:
+    body = str(user_text or "").strip()
+    if body.startswith("/draft_goal_tasks"):
+        return "I created a fallback draft from the current discussion. Review it and refine in chat if needed."
+    if body.startswith("/summary_title"):
+        return "I suggested a few title options based on the current discussion."
+    return (
+        f"I noted your update about '{space.title}'. "
+        "What is the most important outcome, constraint, or success signal we should clarify next?"
+    )
+
+
+def _inspiration_fallback_title_suggestions(
+    space: InspirationSpace, messages: list[InspirationMessage]
+) -> list[str]:
+    base = str(space.title or "Inspiration").strip() or "Inspiration"
+    latest = ""
+    for msg in reversed(messages):
+        if str(getattr(msg, "role", "") or "") == "user":
+            latest = str(getattr(msg, "content", "") or "").strip()
+            if latest:
+                break
+    suggestions = [base]
+    if latest:
+        suggestions.append(
+            _truncate_zh(latest.replace("/summary_title", "").strip() or base, 20)
+        )
+    suggestions.append(_truncate_zh(base + " / Refined", 20))
+    out: list[str] = []
+    for item in suggestions:
+        cleaned = str(item or "").strip()
+        if cleaned and cleaned not in out:
+            out.append(cleaned[:80])
+    return out[:3] or [base]
+
+
+def _inspiration_fallback_draft(
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+) -> dict:
+    context = _inspiration_context_lines(space, messages, resources)
+    desc = context[:1800]
+    tasks = [
+        {
+            "title": f"Clarify the scope of {space.title}",
+            "description": "Define the expected outcome, non-goals, and constraints.",
+        },
+        {
+            "title": f"Draft an execution approach for {space.title}",
+            "description": "Turn the discussion into an actionable plan with key milestones.",
+        },
+        {
+            "title": f"Review risks and open questions for {space.title}",
+            "description": "List unresolved questions and confirm the next decision points.",
+        },
+    ]
+    return {
+        "goal_title": space.title,
+        "goal_description": desc,
+        "tasks": tasks,
+        "open_questions": ["Which part should be implemented first?"],
+        "rejected_or_deferred_ideas": [],
+    }
+
+
+def _inspiration_llm_reply(
+    provider: OpenAICompatibleProvider,
+    *,
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+) -> str:
+    convo = [
+        {
+            "role": "system",
+            "content": (
+                "You are OpenFocus Inspiration assistant. "
+                "Be a proactive planning partner. Ask one clarifying question or provide one concrete synthesis. "
+                'Return strict JSON only: {"message":"..."}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": _inspiration_context_lines(space, messages, resources),
+        },
+    ]
+    data = json.loads(
+        provider.chat_completions(
+            messages=convo,
+            temperature=0.2,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        ).content
+    )
+    return str(
+        data.get("message") or "Please tell me more about the desired outcome."
+    ).strip()
+
+
+def _inspiration_llm_title_suggestions(
+    provider: OpenAICompatibleProvider,
+    *,
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+) -> list[str]:
+    convo = [
+        {
+            "role": "system",
+            "content": (
+                "You generate concise English or Chinese titles for an inspiration workspace. "
+                'Return strict JSON only: {"titles":["...","...","..."]}. '
+                "Each title should be <= 80 chars, distinct, and useful as a workspace title."
+            ),
+        },
+        {
+            "role": "user",
+            "content": _inspiration_context_lines(space, messages, resources),
+        },
+    ]
+    data = json.loads(
+        provider.chat_completions(
+            messages=convo,
+            temperature=0.3,
+            max_tokens=300,
+            response_format={"type": "json_object"},
+        ).content
+    )
+    out: list[str] = []
+    for item in data.get("titles") or []:
+        title = str(item or "").strip()
+        if title and title not in out:
+            out.append(title[:80])
+    return out[:5]
+
+
+def _inspiration_llm_draft(
+    provider: OpenAICompatibleProvider,
+    *,
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+) -> dict:
+    convo = [
+        {
+            "role": "system",
+            "content": (
+                "You are OpenFocus Inspiration planning assistant. "
+                "Generate a publish-ready draft from the discussion. "
+                "Return strict JSON only with keys: goal_title, goal_description, tasks, open_questions, rejected_or_deferred_ideas. "
+                "tasks must be an array of objects; each task object must include title and description."
+            ),
+        },
+        {
+            "role": "user",
+            "content": _inspiration_context_lines(space, messages, resources),
+        },
+    ]
+    data = json.loads(
+        provider.chat_completions(
+            messages=convo,
+            temperature=0.1,
+            max_tokens=1400,
+            response_format={"type": "json_object"},
+        ).content
+    )
+    tasks: list[dict] = []
+    for raw in data.get("tasks") or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+        tasks.append(
+            {
+                "title": title[:512],
+                "description": str(raw.get("description") or "").strip()[:4000],
+            }
+        )
+    return {
+        "goal_title": str(data.get("goal_title") or space.title).strip()[:2000],
+        "goal_description": str(data.get("goal_description") or "").strip()[:4000],
+        "tasks": tasks,
+        "open_questions": [
+            str(x).strip()[:500]
+            for x in (data.get("open_questions") or [])
+            if str(x or "").strip()
+        ][:20],
+        "rejected_or_deferred_ideas": [
+            str(x).strip()[:500]
+            for x in (data.get("rejected_or_deferred_ideas") or [])
+            if str(x or "").strip()
+        ][:20],
+    }
+
+
+def _inspiration_make_phase_summary(
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+) -> str:
+    recent_user = [
+        str(m.content or "").strip()
+        for m in messages[-20:]
+        if str(getattr(m, "role", "") or "") == "user" and str(m.content or "").strip()
+    ]
+    resource_names = [
+        str(r.name or f"resource-{r.resource_seq_id}") for r in resources[:8]
+    ]
+    lines = [f"Space: {space.title}"]
+    if recent_user:
+        lines.append("Recent user points:")
+        lines.extend(f"- {item[:200]}" for item in recent_user[-6:])
+    if resource_names:
+        lines.append("Resources in use:")
+        lines.extend(f"- {name}" for name in resource_names)
+    return "\n".join(lines)
+
+
+def _inspiration_maybe_emit_phase_summary(space_id: int) -> None:
+    with session_scope() as s:
+        space = s.get(InspirationSpace, int(space_id))
+        if space is None:
+            return
+        now = _utcnow()
+        due_turns = (
+            int(space.message_turn_count or 0) - int(space.last_phase_summary_turn or 0)
+            >= 10
+        )
+        due_time = False
+        if getattr(space, "last_phase_summary_at", None) is None:
+            due_time = False
+        else:
+            last = space.last_phase_summary_at
+            if getattr(last, "tzinfo", None) is None:
+                last = last.replace(tzinfo=dt.timezone.utc)
+            due_time = (now - last).total_seconds() >= 3600
+        if not due_turns and not due_time:
+            return
+        messages = (
+            s.query(InspirationMessage)
+            .filter(InspirationMessage.space_id == int(space_id))
+            .order_by(InspirationMessage.id.asc())
+            .all()
+        )
+        resources = _inspiration_non_deleted_resources(s, int(space_id))
+        detail = _inspiration_make_phase_summary(space, messages, resources)
+        space.last_phase_summary_turn = int(space.message_turn_count or 0)
+        space.last_phase_summary_at = now
+        _try_audit_memory(
+            kind="inspiration.phase_summary",
+            source="inspiration",
+            summary=f"Inspiration space {int(space_id)} reached a phase-summary checkpoint.",
+            detail=detail,
+            metadata={
+                "space_id": int(space_id),
+                "message_turn_count": int(space.message_turn_count or 0),
+            },
+        )
+
+
+def _inspiration_next_resource_seq(s, space_id: int) -> int:
+    rows = (
+        s.query(InspirationResource.resource_seq_id)
+        .filter(InspirationResource.space_id == int(space_id))
+        .order_by(InspirationResource.resource_seq_id.desc())
+        .first()
+    )
+    try:
+        return int((rows[0] if rows else 0) or 0) + 1
+    except Exception:
+        return 1
+
+
+def _inspiration_latest_draft(s, space_id: int) -> InspirationDraft | None:
+    return (
+        s.query(InspirationDraft)
+        .filter(InspirationDraft.space_id == int(space_id))
+        .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
+        .first()
+    )
+
+
+def _inspiration_default_followup_title(title: str) -> str:
+    base = str(title or "Inspiration").strip() or "Inspiration"
+    return (base + " / Follow-up")[:120]
+
+
+def _inspiration_build_published_summary(
+    *,
+    space: InspirationSpace,
+    draft: InspirationDraft,
+    goal: Goal,
+    created_tasks: list[Task],
+    deferred_tasks: list[dict],
+) -> str:
+    lines = [
+        "Idea",
+        str(space.title or "").strip() or str(goal.content or "").strip(),
+        "",
+        "Why now",
+        str(goal.description or "").strip()
+        or "Captured from the latest inspiration discussion.",
+        "",
+        "Goal",
+        str(goal.content or "").strip(),
+        "",
+        "Published tasks",
+    ]
+    for task in created_tasks:
+        lines.append(f"- {str(task.title or '').strip()}")
+    if not created_tasks:
+        lines.append("- No tasks were published.")
+    lines.extend(["", "Open questions"])
+    for item in draft.open_questions or []:
+        if str(item or "").strip():
+            lines.append(f"- {str(item).strip()}")
+    if len(lines) and lines[-1] == "Open questions":
+        lines.append("- None")
+    lines.extend(["", "Rejected / deferred ideas"])
+    deferred_titles = [
+        str((it or {}).get("title") or "").strip()
+        for it in (deferred_tasks or [])
+        if isinstance(it, dict)
+    ]
+    combined = deferred_titles + [
+        str(item or "").strip()
+        for item in (draft.rejected_or_deferred_ideas or [])
+        if str(item or "").strip()
+    ]
+    seen: set[str] = set()
+    for item in combined:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        lines.append(f"- {item}")
+    if len(lines) and lines[-1] == "Rejected / deferred ideas":
+        lines.append("- None")
+    return "\n".join(lines).strip()
+
+
+def _inspiration_clone_resource(
+    *, s, source: InspirationResource, target_space_id: int, seq_id: int
+) -> InspirationResource:
+    cloned = InspirationResource(
+        space_id=int(target_space_id),
+        resource_seq_id=int(seq_id),
+        type=str(source.type or "text"),
+        name=str(source.name or f"resource-{seq_id}"),
+        text_content=str(source.text_content or ""),
+        url_content=str(source.url_content or ""),
+        file_path="",
+        is_system_generated=bool(source.is_system_generated),
+    )
+    if str(source.file_path or "").strip():
+        src_path = Path(str(source.file_path or "")).expanduser()
+        if src_path.exists() and src_path.is_file():
+            target_dir = _inspiration_space_files_dir(int(target_space_id))
+            ext = src_path.suffix or ""
+            dst = target_dir / f"resource_{int(seq_id)}{ext}"
+            shutil.copyfile(src_path, dst)
+            cloned.file_path = str(dst)
+    s.add(cloned)
+    s.flush()
+    return cloned
+
+
+def _inspiration_space_payload(
+    space: InspirationSpace,
+    *,
+    latest_draft: InspirationDraft | None = None,
+    resource_count: int | None = None,
+    draft_count: int | None = None,
+    publish_count: int | None = None,
+) -> dict:
+    return {
+        "id": int(space.id),
+        "title": str(space.title or ""),
+        "status": str(space.status or "open"),
+        "published_goal_id": (
+            int(space.published_goal_id)
+            if getattr(space, "published_goal_id", None)
+            else None
+        ),
+        "forked_from_space_id": (
+            int(space.forked_from_space_id)
+            if getattr(space, "forked_from_space_id", None)
+            else None
+        ),
+        "message_turn_count": int(space.message_turn_count or 0),
+        "resource_count": int(resource_count or 0),
+        "draft_count": int(draft_count or 0),
+        "publish_count": int(publish_count or 0),
+        "latest_draft_version": (
+            int(latest_draft.version) if latest_draft is not None else None
+        ),
+        "created_at": space.created_at.isoformat() if space.created_at else None,
+        "updated_at": space.updated_at.isoformat() if space.updated_at else None,
+        "last_activity_at": (
+            space.last_activity_at.isoformat()
+            if getattr(space, "last_activity_at", None)
+            else None
+        ),
+        "closed_at": space.closed_at.isoformat()
+        if getattr(space, "closed_at", None)
+        else None,
+        "published_at": (
+            space.published_at.isoformat()
+            if getattr(space, "published_at", None)
+            else None
+        ),
+    }
+
+
+def _inspiration_message_payload(message: InspirationMessage) -> dict:
+    return {
+        "id": int(message.id),
+        "space_id": int(message.space_id),
+        "role": str(message.role or "assistant"),
+        "kind": str(message.kind or "message"),
+        "content": str(message.content or ""),
+        "payload": message.payload or {},
+        "draft_version": (
+            int(message.draft_version)
+            if getattr(message, "draft_version", None)
+            else None
+        ),
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+    }
+
+
+def _inspiration_resource_payload(
+    space_id: int, resource: InspirationResource, *, include_text: bool = False
+) -> dict:
+    file_path = str(resource.file_path or "").strip()
+    return {
+        "id": int(resource.id),
+        "space_id": int(resource.space_id),
+        "resource_seq_id": int(resource.resource_seq_id),
+        "type": str(resource.type or "text"),
+        "name": str(resource.name or f"resource-{int(resource.resource_seq_id or 0)}"),
+        "preview": _inspiration_resource_preview(resource),
+        "reference": _inspiration_resource_reference(resource),
+        "url_content": str(resource.url_content or ""),
+        "text_content": str(resource.text_content or "") if include_text else "",
+        "is_system_generated": bool(resource.is_system_generated),
+        "has_file": bool(file_path),
+        "raw_url": (
+            f"/api/inspirations/{int(space_id)}/resources/{int(resource.id)}/raw"
+            if file_path
+            else None
+        ),
+        "created_at": resource.created_at.isoformat() if resource.created_at else None,
+        "updated_at": resource.updated_at.isoformat() if resource.updated_at else None,
+    }
+
+
+def _inspiration_draft_payload(draft: InspirationDraft) -> dict:
+    return {
+        "id": int(draft.id),
+        "space_id": int(draft.space_id),
+        "version": int(draft.version),
+        "goal_title": str(draft.goal_title or ""),
+        "goal_description": str(draft.goal_description or ""),
+        "tasks": draft.tasks or [],
+        "open_questions": draft.open_questions or [],
+        "rejected_or_deferred_ideas": draft.rejected_or_deferred_ideas or [],
+        "source_message_id": (
+            int(draft.source_message_id)
+            if getattr(draft, "source_message_id", None)
+            else None
+        ),
+        "created_at": draft.created_at.isoformat() if draft.created_at else None,
+    }
+
+
+def _inspiration_publish_record_payload(record: InspirationPublishRecord) -> dict:
+    return {
+        "id": int(record.id),
+        "space_id": int(record.space_id),
+        "draft_id": int(record.draft_id),
+        "created_goal_id": int(record.created_goal_id),
+        "created_task_ids": [int(x) for x in (record.created_task_ids or [])],
+        "deferred_tasks": record.deferred_tasks or [],
+        "summary_resource_id": (
+            int(record.summary_resource_id)
+            if getattr(record, "summary_resource_id", None)
+            else None
+        ),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
+def _inspiration_space_or_404(s, space_id: int) -> InspirationSpace:
+    space = s.get(InspirationSpace, int(space_id))
+    if space is None:
+        raise HTTPException(status_code=404, detail="Inspiration space not found")
+    return space
+
+
+def _inspiration_latest_pending_message(s, space_id: int) -> InspirationMessage | None:
+    return (
+        s.query(InspirationMessage)
+        .filter(InspirationMessage.space_id == int(space_id))
+        .filter(InspirationMessage.kind == "pending")
+        .order_by(InspirationMessage.id.desc())
+        .first()
+    )
+
+
+def _inspiration_is_waiting(s, space_id: int) -> bool:
+    return _inspiration_latest_pending_message(s, int(space_id)) is not None
+
+
+def _inspiration_command_kind(content: str) -> str:
+    text = str(content or "").strip()
+    if text in {"/summary_title", "/summary-title"}:
+        return "summary_title"
+    if text in {"/plan", "/draft_goal_tasks"}:
+        return "plan"
+    return "message"
+
+
+def _inspiration_user_message_kind(content: str) -> str:
+    return "command" if _inspiration_command_kind(content) != "message" else "message"
+
+
+def _inspiration_pending_text(command_kind: str) -> str:
+    if command_kind == "summary_title":
+        return "Generating title suggestions…"
+    if command_kind == "plan":
+        return "Generating a publish-ready draft…"
+    return "Thinking…"
+
+
+def _inspiration_is_publishing(space: InspirationSpace | None) -> bool:
+    return str(getattr(space, "status", "") or "") == "publishing"
+
+
+def _inspiration_generate_followup_result(
+    *,
+    command_kind: str,
+    provider: OpenAICompatibleProvider | None,
+    space: InspirationSpace,
+    messages: list[InspirationMessage],
+    resources: list[InspirationResource],
+    user_text: str,
+) -> dict:
+    if command_kind == "summary_title":
+        if provider is None:
+            titles = _inspiration_fallback_title_suggestions(space, messages)
+        else:
+            try:
+                titles = _inspiration_llm_title_suggestions(
+                    provider,
+                    space=space,
+                    messages=messages,
+                    resources=resources,
+                )
+            except Exception:
+                titles = _inspiration_fallback_title_suggestions(space, messages)
+        content = "Title suggestions:\n" + "\n".join(f"- {item}" for item in titles)
+        return {
+            "message_kind": "title_suggestions",
+            "content": content,
+            "payload": {"titles": titles},
+            "audit_kind": "inspiration.title_suggestions",
+            "audit_detail": content,
+            "audit_metadata": {"titles": titles},
+        }
+
+    if command_kind == "plan":
+        if provider is None:
+            data = _inspiration_fallback_draft(space, messages, resources)
+        else:
+            try:
+                data = _inspiration_llm_draft(
+                    provider,
+                    space=space,
+                    messages=messages,
+                    resources=resources,
+                )
+            except Exception:
+                data = _inspiration_fallback_draft(space, messages, resources)
+        return {
+            "message_kind": "draft_generated",
+            "draft_data": data,
+            "audit_kind": "inspiration.draft_generated",
+            "audit_detail": "",
+            "audit_metadata": {},
+        }
+
+    if provider is None:
+        reply = _inspiration_fallback_reply(space, user_text)
+    else:
+        try:
+            reply = _inspiration_llm_reply(
+                provider,
+                space=space,
+                messages=messages,
+                resources=resources,
+            )
+        except Exception:
+            reply = _inspiration_fallback_reply(space, user_text)
+    return {
+        "message_kind": "message",
+        "content": reply,
+        "payload": {},
+        "audit_kind": "inspiration.message",
+        "audit_detail": user_text,
+        "audit_metadata": {},
+    }
+
+
+async def _kickoff_inspiration_followup(
+    *, space_id: int, user_message_id: int, pending_message_id: int
+) -> None:
+    audit_kind = "inspiration.message"
+    audit_detail = ""
+    audit_metadata: dict = {
+        "space_id": int(space_id),
+        "user_message_id": int(user_message_id),
+    }
+    try:
+        with session_scope() as s:
+            space = s.get(InspirationSpace, int(space_id))
+            user_message = s.get(InspirationMessage, int(user_message_id))
+            pending_message = s.get(InspirationMessage, int(pending_message_id))
+            if space is None or user_message is None or pending_message is None:
+                return
+            messages = (
+                s.query(InspirationMessage)
+                .filter(InspirationMessage.space_id == int(space_id))
+                .filter(InspirationMessage.kind != "pending")
+                .order_by(InspirationMessage.id.asc())
+                .all()
+            )
+            resources = _inspiration_non_deleted_resources(s, int(space_id))
+            command_kind = _inspiration_command_kind(str(user_message.content or ""))
+
+        provider, _err = _get_llm_provider_or_error()
+        user_text = str(user_message.content or "")
+        result = await asyncio.to_thread(
+            _inspiration_generate_followup_result,
+            command_kind=command_kind,
+            provider=provider,
+            space=space,
+            messages=messages,
+            resources=resources,
+            user_text=user_text,
+        )
+        audit_kind = str(result.get("audit_kind") or audit_kind)
+        audit_detail = str(result.get("audit_detail") or audit_detail)
+        audit_metadata.update(result.get("audit_metadata") or {})
+
+        if command_kind == "summary_title":
+            with session_scope() as s:
+                pending = s.get(InspirationMessage, int(pending_message_id))
+                current_space = s.get(InspirationSpace, int(space_id))
+                if pending is None or current_space is None:
+                    return
+                pending.kind = str(result.get("message_kind") or "title_suggestions")
+                pending.content = str(result.get("content") or "")
+                pending.payload = result.get("payload") or {}
+                current_space.last_activity_at = _utcnow()
+        elif command_kind == "plan":
+            data = result.get("draft_data") or {}
+            with session_scope() as s:
+                pending = s.get(InspirationMessage, int(pending_message_id))
+                current_space = s.get(InspirationSpace, int(space_id))
+                if pending is None or current_space is None:
+                    return
+                latest = _inspiration_latest_draft(s, int(space_id))
+                version = int(latest.version if latest is not None else 0) + 1
+                draft = InspirationDraft(
+                    space_id=int(space_id),
+                    version=version,
+                    goal_title=str(
+                        data.get("goal_title") or current_space.title
+                    ).strip()[:2000],
+                    goal_description=str(data.get("goal_description") or "").strip()[
+                        :20000
+                    ],
+                    tasks=data.get("tasks") or [],
+                    open_questions=data.get("open_questions") or [],
+                    rejected_or_deferred_ideas=data.get("rejected_or_deferred_ideas")
+                    or [],
+                    source_message_id=int(user_message_id),
+                )
+                s.add(draft)
+                s.flush()
+                draft_payload = _inspiration_draft_payload(draft)
+                pending.kind = "draft_generated"
+                pending.content = f"Draft v{int(draft.version)} is ready. Review it in the chat stream and decide whether to publish."
+                pending.payload = {"draft": draft_payload}
+                pending.draft_version = int(draft.version)
+                current_space.last_activity_at = _utcnow()
+            audit_detail = json.dumps(draft_payload, ensure_ascii=False, indent=2)
+            audit_metadata["draft_id"] = int(draft_payload["id"])
+            audit_metadata["version"] = int(draft_payload["version"])
+        else:
+            with session_scope() as s:
+                pending = s.get(InspirationMessage, int(pending_message_id))
+                current_space = s.get(InspirationSpace, int(space_id))
+                if pending is None or current_space is None:
+                    return
+                pending.kind = str(result.get("message_kind") or "message")
+                pending.content = str(result.get("content") or "")
+                pending.payload = result.get("payload") or {}
+                current_space.last_activity_at = _utcnow()
+
+        await asyncio.to_thread(_inspiration_maybe_emit_phase_summary, int(space_id))
+        await asyncio.to_thread(
+            _try_audit_memory,
+            kind=audit_kind,
+            source="inspiration",
+            summary=f"Inspiration space {int(space_id)} completed a {command_kind} turn.",
+            detail=audit_detail,
+            metadata=audit_metadata,
+        )
+    except Exception as e:
+        with session_scope() as s:
+            pending = s.get(InspirationMessage, int(pending_message_id))
+            current_space = s.get(InspirationSpace, int(space_id))
+            if pending is None:
+                return
+            pending.kind = "error"
+            pending.content = f"Failed to generate a response: {str(e)}"
+            pending.payload = {"error": str(e)}
+            if current_space is not None:
+                current_space.last_activity_at = _utcnow()
+        await asyncio.to_thread(
+            _try_audit_memory,
+            kind="inspiration.error",
+            source="inspiration",
+            summary=f"Inspiration space {int(space_id)} failed to generate a response.",
+            detail=str(e),
+            metadata={
+                "space_id": int(space_id),
+                "user_message_id": int(user_message_id),
+            },
+        )
+
+
+def _inspiration_prepare_publish(
+    space_id: int, draft_id: int | None, due_date: dt.date
+) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        current_status = str(space.status or "open")
+        if current_status not in {"open", "closed"}:
+            raise HTTPException(
+                status_code=400, detail="This space cannot be published"
+            )
+        if _inspiration_is_waiting(s, int(space_id)):
+            raise HTTPException(status_code=409, detail="Agent is still responding")
+        draft: InspirationDraft | None
+        if draft_id is None:
+            draft = _inspiration_latest_draft(s, int(space_id))
+        else:
+            draft = s.get(InspirationDraft, int(draft_id))
+            if draft is not None and int(draft.space_id) != int(space_id):
+                draft = None
+        if draft is None:
+            raise HTTPException(
+                status_code=400, detail="No draft is available for publishing"
+            )
+        picked_tasks: list[dict] = []
+        for raw in draft.tasks or []:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "title": str(raw.get("title") or "").strip()[:512],
+                "description": str(raw.get("description") or "").strip()[:4000],
+            }
+            if item["title"]:
+                picked_tasks.append(item)
+        if not picked_tasks:
+            raise HTTPException(
+                status_code=400, detail="The draft does not contain publishable tasks"
+            )
+        space.status = "publishing"
+        space.last_activity_at = _utcnow()
+        return {
+            "draft_id": int(draft.id),
+            "previous_status": current_status,
+            "due_date": due_date.isoformat(),
+        }
+
+
+def _inspiration_load_publish_snapshot(space_id: int, draft_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        if str(space.status or "") != "publishing":
+            raise RuntimeError("Inspiration space is not in publishing state")
+        draft = s.get(InspirationDraft, int(draft_id))
+        if draft is None or int(draft.space_id) != int(space_id):
+            raise RuntimeError("Draft not found during publishing")
+
+        picked_tasks: list[dict] = []
+        for raw in draft.tasks or []:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "title": str(raw.get("title") or "").strip()[:512],
+                "description": str(raw.get("description") or "").strip()[:4000],
+            }
+            if item["title"]:
+                picked_tasks.append(item)
+        if not picked_tasks:
+            raise RuntimeError("The draft does not contain publishable tasks")
+
+        return {
+            "space_title": str(space.title or "").strip(),
+            "goal_title": str(draft.goal_title or space.title).strip()[:2000]
+            or space.title,
+            "goal_description": str(draft.goal_description or "").strip()[:4000],
+            "picked_tasks": picked_tasks,
+            "draft_payload": _inspiration_draft_payload(draft),
+        }
+
+
+def _inspiration_publish_sync(
+    *,
+    space_id: int,
+    draft_id: int,
+    due_date_iso: str,
+    previous_status: str,
+) -> None:
+    due_date = dt.date.fromisoformat(str(due_date_iso))
+    created_goal_id = 0
+    created_task_ids: list[int] = []
+    draft_payload: dict | None = None
+    try:
+        publish_snapshot = _inspiration_load_publish_snapshot(
+            int(space_id), int(draft_id)
+        )
+        picked_tasks = list(publish_snapshot.get("picked_tasks") or [])
+        draft_payload = publish_snapshot.get("draft_payload") or None
+        provider, _err = _get_llm_provider_or_error()
+        goal_title = str(publish_snapshot.get("goal_title") or "").strip()
+        goal_description = str(publish_snapshot.get("goal_description") or "").strip()
+        goal_summary = _summarize_items(provider, [goal_title])[0]
+        task_summaries = _summarize_items(
+            provider, [str(item.get("title") or "") for item in picked_tasks]
+        )
+
+        with session_scope() as s:
+            space = _inspiration_space_or_404(s, int(space_id))
+            if str(space.status or "") != "publishing":
+                raise RuntimeError("Inspiration space is not in publishing state")
+            draft = s.get(InspirationDraft, int(draft_id))
+            if draft is None or int(draft.space_id) != int(space_id):
+                raise RuntimeError("Draft not found during publishing")
+            goal = Goal(
+                content=goal_title,
+                summary=goal_summary,
+                description=goal_description,
+                due_date=due_date,
+                source_inspiration_space_id=int(space_id),
+                source_inspiration_draft_id=int(draft.id),
+            )
+            s.add(goal)
+            s.flush()
+            created_goal_id = int(goal.id)
+
+            created_tasks: list[Task] = []
+            for idx, item in enumerate(picked_tasks):
+                title = str(item.get("title") or "").strip()
+                description = str(item.get("description") or "").strip()
+                task_type = _infer_task_type(title, description)
+                estimated_minutes = _infer_estimated_minutes(
+                    task_type, title, description
+                )
+                context_key = _infer_context_key(
+                    title,
+                    description,
+                    goal_id=int(goal.id),
+                )
+                task = Task(
+                    goal_id=int(goal.id),
+                    title=title,
+                    summary=task_summaries[idx],
+                    description=description,
+                    status="todo",
+                    task_type=task_type,
+                    estimated_minutes=estimated_minutes,
+                    context_key=context_key,
+                    source_inspiration_space_id=int(space_id),
+                    source_inspiration_draft_id=int(draft.id),
+                )
+                s.add(task)
+                s.flush()
+                created_tasks.append(task)
+                created_task_ids.append(int(task.id))
+
+            summary_text = _inspiration_build_published_summary(
+                space=space,
+                draft=draft,
+                goal=goal,
+                created_tasks=created_tasks,
+                deferred_tasks=[],
+            )
+            seq_id = _inspiration_next_resource_seq(s, int(space_id))
+            summary_resource = InspirationResource(
+                space_id=int(space_id),
+                resource_seq_id=int(seq_id),
+                type="summary",
+                name=f"Published Summary v{int(draft.version)}",
+                text_content=summary_text,
+                url_content="",
+                file_path="",
+                is_system_generated=True,
+            )
+            s.add(summary_resource)
+            s.flush()
+            record = InspirationPublishRecord(
+                space_id=int(space_id),
+                draft_id=int(draft.id),
+                created_goal_id=int(goal.id),
+                created_task_ids=created_task_ids,
+                deferred_tasks=[],
+                summary_resource_id=int(summary_resource.id),
+            )
+            s.add(record)
+            space.status = "published"
+            space.published_goal_id = int(goal.id)
+            space.published_at = _utcnow()
+            space.last_activity_at = _utcnow()
+            s.add(
+                InspirationMessage(
+                    space_id=int(space_id),
+                    role="assistant",
+                    kind="published",
+                    content=f"Published draft v{int(draft.version)} into Goal #{int(goal.id)} with {len(created_tasks)} tasks.",
+                    payload={
+                        "draft_id": int(draft.id),
+                        "created_goal_id": int(goal.id),
+                        "created_task_ids": created_task_ids,
+                    },
+                    draft_version=int(draft.version),
+                )
+            )
+    except Exception as e:
+        with session_scope() as s:
+            space = s.get(InspirationSpace, int(space_id))
+            if space is not None:
+                space.status = previous_status
+                space.last_activity_at = _utcnow()
+                s.add(
+                    InspirationMessage(
+                        space_id=int(space_id),
+                        role="assistant",
+                        kind="error",
+                        content=f"Failed to publish the draft: {str(e)}",
+                        payload={"error": str(e), "draft_id": int(draft_id)},
+                    )
+                )
+        _try_audit_memory(
+            kind="inspiration.publish_error",
+            source="web",
+            summary=f"Failed publishing inspiration space {int(space_id)}.",
+            detail=str(e),
+            metadata={"space_id": int(space_id), "draft_id": int(draft_id)},
+        )
+        return
+
+    _try_audit_memory(
+        kind="inspiration.published",
+        source="web",
+        summary=f"Published inspiration space {int(space_id)} into goal {int(created_goal_id)}.",
+        detail=json.dumps(
+            {
+                "draft": draft_payload or {},
+                "created_goal_id": created_goal_id,
+                "created_task_ids": created_task_ids,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        goal_id=created_goal_id,
+        metadata={"space_id": int(space_id), "created_task_ids": created_task_ids},
+    )
+
+
+async def _kickoff_inspiration_publish(
+    *,
+    space_id: int,
+    draft_id: int,
+    due_date_iso: str,
+    previous_status: str,
+) -> None:
+    await asyncio.to_thread(
+        _inspiration_publish_sync,
+        space_id=int(space_id),
+        draft_id=int(draft_id),
+        due_date_iso=str(due_date_iso),
+        previous_status=str(previous_status or "open"),
+    )
+
+
+async def _inspiration_enqueue_turn(space_id: int, content: str) -> dict:
+    text = str(content or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="content is required")
+    if len(text) > 20000:
+        text = text[:20000]
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces accept new messages"
+            )
+        if _inspiration_is_waiting(s, int(space_id)):
+            raise HTTPException(status_code=409, detail="Agent is still responding")
+        now = _utcnow()
+        command_kind = _inspiration_command_kind(text)
+        user_message = InspirationMessage(
+            space_id=int(space_id),
+            role="user",
+            kind=_inspiration_user_message_kind(text),
+            content=text,
+        )
+        pending_message = InspirationMessage(
+            space_id=int(space_id),
+            role="assistant",
+            kind="pending",
+            content=_inspiration_pending_text(command_kind),
+            payload={"command": command_kind},
+        )
+        s.add(user_message)
+        s.add(pending_message)
+        space.message_turn_count = int(space.message_turn_count or 0) + 1
+        space.last_activity_at = now
+        s.flush()
+        user_payload = _inspiration_message_payload(user_message)
+        pending_payload = _inspiration_message_payload(pending_message)
+        queued_command = command_kind
+        user_message_id = int(user_message.id)
+        pending_message_id = int(pending_message.id)
+
+    try:
+        asyncio.get_running_loop().create_task(
+            _kickoff_inspiration_followup(
+                space_id=int(space_id),
+                user_message_id=int(user_message_id),
+                pending_message_id=int(pending_message_id),
+            )
+        )
+    except RuntimeError:
+        pass
+
+    return {
+        "ok": True,
+        "queued": True,
+        "command_kind": queued_command,
+        "user_message": user_payload,
+        "assistant_message": pending_payload,
+        "is_waiting": True,
+    }
 
 
 @app.get("/", include_in_schema=False)
@@ -3567,6 +4776,740 @@ async def goal_plan_create_single_task(
 
     # Fallback
     return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
+
+
+@app.get("/api/inspirations")
+def inspirations_list_api(limit: int = 50) -> dict:
+    limit = max(1, min(int(limit or 50), 200))
+    with session_scope() as s:
+        spaces = (
+            s.query(InspirationSpace)
+            .order_by(
+                InspirationSpace.last_activity_at.desc(), InspirationSpace.id.desc()
+            )
+            .limit(limit)
+            .all()
+        )
+        space_ids = [int(sp.id) for sp in spaces]
+        resource_counts = {sid: 0 for sid in space_ids}
+        draft_counts = {sid: 0 for sid in space_ids}
+        publish_counts = {sid: 0 for sid in space_ids}
+        latest_drafts: dict[int, InspirationDraft] = {}
+        if space_ids:
+            for sid, count in (
+                s.query(InspirationResource.space_id, InspirationResource.id)
+                .filter(InspirationResource.space_id.in_(space_ids))
+                .filter(InspirationResource.deleted_at.is_(None))
+                .all()
+            ):
+                resource_counts[int(sid)] = resource_counts.get(int(sid), 0) + 1
+            for sid, count in (
+                s.query(InspirationDraft.space_id, InspirationDraft.id)
+                .filter(InspirationDraft.space_id.in_(space_ids))
+                .all()
+            ):
+                draft_counts[int(sid)] = draft_counts.get(int(sid), 0) + 1
+            for sid, count in (
+                s.query(InspirationPublishRecord.space_id, InspirationPublishRecord.id)
+                .filter(InspirationPublishRecord.space_id.in_(space_ids))
+                .all()
+            ):
+                publish_counts[int(sid)] = publish_counts.get(int(sid), 0) + 1
+            drafts = (
+                s.query(InspirationDraft)
+                .filter(InspirationDraft.space_id.in_(space_ids))
+                .order_by(
+                    InspirationDraft.space_id.asc(),
+                    InspirationDraft.version.desc(),
+                    InspirationDraft.id.desc(),
+                )
+                .all()
+            )
+            for draft in drafts:
+                sid = int(draft.space_id)
+                if sid not in latest_drafts:
+                    latest_drafts[sid] = draft
+    return {
+        "ok": True,
+        "items": [
+            _inspiration_space_payload(
+                space,
+                latest_draft=latest_drafts.get(int(space.id)),
+                resource_count=resource_counts.get(int(space.id), 0),
+                draft_count=draft_counts.get(int(space.id), 0),
+                publish_count=publish_counts.get(int(space.id), 0),
+            )
+            for space in spaces
+        ],
+    }
+
+
+@app.post("/api/inspirations")
+def inspirations_create_api(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    title = str(payload.get("title") or "").strip()
+    initial_message = str(
+        payload.get("initial_message") or payload.get("message") or ""
+    ).strip()
+    if not title and not initial_message:
+        raise HTTPException(
+            status_code=400, detail="title or initial_message is required"
+        )
+    if not title:
+        title = _truncate_zh(initial_message.replace("\n", " "), 40) or "Inspiration"
+    title = title[:512]
+
+    space_id = 0
+    created_payload: dict | None = None
+    with session_scope() as s:
+        now = _utcnow()
+        space = InspirationSpace(
+            title=title,
+            status="open",
+            last_activity_at=now,
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        s.add(
+            InspirationMessage(
+                space_id=space_id,
+                role="assistant",
+                kind="system",
+                content="This is your Inspiration space. Keep exploring here, generate drafts when ready, and publish only when the structure looks solid.",
+            )
+        )
+        if initial_message:
+            s.add(
+                InspirationMessage(
+                    space_id=space_id,
+                    role="user",
+                    kind="message",
+                    content=initial_message[:20000],
+                )
+            )
+            space.message_turn_count = 1
+            space.last_activity_at = now
+            provider, _err = _get_llm_provider_or_error()
+            messages = (
+                s.query(InspirationMessage)
+                .filter(InspirationMessage.space_id == space_id)
+                .order_by(InspirationMessage.id.asc())
+                .all()
+            )
+            resources = _inspiration_non_deleted_resources(s, space_id)
+            if provider is None:
+                reply = _inspiration_fallback_reply(space, initial_message)
+            else:
+                try:
+                    reply = _inspiration_llm_reply(
+                        provider,
+                        space=space,
+                        messages=messages,
+                        resources=resources,
+                    )
+                except Exception:
+                    reply = _inspiration_fallback_reply(space, initial_message)
+            s.add(
+                InspirationMessage(
+                    space_id=space_id,
+                    role="assistant",
+                    kind="message",
+                    content=reply,
+                )
+            )
+        created_payload = _inspiration_space_payload(space)
+    _try_audit_memory(
+        kind="inspiration.space_created",
+        source="web",
+        summary=f"Created inspiration space {space_id}.",
+        detail=initial_message or title,
+        metadata={"space_id": space_id, "title": title},
+    )
+    if initial_message:
+        _inspiration_maybe_emit_phase_summary(space_id)
+    return {"ok": True, "item": created_payload}
+
+
+@app.get("/api/inspirations/{space_id:int}")
+def inspirations_get_api(
+    space_id: int, before_id: int | None = None, page_size: int = 60
+) -> dict:
+    page_size = max(1, min(int(page_size or 60), 200))
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        is_waiting = _inspiration_is_waiting(s, int(space_id))
+        messages, next_before = _inspiration_messages_page(
+            s,
+            int(space_id),
+            before_id=before_id,
+            page_size=page_size,
+        )
+        resources = _inspiration_non_deleted_resources(s, int(space_id))
+        drafts = (
+            s.query(InspirationDraft)
+            .filter(InspirationDraft.space_id == int(space_id))
+            .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
+            .all()
+        )
+        records = (
+            s.query(InspirationPublishRecord)
+            .filter(InspirationPublishRecord.space_id == int(space_id))
+            .order_by(InspirationPublishRecord.id.desc())
+            .all()
+        )
+        latest_draft = drafts[0] if drafts else None
+        item = _inspiration_space_payload(
+            space,
+            latest_draft=latest_draft,
+            resource_count=len(resources),
+            draft_count=len(drafts),
+            publish_count=len(records),
+        )
+        return {
+            "ok": True,
+            "item": item,
+            "is_waiting": is_waiting,
+            "is_publishing": _inspiration_is_publishing(space),
+            "messages": [_inspiration_message_payload(msg) for msg in messages],
+            "next_before_id": next_before,
+            "resources": [
+                _inspiration_resource_payload(int(space_id), res, include_text=True)
+                for res in resources
+            ],
+            "drafts": [_inspiration_draft_payload(draft) for draft in drafts],
+            "publish_records": [
+                _inspiration_publish_record_payload(record) for record in records
+            ],
+        }
+
+
+@app.post("/api/inspirations/{space_id:int}/messages")
+async def inspiration_message_create_api(space_id: int, payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    content = str(payload.get("content") or "").strip()
+    return await _inspiration_enqueue_turn(int(space_id), content)
+
+
+@app.post("/api/inspirations/{space_id:int}/close")
+def inspiration_close_api(space_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") == "published":
+            raise HTTPException(
+                status_code=400, detail="Published spaces cannot be closed"
+            )
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces can be closed"
+            )
+        now = _utcnow()
+        space.status = "closed"
+        space.closed_at = now
+        space.last_activity_at = now
+        s.add(
+            InspirationMessage(
+                space_id=int(space_id),
+                role="assistant",
+                kind="system",
+                content="This Inspiration space is now closed. Reopen it to continue editing.",
+            )
+        )
+        payload = _inspiration_space_payload(space)
+    _try_audit_memory(
+        kind="inspiration.closed",
+        source="web",
+        summary=f"Closed inspiration space {int(space_id)}.",
+        detail="User closed the inspiration space.",
+        metadata={"space_id": int(space_id)},
+    )
+    return {"ok": True, "item": payload}
+
+
+@app.post("/api/inspirations/{space_id:int}/reopen")
+def inspiration_reopen_api(space_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") != "closed":
+            raise HTTPException(
+                status_code=400, detail="Only closed spaces can be reopened"
+            )
+        now = _utcnow()
+        space.status = "open"
+        space.closed_at = None
+        space.last_activity_at = now
+        s.add(
+            InspirationMessage(
+                space_id=int(space_id),
+                role="assistant",
+                kind="system",
+                content="This Inspiration space is open again. You can continue the discussion.",
+            )
+        )
+        payload = _inspiration_space_payload(space)
+    _try_audit_memory(
+        kind="inspiration.reopened",
+        source="web",
+        summary=f"Reopened inspiration space {int(space_id)}.",
+        detail="User reopened the inspiration space.",
+        metadata={"space_id": int(space_id)},
+    )
+    return {"ok": True, "item": payload}
+
+
+@app.delete("/api/inspirations/{space_id:int}")
+def inspiration_delete_api(space_id: int) -> dict:
+    removed_files_dir = str(_inspiration_space_files_dir(int(space_id)))
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") == "published":
+            raise HTTPException(
+                status_code=400, detail="Published spaces cannot be deleted"
+            )
+        s.query(InspirationPublishRecord).filter(
+            InspirationPublishRecord.space_id == int(space_id)
+        ).delete(synchronize_session=False)
+        s.query(InspirationDraft).filter(
+            InspirationDraft.space_id == int(space_id)
+        ).delete(synchronize_session=False)
+        s.query(InspirationMessage).filter(
+            InspirationMessage.space_id == int(space_id)
+        ).delete(synchronize_session=False)
+        s.query(InspirationResource).filter(
+            InspirationResource.space_id == int(space_id)
+        ).delete(synchronize_session=False)
+        s.delete(space)
+    try:
+        shutil.rmtree(removed_files_dir, ignore_errors=True)
+    except Exception:
+        pass
+    _try_audit_memory(
+        kind="inspiration.deleted",
+        source="web",
+        summary=f"Deleted inspiration space {int(space_id)}.",
+        detail="User deleted the inspiration space before publication.",
+        metadata={"space_id": int(space_id)},
+    )
+    return {"ok": True, "space_id": int(space_id)}
+
+
+@app.post("/api/inspirations/{space_id:int}/resources")
+async def inspiration_resource_create_api(
+    space_id: int,
+    resource_type: str = Form(..., alias="type"),
+    name: str | None = Form(default=None),
+    text_content: str | None = Form(default=None),
+    url_content: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+) -> dict:
+    normalized_type = str(resource_type or "").strip().lower()
+    if normalized_type not in {"url", "image", "text", "summary"}:
+        raise HTTPException(status_code=400, detail="unsupported resource type")
+
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces accept new resources"
+            )
+        seq_id = _inspiration_next_resource_seq(s, int(space_id))
+        resource_name = str(name or "").strip()
+        now = _utcnow()
+        resource = InspirationResource(
+            space_id=int(space_id),
+            resource_seq_id=int(seq_id),
+            type=normalized_type,
+            name=resource_name or f"resource-{int(seq_id)}",
+            text_content="",
+            url_content="",
+            file_path="",
+            is_system_generated=False,
+        )
+        if normalized_type == "url":
+            url_text = str(url_content or "").strip()
+            if not url_text:
+                raise HTTPException(status_code=400, detail="url_content is required")
+            resource.url_content = url_text[:4000]
+            if not resource_name:
+                resource.name = url_text[:512]
+        elif normalized_type in {"text", "summary"}:
+            body = str(text_content or "").strip()
+            if not body:
+                raise HTTPException(status_code=400, detail="text_content is required")
+            resource.text_content = body[:20000]
+            if normalized_type == "summary":
+                resource.is_system_generated = True
+            if not resource_name:
+                resource.name = f"{normalized_type}-{int(seq_id)}"
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="file is required for image resources"
+                )
+            (
+                target_path,
+                uploaded_name,
+            ) = await _inspiration_store_uploaded_resource_file(
+                space_id=int(space_id),
+                seq_id=int(seq_id),
+                file=file,
+            )
+            resource.file_path = str(target_path)
+            resource.name = resource_name or uploaded_name
+        s.add(resource)
+        space.last_activity_at = now
+        s.flush()
+        payload = _inspiration_resource_payload(
+            int(space_id), resource, include_text=True
+        )
+    _try_audit_memory(
+        kind="inspiration.resource_added",
+        source="web",
+        summary=f"Added a {normalized_type} resource to inspiration space {int(space_id)}.",
+        detail=str(payload.get("reference") or ""),
+        metadata={
+            "space_id": int(space_id),
+            "resource_id": int(payload["id"]),
+            "resource_type": normalized_type,
+        },
+    )
+    return {"ok": True, "item": payload}
+
+
+@app.patch("/api/inspirations/{space_id:int}/resources/{resource_id:int}")
+def inspiration_resource_update_api(
+    space_id: int, resource_id: int, payload: dict
+) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces can edit resources"
+            )
+        resource = s.get(InspirationResource, int(resource_id))
+        if resource is None or int(resource.space_id) != int(space_id):
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if resource.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if "name" in payload:
+            name = str(payload.get("name") or "").strip()
+            if name:
+                resource.name = name[:512]
+        if str(resource.type or "") == "url" and "url_content" in payload:
+            url_text = str(payload.get("url_content") or "").strip()
+            if not url_text:
+                raise HTTPException(status_code=400, detail="url_content is required")
+            resource.url_content = url_text[:4000]
+        if (
+            str(resource.type or "") in {"text", "summary"}
+            and "text_content" in payload
+        ):
+            body = str(payload.get("text_content") or "").strip()
+            if not body:
+                raise HTTPException(status_code=400, detail="text_content is required")
+            resource.text_content = body[:20000]
+        space.last_activity_at = _utcnow()
+        payload_out = _inspiration_resource_payload(
+            int(space_id), resource, include_text=True
+        )
+    return {"ok": True, "item": payload_out}
+
+
+@app.post("/api/inspirations/{space_id:int}/resources/{resource_id:int}/replace")
+async def inspiration_resource_replace_api(
+    space_id: int,
+    resource_id: int,
+    name: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+) -> dict:
+    if file is None:
+        raise HTTPException(
+            status_code=400, detail="file is required for image replacement"
+        )
+    old_path_raw = ""
+    new_path_obj: Path | None = None
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces can replace resource files"
+            )
+        resource = s.get(InspirationResource, int(resource_id))
+        if resource is None or int(resource.space_id) != int(space_id):
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if resource.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if str(resource.type or "") != "image":
+            raise HTTPException(
+                status_code=400, detail="Only image resources support replace"
+            )
+        old_path_raw = str(resource.file_path or "").strip()
+        new_path_obj, uploaded_name = await _inspiration_store_uploaded_resource_file(
+            space_id=int(space_id),
+            seq_id=int(resource.resource_seq_id or 0),
+            file=file,
+        )
+        resource.file_path = str(new_path_obj)
+        next_name = str(name or "").strip()
+        if next_name:
+            resource.name = next_name[:512]
+        elif not str(resource.name or "").strip():
+            resource.name = uploaded_name
+        space.last_activity_at = _utcnow()
+        payload_out = _inspiration_resource_payload(
+            int(space_id), resource, include_text=True
+        )
+    if old_path_raw:
+        try:
+            old_path = Path(old_path_raw).expanduser()
+            if (
+                new_path_obj is not None
+                and old_path != new_path_obj
+                and old_path.exists()
+                and old_path.is_file()
+            ):
+                old_path.unlink()
+        except Exception:
+            pass
+    return {"ok": True, "item": payload_out}
+
+
+@app.delete("/api/inspirations/{space_id:int}/resources/{resource_id:int}")
+def inspiration_resource_delete_api(space_id: int, resource_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, space_id)
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces can delete resources"
+            )
+        resource = s.get(InspirationResource, int(resource_id))
+        if resource is None or int(resource.space_id) != int(space_id):
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if resource.deleted_at is not None:
+            return {"ok": True, "resource_id": int(resource_id)}
+        resource.deleted_at = _utcnow()
+        space.last_activity_at = _utcnow()
+    return {"ok": True, "resource_id": int(resource_id)}
+
+
+@app.get("/api/inspirations/{space_id:int}/resources/{resource_id:int}/raw")
+def inspiration_resource_raw_api(space_id: int, resource_id: int) -> FileResponse:
+    with session_scope() as s:
+        _inspiration_space_or_404(s, space_id)
+        resource = s.get(InspirationResource, int(resource_id))
+        if resource is None or int(resource.space_id) != int(space_id):
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if resource.deleted_at is not None or not str(resource.file_path or "").strip():
+            raise HTTPException(status_code=404, detail="File resource not found")
+        file_path = Path(str(resource.file_path or "")).expanduser()
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail="File resource not found")
+        return FileResponse(
+            path=str(file_path),
+            media_type=_guess_media_type(file_path),
+            filename=str(resource.name or file_path.name),
+        )
+
+
+@app.post("/api/inspirations/{space_id:int}/commands/summary_title")
+async def inspiration_summary_title_api(space_id: int) -> dict:
+    return await _inspiration_enqueue_turn(int(space_id), "/summary_title")
+
+
+@app.post("/api/inspirations/{space_id:int}/drafts/generate")
+async def inspiration_draft_generate_api(space_id: int) -> dict:
+    return await _inspiration_enqueue_turn(int(space_id), "/plan")
+
+
+@app.get("/api/inspirations/{space_id:int}/drafts")
+def inspiration_drafts_list_api(space_id: int) -> dict:
+    with session_scope() as s:
+        _inspiration_space_or_404(s, space_id)
+        drafts = (
+            s.query(InspirationDraft)
+            .filter(InspirationDraft.space_id == int(space_id))
+            .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
+            .all()
+        )
+    return {
+        "ok": True,
+        "items": [_inspiration_draft_payload(draft) for draft in drafts],
+    }
+
+
+@app.post("/api/inspirations/{space_id:int}/publish")
+async def inspiration_publish_api(space_id: int, payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    due_date_raw = str(payload.get("due_date") or "").strip()
+    if due_date_raw:
+        due_date = dt.date.fromisoformat(due_date_raw)
+    else:
+        due_date = dt.date.today() + dt.timedelta(days=7)
+    draft_id = payload.get("draft_id")
+    publish_info = _inspiration_prepare_publish(
+        int(space_id),
+        int(draft_id) if draft_id is not None else None,
+        due_date,
+    )
+    asyncio.get_running_loop().create_task(
+        _kickoff_inspiration_publish(
+            space_id=int(space_id),
+            draft_id=int(publish_info["draft_id"]),
+            due_date_iso=str(publish_info["due_date"]),
+            previous_status=str(publish_info["previous_status"]),
+        )
+    )
+    return {
+        "ok": True,
+        "queued": True,
+        "space_id": int(space_id),
+        "draft_id": int(publish_info["draft_id"]),
+        "status": "publishing",
+    }
+
+
+@app.post("/api/inspirations/{space_id:int}/fork")
+def inspiration_fork_api(space_id: int, payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        payload = {}
+    title = str(payload.get("title") or "").strip()
+    include_all_resources = bool(payload.get("include_all_resources"))
+    selected_resource_ids_raw = payload.get("resource_ids") or []
+    selected_resource_ids: set[int] = set()
+    for item in selected_resource_ids_raw:
+        try:
+            selected_resource_ids.add(int(item))
+        except Exception:
+            continue
+
+    with session_scope() as s:
+        source_space = _inspiration_space_or_404(s, space_id)
+        target_title = (
+            title[:512]
+            if title
+            else _inspiration_default_followup_title(source_space.title)
+        )
+        now = _utcnow()
+        forked = InspirationSpace(
+            title=target_title,
+            status="open",
+            forked_from_space_id=int(source_space.id),
+            last_activity_at=now,
+        )
+        s.add(forked)
+        s.flush()
+        new_space_id = int(forked.id)
+
+        resources = _inspiration_non_deleted_resources(s, int(space_id))
+        seq_id = 1
+        for resource in resources:
+            if str(resource.type or "") == "summary":
+                _inspiration_clone_resource(
+                    s=s,
+                    source=resource,
+                    target_space_id=new_space_id,
+                    seq_id=seq_id,
+                )
+                seq_id += 1
+                continue
+            if include_all_resources or int(resource.id) in selected_resource_ids:
+                _inspiration_clone_resource(
+                    s=s,
+                    source=resource,
+                    target_space_id=new_space_id,
+                    seq_id=seq_id,
+                )
+                seq_id += 1
+
+        s.add(
+            InspirationMessage(
+                space_id=new_space_id,
+                role="assistant",
+                kind="system",
+                content=(
+                    f"Forked from Inspiration space #{int(source_space.id)}. "
+                    "The published summary is preserved here so you can continue exploring a follow-up direction."
+                ),
+            )
+        )
+        payload_out = _inspiration_space_payload(forked)
+    _try_audit_memory(
+        kind="inspiration.forked",
+        source="web",
+        summary=f"Forked inspiration space {int(space_id)} into {int(payload_out['id'])}.",
+        detail=payload_out["title"],
+        metadata={"space_id": int(space_id), "forked_space_id": int(payload_out["id"])},
+    )
+    return {"ok": True, "item": payload_out}
+
+
+def _inspiration_detail_page_context(space_id: int | None) -> dict:
+    with session_scope() as s:
+        spaces = (
+            s.query(InspirationSpace)
+            .order_by(
+                InspirationSpace.last_activity_at.desc(), InspirationSpace.id.desc()
+            )
+            .all()
+        )
+        space = (
+            _inspiration_space_or_404(s, int(space_id))
+            if space_id is not None
+            else None
+        )
+        is_waiting = (
+            _inspiration_is_waiting(s, int(space_id)) if space is not None else False
+        )
+        is_publishing = _inspiration_is_publishing(space)
+        messages: list[InspirationMessage] = []
+        resources: list[InspirationResource] = []
+        published_goal: Goal | None = None
+        if space is not None:
+            messages = (
+                s.query(InspirationMessage)
+                .filter(InspirationMessage.space_id == int(space_id))
+                .order_by(InspirationMessage.id.asc())
+                .all()
+            )
+            resources = _inspiration_non_deleted_resources(s, int(space_id))
+            published_goal = (
+                s.get(Goal, int(space.published_goal_id))
+                if getattr(space, "published_goal_id", None)
+                else None
+            )
+    return {
+        "spaces": spaces,
+        "space": space,
+        "is_waiting": is_waiting,
+        "is_publishing": is_publishing,
+        "messages": messages,
+        "resources": resources,
+        "published_goal": published_goal,
+        "default_due": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
+    }
+
+
+@app.get("/inspirations", response_class=HTMLResponse)
+def inspirations_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "inspiration_detail.html",
+        _inspiration_detail_page_context(None),
+    )
+
+
+@app.get("/inspirations/{space_id:int}", response_class=HTMLResponse)
+def inspiration_detail_page(request: Request, space_id: int) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "inspiration_detail.html",
+        _inspiration_detail_page_context(int(space_id)),
+    )
 
 
 def _memory_dir() -> Path:

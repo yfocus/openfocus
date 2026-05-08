@@ -322,6 +322,9 @@
                     </div>
                   </div>
                   <div class="detail-actions">
+                    {% if g.source_inspiration_space_id %}
+                      <a href="/inspirations/{{ g.source_inspiration_space_id }}" class="btn-ghost action-link" role="button">Inspiration</a>
+                    {% endif %}
                     {% if g.status != 'done' %}
                       <button type="button" class="btn-ghost action-link js-open-new-task" data-goal="{{ g.id }}">New Task</button>
                     {% endif %}
@@ -668,13 +671,7 @@
           <input id="goal-ddl" type="date" name="due_date" value="{{ default_due }}" required />
         </div>
         <div class="dlg-footer">
-          <div class="dlg-footer-left">
-            <label class="sw" title="Use Plan Mode">
-              <span class="sw-label">Plan Mode</span>
-              <input type="checkbox" id="goal-plan-mode" name="plan_mode" value="1" />
-              <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
-            </label>
-          </div>
+          <span></span>
           <button type="submit" id="new-goal-submit" class="btn-primary">Save</button>
         </div>
         <div id="new-goal-hint" class="muted" style="margin-top: 10px; display:none;"><span class="spin"></span> <span id="new-goal-hint-text">creating...</span></div>
@@ -2060,7 +2057,6 @@
       const ht = document.getElementById('new-goal-hint-text');
       if(!f || !b || !h || !ht) return;
 
-      const plan = document.getElementById('goal-plan-mode');
       const auto = document.getElementById('goal-auto');
       const titleEl = document.getElementById('goal-content');
       const descEl = document.getElementById('goal-description');
@@ -2068,11 +2064,6 @@
 
       let _submitting = false;
       let _manualTitleCache = '';
-
-      function _syncNewGoalPlanUI(){
-        const on = Boolean(plan && plan.checked);
-        if(b) b.textContent = on ? 'Plan' : 'Save';
-      }
 
       function _syncNewGoalAutoUI(){
         if(!(auto instanceof HTMLInputElement)) return;
@@ -2099,13 +2090,9 @@
       auto?.addEventListener('change', _syncNewGoalAutoUI);
       _syncNewGoalAutoUI();
 
-      plan?.addEventListener('change', _syncNewGoalPlanUI);
-      _syncNewGoalPlanUI();
-
       f.addEventListener('submit', (e)=>{
         if(_submitting) return;
 
-        const usePlan = Boolean(plan && plan.checked);
         const useAuto = Boolean(auto && auto.checked);
 
         const title = String(titleEl?.value || '').trim();
@@ -2118,39 +2105,6 @@
           return;
         }
 
-        // Plan Mode ON: always enter plan flow; do NOT create goal
-        if(usePlan){
-          e.preventDefault();
-          b.disabled = true;
-          h.style.display = 'block';
-          ht.textContent = 'planning...';
-          const raw = useAuto ? desc : ((title && desc) ? (title + '\n\n' + desc) : (title || desc));
-          let draft = f.querySelector('input[name="draft_content"]');
-          if(!(draft instanceof HTMLInputElement)){
-            draft = document.createElement('input');
-            draft.type = 'hidden';
-            draft.name = 'draft_content';
-            f.appendChild(draft);
-          }
-          draft.value = raw;
-
-          // IMPORTANT: plan/start expects due_date; ensure it exists even if form is repointed.
-          let dueHidden = f.querySelector('input[name="due_date"]');
-          if(!(dueHidden instanceof HTMLInputElement)){
-            dueHidden = document.createElement('input');
-            dueHidden.type = 'hidden';
-            dueHidden.name = 'due_date';
-            f.appendChild(dueHidden);
-          }
-          dueHidden.value = String(due || '').trim();
-
-          _submitting = true;
-          f.action = '/goals/plan/start';
-          try{ f.submit(); }catch(_){ }
-          return;
-        }
-
-        // Plan Mode OFF: create goal immediately
         if(useAuto){
           // Lightweight auto-title (no LLM): first non-empty line from Content.
           const lines = String(desc || '').split(/\r?\n/).map(s=> String(s||'').trim()).filter(Boolean);
