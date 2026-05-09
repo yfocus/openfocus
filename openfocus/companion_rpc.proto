@@ -204,6 +204,7 @@ message TerminalStartRequest {
   string request_id = 1;
   string terminal_id = 2;
   string root_path = 3;
+  string base_path = 4;
 }
 
 message TerminalStartResponse {
@@ -211,6 +212,8 @@ message TerminalStartResponse {
   bool ok = 2;
   string terminal_id = 3;
   string error = 4;
+  string backend = 5;
+  string connect_url = 6;
 }
 
 message TerminalStopRequest {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import datetime as dt
 import json
 import mimetypes
@@ -9,6 +10,9 @@ import os
 import re
 import shutil
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -226,11 +230,12 @@ def _install_agent_chunk_listener_once() -> None:
 _install_agent_chunk_listener_once()
 
 
-# Remote Terminal WS hub（按 terminal_id 组织）。
+# Remote Terminal event hub/state.
 _TERM_LOCK = asyncio.Lock()
 _TERM_SUBS: dict[str, set[asyncio.Queue[dict]]]
 _TERM_SUBS = {}
 _TERM_LISTENER_INSTALLED = False
+_TTYD_AGENT_MODE: dict[str, dict[str, object]] = {}
 
 
 async def _term_subscribe(terminal_id: str) -> asyncio.Queue[dict]:
@@ -262,6 +267,26 @@ def _term_publish(terminal_id: str, ev: dict) -> None:
             q.put_nowait(ev)
         except Exception:
             pass
+
+
+def _rewrite_ttyd_input_for_agent_mode(terminal_id: str, msg):
+    st = _TTYD_AGENT_MODE.get(str(terminal_id or "")) or {}
+    if not bool(st.get("enabled")):
+        return msg
+    prefix = str(st.get("prefix") or "").strip()
+    if not prefix:
+        return msg
+    paste_s = f"\x1b[200~ {prefix}\x1b[201~"
+    if isinstance(msg, bytes):
+        paste_b = paste_s.encode("utf-8")
+        if msg.startswith(b"0"):
+            return b"0" + msg[1:].replace(b"\r", paste_b + b"\r")
+        return msg.replace(b"\r", paste_b + b"\r")
+    if isinstance(msg, str):
+        if msg.startswith("0"):
+            return "0" + msg[1:].replace("\r", paste_s + "\r")
+        return msg.replace("\r", paste_s + "\r")
+    return msg
 
 
 async def _handle_terminal_output(out) -> None:
@@ -383,6 +408,12 @@ _TERM_HISTORY_MAX_BYTES = 1024 * 1024 * 1024
 
 # 回放接口单次返回的最大体积（避免把 1GB 直接塞给浏览器/WS）。
 _TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _ttyd_embed_path(space_id: int, terminal_id: str) -> str:
+    tid = urllib.parse.quote(str(terminal_id or ""), safe="")
+    return f"/api/agent_spaces/{int(space_id)}/terminals/{tid}/ttyd/"
+
 
 _MEMORY_LOCK = threading.RLock()
 
@@ -1161,6 +1192,19 @@ def _startup() -> None:
                 conn.execute(
                     text(
                         "ALTER TABLE remote_terminal_sessions ADD COLUMN name VARCHAR(128) NOT NULL DEFAULT ''"
+                    )
+                )
+                term_cols.append("name")
+            if "backend" not in term_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE remote_terminal_sessions ADD COLUMN backend VARCHAR(32) NOT NULL DEFAULT 'ttyd'"
+                    )
+                )
+            if "connect_url" not in term_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE remote_terminal_sessions ADD COLUMN connect_url VARCHAR(1024) NOT NULL DEFAULT ''"
                     )
                 )
         except Exception:
@@ -6603,6 +6647,24 @@ def terminals_list(space_id: int) -> dict:
 
     cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
     online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
+
+    def _terminal_payload(t: RemoteTerminalSession) -> dict:
+        backend = str(getattr(t, "backend", "") or "ttyd").strip() or "ttyd"
+        connect_url = str(getattr(t, "connect_url", "") or "").strip()
+        tid = str(t.terminal_id or "")
+        out = {
+            "terminal_id": tid,
+            "name": (t.name or ""),
+            "status": t.status,
+            "backend": backend,
+            "created_at": t.created_at.isoformat()
+            if hasattr(t.created_at, "isoformat")
+            else str(t.created_at),
+        }
+        if backend == "ttyd" and connect_url:
+            out["embed_url"] = _ttyd_embed_path(int(sp.id), tid)
+        return out
+
     return {
         "ok": True,
         "companion": {
@@ -6610,17 +6672,7 @@ def terminals_list(space_id: int) -> dict:
             "status": _companion_display_status(comp) if comp is not None else None,
             "online": online,
         },
-        "terminals": [
-            {
-                "terminal_id": t.terminal_id,
-                "name": (t.name or ""),
-                "status": t.status,
-                "created_at": t.created_at.isoformat()
-                if hasattr(t.created_at, "isoformat")
-                else str(t.created_at),
-            }
-            for t in terms
-        ],
+        "terminals": [_terminal_payload(t) for t in terms],
     }
 
 
@@ -6630,16 +6682,20 @@ async def terminals_new(space_id: int) -> dict:
     conn = _require_companion_online(sp=sp, comp=comp)
 
     terminal_id = str(uuid.uuid4())
+    ttyd_base_path = _ttyd_embed_path(int(sp.id), terminal_id)
     try:
         res = await conn.request_terminal_start(
             terminal_id=terminal_id,
             root_path=str(sp.root_path or ""),
+            base_path=ttyd_base_path,
             timeout_seconds=10.0,
         )
     except CompanionGrpcError as e:
         raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
 
     real_tid = (res.terminal_id or "").strip() or terminal_id
+    backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
+    connect_url = str(getattr(res, "connect_url", "") or "").strip()
 
     # 默认 name：terminal / terminal-2 / terminal-3 ...（同一 space 下不重复）
     with session_scope() as s:
@@ -6670,6 +6726,8 @@ async def terminals_new(space_id: int) -> dict:
             root_path=str(sp.root_path or ""),
             name=name,
             terminal_id=real_tid,
+            backend=backend,
+            connect_url=connect_url,
             status="active",
         )
         s.add(t)
@@ -6684,7 +6742,10 @@ async def terminals_new(space_id: int) -> dict:
         metadata={"space_id": int(sp.id), "terminal_id": real_tid, "name": name},
     )
 
-    return {"ok": True, "terminal": {"terminal_id": real_tid, "name": name}}
+    terminal_payload = {"terminal_id": real_tid, "name": name, "backend": backend}
+    if backend == "ttyd" and connect_url:
+        terminal_payload["embed_url"] = _ttyd_embed_path(int(sp.id), real_tid)
+    return {"ok": True, "terminal": terminal_payload}
 
 
 @app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/rename")
@@ -6726,6 +6787,77 @@ async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> di
     return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
 
+@app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/inject")
+async def terminals_inject(space_id: int, terminal_id: str, payload: dict) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+
+    with session_scope() as s:
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+
+    raw = b""
+    data_b64 = str((payload or {}).get("data_b64") or "")
+    if data_b64:
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception:
+            raw = b""
+    if not raw:
+        text_value = str((payload or {}).get("text") or "")
+        raw = text_value.encode("utf-8")
+    if not raw:
+        raise HTTPException(status_code=400, detail="data is required")
+
+    _try_audit_memory(
+        kind="terminal.input",
+        source="web",
+        summary=f"Terminal input injected to `{tid}`.",
+        detail=_memory_decode_terminal_bytes(raw),
+        task_public_id=str(sp.task_public_id or "") or None,
+        metadata={"space_id": int(sp.id), "terminal_id": tid, "injected": True},
+    )
+    try:
+        await conn.request_terminal_input(
+            terminal_id=tid, data=raw, timeout_seconds=10.0
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"terminal inject failed: {e}")
+    return {"ok": True}
+
+
+@app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/agent_mode")
+async def terminals_agent_mode(space_id: int, terminal_id: str, payload: dict) -> dict:
+    sp, _ = _load_space_and_optional_companion(space_id)
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+    enabled = bool((payload or {}).get("enabled"))
+    prefix = str((payload or {}).get("prefix") or "").strip()
+    if enabled and prefix:
+        _TTYD_AGENT_MODE[tid] = {"enabled": True, "prefix": prefix}
+    else:
+        _TTYD_AGENT_MODE.pop(tid, None)
+    return {"ok": True, "enabled": enabled}
+
+
 @app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/close")
 async def terminals_close(space_id: int, terminal_id: str) -> dict:
     sp, comp = _load_space_and_optional_companion(space_id)
@@ -6760,6 +6892,7 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
         s.query(RemoteTerminalOutput).filter(
             RemoteTerminalOutput.terminal_id == tid
         ).delete(synchronize_session=False)
+    _TTYD_AGENT_MODE.pop(tid, None)
 
     _try_audit_memory(
         kind="terminal.closed",
@@ -6771,6 +6904,209 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
     )
 
     return {"ok": True}
+
+
+def _load_ttyd_terminal(space_id: int, terminal_id: str) -> tuple[object, str]:
+    sp, _ = _load_space_and_optional_companion(space_id)
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        backend = str(getattr(t, "backend", "") or "ttyd").strip()
+        connect_url = str(getattr(t, "connect_url", "") or "").strip()
+    if backend != "ttyd" or not connect_url:
+        raise HTTPException(status_code=404, detail="ttyd terminal not found")
+    return sp, connect_url.rstrip("/")
+
+
+def _ttyd_target_url(base_url: str, tail: str, query: str) -> str:
+    base = str(base_url or "").rstrip("/") + "/"
+    tail = str(tail or "")
+    if tail:
+        # ttyd 启动时配置了 --base-path，因此这里必须把同样的 path 透传给 ttyd，
+        # 不能剥掉 OpenFocus 的代理前缀，否则 ttyd 前端会用错误的 WebSocket path。
+        base = urllib.parse.urljoin(base, tail.lstrip("/"))
+    if query:
+        base = base + "?" + query
+    return base
+
+
+def _ttyd_bridge_script() -> str:
+    return r"""
+<script>
+(function(){
+  if(window.__openfocusTtydBridgeInstalled) return;
+  window.__openfocusTtydBridgeInstalled = true;
+  const state = { enabled: false, prefix: '', injectUrl: '' };
+  function disableBeforeUnload(){
+    try{ window.onbeforeunload = null; }catch(_){ }
+  }
+  try{
+    const rawAdd = window.addEventListener.bind(window);
+    window.addEventListener = function(type, listener, options){
+      if(String(type || '').toLowerCase() === 'beforeunload') return;
+      return rawAdd(type, listener, options);
+    };
+  }catch(_){ }
+  disableBeforeUnload();
+  try{ setInterval(disableBeforeUnload, 1000); }catch(_){ }
+
+  window.addEventListener('message', function(ev){
+    const d = ev && ev.data ? ev.data : {};
+    if(!d || d.type !== 'openfocus:ttyd-agent-mode') return;
+    state.enabled = !!d.enabled;
+    state.prefix = String(d.prefix || '');
+    state.injectUrl = String(d.injectUrl || '');
+  }, true);
+})();
+</script>
+"""
+
+
+def _maybe_inject_ttyd_bridge(data: bytes, media_type: str) -> bytes:
+    mt = str(media_type or "").lower()
+    if "text/html" not in mt:
+        return data
+    try:
+        html = bytes(data or b"").decode("utf-8")
+    except Exception:
+        return data
+    if "__openfocusTtydBridgeInstalled" in html:
+        return data
+    script = _ttyd_bridge_script()
+    lower = html.lower()
+    i = lower.find("<head>")
+    if i >= 0:
+        j = i + len("<head>")
+        html = html[:j] + script + html[j:]
+    else:
+        html = script + html
+    return html.encode("utf-8")
+
+
+@app.api_route(
+    "/api/agent_spaces/{space_id}/terminals/{terminal_id}/ttyd/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def terminals_ttyd_proxy(
+    request: Request, space_id: int, terminal_id: str, path: str = ""
+) -> Response:
+    _, connect_url = _load_ttyd_terminal(space_id, terminal_id)
+    proxy_prefix = _ttyd_embed_path(space_id, terminal_id)
+    target_tail = proxy_prefix.lstrip("/") + str(path or "")
+    target = _ttyd_target_url(connect_url, target_tail, request.url.query)
+    body = await request.body()
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in {"host", "connection", "content-length", "accept-encoding"}
+    }
+    try:
+        req = urllib.request.Request(
+            target,
+            data=body if body else None,
+            headers=headers,
+            method=request.method,
+        )
+        resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=30)
+        data = await asyncio.to_thread(resp.read)
+    except urllib.error.HTTPError as e:
+        data = await asyncio.to_thread(e.read)
+        media_type = e.headers.get("content-type") or "application/octet-stream"
+        return Response(content=data, status_code=int(e.code), media_type=media_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ttyd proxy failed: {e}")
+
+    excluded = {"content-encoding", "transfer-encoding", "connection", "content-length"}
+    out_headers = {
+        k: v for k, v in resp.headers.items() if str(k).lower() not in excluded
+    }
+    media_type = resp.headers.get("content-type") or "application/octet-stream"
+    data = _maybe_inject_ttyd_bridge(data, media_type)
+    return Response(
+        content=data,
+        status_code=int(getattr(resp, "status", 200) or 200),
+        headers=out_headers,
+        media_type=media_type,
+    )
+
+
+@app.websocket("/api/agent_spaces/{space_id}/terminals/{terminal_id}/ttyd/{path:path}")
+async def terminals_ttyd_ws_proxy(
+    websocket: WebSocket, space_id: int, terminal_id: str, path: str = ""
+) -> None:
+    subprotocols = [
+        str(x).strip()
+        for x in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if str(x).strip()
+    ]
+    await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
+    try:
+        _, connect_url = _load_ttyd_terminal(space_id, terminal_id)
+        proxy_prefix = _ttyd_embed_path(space_id, terminal_id)
+        target_tail = proxy_prefix.lstrip("/") + str(path or "")
+        target = _ttyd_target_url(connect_url, target_tail, websocket.url.query)
+        if target.startswith("http://"):
+            target = "ws://" + target[len("http://") :]
+        elif target.startswith("https://"):
+            target = "wss://" + target[len("https://") :]
+        try:
+            import websockets
+        except Exception as e:
+            await websocket.close(code=1011, reason=f"websockets unavailable: {e}")
+            return
+
+        async with websockets.connect(
+            target, open_timeout=10, subprotocols=subprotocols or None
+        ) as upstream:
+
+            async def _client_to_upstream() -> None:
+                while True:
+                    msg = await websocket.receive()
+                    typ = msg.get("type")
+                    if typ == "websocket.disconnect":
+                        await upstream.close()
+                        return
+                    if msg.get("bytes") is not None:
+                        await upstream.send(
+                            _rewrite_ttyd_input_for_agent_mode(
+                                terminal_id, msg["bytes"]
+                            )
+                        )
+                    elif msg.get("text") is not None:
+                        await upstream.send(
+                            _rewrite_ttyd_input_for_agent_mode(terminal_id, msg["text"])
+                        )
+
+            async def _upstream_to_client() -> None:
+                async for msg in upstream:
+                    if isinstance(msg, bytes):
+                        await websocket.send_bytes(msg)
+                    else:
+                        await websocket.send_text(str(msg))
+
+            a = asyncio.create_task(_client_to_upstream())
+            b = asyncio.create_task(_upstream_to_client())
+            done, pending = await asyncio.wait(
+                {a, b}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for tsk in pending:
+                tsk.cancel()
+            for tsk in done:
+                with contextlib.suppress(Exception):
+                    _ = tsk.exception()
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011)
 
 
 @app.get("/api/agent_spaces/{space_id}/terminals/{terminal_id}/history")
@@ -6812,6 +7148,26 @@ def terminals_history(
         b = bytes(data or b"")
         if not b:
             return b, False, ""
+
+        alt_enter_markers = [
+            b"\x1b[?1049h",
+            b"\x1b[?1047h",
+            b"\x1b[?47h",
+        ]
+        alt_exit_markers = [
+            b"\x1b[?1049l",
+            b"\x1b[?1047l",
+            b"\x1b[?47l",
+        ]
+
+        # 如果历史末尾仍处于 alternate screen（例如刷新页面时 vim 还开着），
+        # 必须从“进入 alternate screen”的位置开始回放。否则若从 vim 内部的清屏
+        # 序列开始回放，xterm 会把 vim 内容画到 normal buffer；之后 vim 退出时
+        # 发送 ?1049l 就无法恢复/清掉这些内容，表现为“退出后 vim 画面残留”。
+        last_alt_enter = max((b.rfind(pat) for pat in alt_enter_markers), default=-1)
+        last_alt_exit = max((b.rfind(pat) for pat in alt_exit_markers), default=-1)
+        if last_alt_enter > max(last_alt_exit, -1):
+            return b[last_alt_enter:], True, "alt_screen_active"
 
         markers: list[tuple[bytes, str]] = [
             (b"\x1b[?1049h", "alt_screen"),
@@ -6862,116 +7218,6 @@ def terminals_history(
         "sync_sliced": bool(sliced_ok),
         "sync_reason": str(sliced_reason or ""),
     }
-
-
-@app.websocket("/api/agent_spaces/{space_id}/terminals/{terminal_id}/ws")
-async def terminals_ws(websocket: WebSocket, space_id: int, terminal_id: str) -> None:
-    await websocket.accept()
-    sp, comp = _load_space_and_optional_companion(int(space_id))
-    try:
-        conn = _require_companion_online(sp=sp, comp=comp)
-    except HTTPException:
-        # Companion 不可用：提示客户端稍后重试（避免前端误判为“已连接可用”）。
-        await websocket.close(code=1013)
-        return
-
-    tid = str(terminal_id or "").strip()
-    if not tid:
-        await websocket.close(code=1008)
-        return
-
-    with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
-            await websocket.close(code=1008)
-            return
-
-    q = await _term_subscribe(tid)
-
-    async def _sender() -> None:
-        while True:
-            ev = await q.get()
-            await websocket.send_json(ev)
-
-    async def _receiver() -> None:
-        while True:
-            msg = await websocket.receive_json()
-            if not isinstance(msg, dict):
-                continue
-            typ = str(msg.get("type") or "")
-            if typ == "ping":
-                # keepalive
-                try:
-                    await websocket.send_json(
-                        {"type": "pong", "ts": int(msg.get("ts") or 0)}
-                    )
-                except Exception:
-                    pass
-                continue
-            if typ == "input":
-                raw = b""
-                if isinstance(msg.get("data_b64"), str):
-                    try:
-                        raw = base64.b64decode(msg.get("data_b64"))
-                    except Exception:
-                        raw = b""
-                elif isinstance(msg.get("data"), str):
-                    raw = msg.get("data").encode("utf-8")
-                if raw:
-                    _try_audit_memory(
-                        kind="terminal.input",
-                        source="web",
-                        summary=f"Terminal input sent to `{tid}`.",
-                        detail=_memory_decode_terminal_bytes(raw),
-                        task_public_id=str(sp.task_public_id or "") or None,
-                        metadata={"space_id": int(sp.id), "terminal_id": tid},
-                    )
-                    try:
-                        await conn.request_terminal_input(
-                            terminal_id=tid, data=raw, timeout_seconds=10.0
-                        )
-                    except Exception as e:
-                        # Companion 侧 session 可能已丢失（例如 Companion 重启），避免前端进入“立刻断开-重连”死循环。
-                        await websocket.send_json(
-                            {"type": "error", "error": f"terminal unavailable: {e}"}
-                        )
-                        await websocket.close(code=4404)
-                        return
-            elif typ == "resize":
-                cols = int(msg.get("cols") or 0)
-                rows = int(msg.get("rows") or 0)
-                if cols > 0 and rows > 0:
-                    try:
-                        await conn.request_terminal_resize(
-                            terminal_id=tid, cols=cols, rows=rows, timeout_seconds=10.0
-                        )
-                    except Exception as e:
-                        await websocket.send_json(
-                            {"type": "error", "error": f"terminal unavailable: {e}"}
-                        )
-                        await websocket.close(code=4404)
-                        return
-
-    sender = asyncio.create_task(_sender(), name=f"term-ws-send:{tid}")
-    receiver = asyncio.create_task(_receiver(), name=f"term-ws-recv:{tid}")
-    try:
-        done, pending = await asyncio.wait(
-            {sender, receiver}, return_when=asyncio.FIRST_EXCEPTION
-        )
-        for tsk in pending:
-            tsk.cancel()
-        for tsk in done:
-            _ = tsk.exception() if tsk.done() else None
-    except WebSocketDisconnect:
-        pass
-    finally:
-        sender.cancel()
-        receiver.cancel()
-        await _term_unsubscribe(tid, q)
 
 
 @app.get("/api/agent_spaces/{space_id}/agent/sessions")

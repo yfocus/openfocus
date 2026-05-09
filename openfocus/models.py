@@ -392,6 +392,8 @@ class RemoteTerminalSession(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
 
     terminal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    backend: Mapped[str] = mapped_column(String(32), nullable=False, default="ttyd")
+    connect_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="active"
     )  # active/closed

@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="https://unpkg.com/xterm@5.3.0/css/xterm.css">
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=7">
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=13">
   <style>
     .codebox { font-family: var(--mono); font-size: 12px; white-space: pre; overflow: auto; }
     .code-line { display: flex; gap: 12px; }
@@ -21,7 +20,7 @@
       min-height: 0;
       align-items: stretch;
     }
-    .agent-space-split > .panel { min-height: 0; }
+    .agent-space-split > .panel { min-height: 0; min-width: 0; }
     .agent-space-splitter {
       position: relative;
       cursor: col-resize;
@@ -138,16 +137,14 @@
     <!-- Col 3: agent/terminal -->
     <div class="panel" style="height:100%; padding:0;">
       <div style="height:100%; min-height:0; display:flex; flex-direction:column;">
-        <div class="pad" style="flex: 1 1 auto; min-height:0; height:auto; padding: 12px;">
+        <div class="pad" style="flex: 1 1 auto; min-height:0; min-width:0; height:auto; padding: 12px;">
           <div id="remote-terminal" style="height:100%; min-height:0;"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
-  <script src="https://unpkg.com/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=7"></script>
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=13"></script>
   <script>
     const SPACE_ID = {{ space.id }};
     const TASK_PUBLIC_ID = "{{ task.public_id|e }}";
@@ -228,6 +225,14 @@
 
       let dragging = null; // { side, startX, startFilesW, startTermW }
 
+      const _emitLayoutChanged = ()=>{
+        try{
+          window.dispatchEvent(new CustomEvent('openfocus:agent-space-layout-changed', {
+            detail: { spaceId: Number(SPACE_ID || 0), ts: Date.now() },
+          }));
+        }catch(_){ }
+      };
+
       const onMove = (ev)=>{
         if(!dragging) return;
         const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : (ev.touches && ev.touches[0] ? ev.touches[0].clientX : 0);
@@ -257,6 +262,7 @@
         }
         root.style.setProperty('--files-w', Math.floor(nextFiles) + 'px');
         root.style.setProperty('--term-w', Math.floor(nextTerm) + 'px');
+        _emitLayoutChanged();
       };
 
       const endDrag = ()=>{
@@ -308,6 +314,7 @@
           root.style.setProperty('--files-w', '340px');
           root.style.setProperty('--term-w', '420px');
           _saveLayoutState({ filesW: 340, termW: 420, ts: Date.now() });
+          _emitLayoutChanged();
         });
       }
     }

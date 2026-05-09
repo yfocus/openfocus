@@ -337,7 +337,12 @@ class CompanionConnection:
         return res
 
     async def request_terminal_start(
-        self, *, terminal_id: str, root_path: str, timeout_seconds: float = 10.0
+        self,
+        *,
+        terminal_id: str,
+        root_path: str,
+        base_path: str = "",
+        timeout_seconds: float = 10.0,
     ) -> pb2.TerminalStartResponse:
         rid = str(uuid.uuid4())
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -348,6 +353,7 @@ class CompanionConnection:
                     request_id=rid,
                     terminal_id=str(terminal_id or ""),
                     root_path=str(root_path or ""),
+                    base_path=str(base_path or ""),
                 )
             )
         )

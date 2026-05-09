@@ -3,18 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
-import fcntl
 import json
 import logging
 import mimetypes
 import os
-import pty
 import secrets
+import shutil
+import socket
 import string
-import struct
 import subprocess
 import sys
-import termios
 import threading
 import uuid
 from pathlib import Path
@@ -555,20 +553,103 @@ class _TerminalSession:
         self.terminal_id = terminal_id
         self.root_path = root_path
         self.created_at = _utcnow()
-        self.pid: int | None = None
-        self.master_fd: int | None = None
+        self.backend = "ttyd"
+        self.connect_url = ""
+        self.process: asyncio.subprocess.Process | None = None
+        self.tmux_session = ""
         self.closed = False
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _safe_tmux_session_name(tid: str) -> str:
+    raw = "".join(
+        ch if (ch.isalnum() or ch in {"_", "-"}) else "_" for ch in str(tid or "")
+    )
+    return ("of_" + raw)[:80]
+
+
+async def _wait_tcp_ready(
+    host: str, port: int, proc: asyncio.subprocess.Process
+) -> None:
+    deadline = asyncio.get_running_loop().time() + 5.0
+    last_err: Exception | None = None
+    while asyncio.get_running_loop().time() < deadline:
+        if proc.returncode is not None:
+            raise RuntimeError(f"ttyd exited early with code {proc.returncode}")
         try:
-            if self.master_fd is not None:
-                os.close(self.master_fd)
-        except Exception:
-            pass
-        self.master_fd = None
+            reader, writer = await asyncio.open_connection(host, int(port))
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            with contextlib.suppress(Exception):
+                reader.feed_eof()
+            return
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(0.05)
+    raise RuntimeError(f"ttyd did not become ready on {host}:{port}: {last_err}")
+
+
+async def _ensure_tmux_terminal_session(
+    *, tmux_bin: str, tmux_name: str, root_path: str, shell: str
+) -> None:
+    """Create/reuse a tmux session and keep mouse selection browser-friendly.
+
+    tmux mouse mode intercepts normal drag events, which prevents xterm.js/ttyd from
+    creating a browser selection.  We explicitly turn it off for OpenFocus-managed
+    sessions so users can drag-select text in the embedded terminal and copy it.
+    """
+
+    has = await asyncio.create_subprocess_exec(
+        tmux_bin,
+        "has-session",
+        "-t",
+        tmux_name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await has.wait()
+
+    if has.returncode != 0:
+        create = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "new-session",
+            "-d",
+            "-s",
+            tmux_name,
+            "-c",
+            root_path,
+            shell,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await create.wait()
+        if create.returncode != 0:
+            raise RuntimeError("tmux new-session failed")
+
+    opt = await asyncio.create_subprocess_exec(
+        tmux_bin,
+        "set-option",
+        "-t",
+        tmux_name,
+        "mouse",
+        "off",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await opt.wait()
+    if opt.returncode != 0:
+        raise RuntimeError("tmux set-option mouse off failed")
 
 
 class _TerminalManager:
@@ -581,8 +662,9 @@ class _TerminalManager:
         *,
         terminal_id: str,
         root_path: str,
+        base_path: str,
         out_q: asyncio.Queue[pb2.ClientToServer],
-    ) -> str:
+    ) -> _TerminalSession:
         tid = (terminal_id or "").strip() or str(uuid.uuid4())
         rp = str(root_path or "").strip()
         if not rp:
@@ -595,7 +677,7 @@ class _TerminalManager:
 
         async with self._lock:
             if tid in self._sessions:
-                return tid
+                return self._sessions[tid]
             sess = _TerminalSession(terminal_id=tid, root_path=rp)
             self._sessions[tid] = sess
 
@@ -608,58 +690,73 @@ class _TerminalManager:
                     )
                 )
             )
-            return tid
+            return sess
 
-        pid, fd = pty.fork()
-        if pid == 0:
-            try:
-                os.chdir(rp)
-            except Exception:
-                pass
-            shell = os.environ.get("SHELL") or "/bin/zsh"
-            os.execvp(shell, [shell])
+        ttyd_bin = str(os.environ.get("OPENFOCUS_TTYD_BIN") or "ttyd").strip() or "ttyd"
+        tmux_bin = str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
+        if shutil.which(ttyd_bin) is None:
+            raise RuntimeError(f"ttyd not found: {ttyd_bin}")
+        if shutil.which(tmux_bin) is None:
+            raise RuntimeError(f"tmux not found: {tmux_bin}")
 
-        sess.pid = int(pid)
-        sess.master_fd = int(fd)
-        os.set_blocking(fd, False)
+        port = _find_free_port()
+        tmux_name = _safe_tmux_session_name(tid)
+        sess.backend = "ttyd"
+        sess.connect_url = f"http://127.0.0.1:{port}/"
+        sess.tmux_session = tmux_name
 
-        loop = asyncio.get_running_loop()
-
-        def _emit(data: bytes, *, closed: bool, error: str = "") -> None:
-            loop.create_task(
-                out_q.put(
-                    pb2.ClientToServer(
-                        terminal_output=pb2.TerminalOutput(
-                            terminal_id=tid,
-                            data=bytes(data or b""),
-                            closed=bool(closed),
-                            error=str(error or ""),
-                        )
-                    )
-                )
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        await _ensure_tmux_terminal_session(
+            tmux_bin=tmux_bin, tmux_name=tmux_name, root_path=rp, shell=shell
+        )
+        cmd = [
+            ttyd_bin,
+            "--interface",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--writable",
+            "--base-path",
+            str(base_path or "/").rstrip("/") or "/",
+            "--terminal-type",
+            "xterm-256color",
+            "--client-option",
+            'theme={"background":"#000000"}',
+            "--client-option",
+            "macOptionClickForcesSelection=true",
+            "--client-option",
+            "rightClickSelectsWord=true",
+            tmux_bin,
+            "attach-session",
+            "-t",
+            tmux_name,
+        ]
+        try:
+            LOG.info(
+                "启动 ttyd terminal：terminal_id=%s port=%s tmux=%s",
+                tid,
+                port,
+                tmux_name,
             )
-
-        def _on_readable() -> None:
-            if sess.master_fd is None:
-                return
-            try:
-                data = os.read(sess.master_fd, 4096)
-            except BlockingIOError:
-                return
-            except OSError:
-                try:
-                    loop.remove_reader(sess.master_fd)
-                except Exception:
-                    pass
-                sess.close()
-                _emit(b"", closed=True)
-                return
-            if not data:
-                return
-            _emit(data, closed=False)
-
-        loop.add_reader(fd, _on_readable)
-        return tid
+        except Exception:
+            pass
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=rp,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        sess.process = proc
+        try:
+            await _wait_tcp_ready("127.0.0.1", port, proc)
+        except Exception:
+            with contextlib.suppress(Exception):
+                if proc.returncode is None:
+                    proc.terminate()
+            async with self._lock:
+                self._sessions.pop(tid, None)
+            raise
+        return sess
 
     async def stop(
         self, *, terminal_id: str, out_q: asyncio.Queue[pb2.ClientToServer]
@@ -687,15 +784,29 @@ class _TerminalManager:
             return
 
         try:
-            if sess.master_fd is not None:
-                asyncio.get_running_loop().remove_reader(sess.master_fd)
+            if sess.process is not None and sess.process.returncode is None:
+                sess.process.terminate()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(sess.process.wait(), timeout=2.0)
+                if sess.process.returncode is None:
+                    sess.process.kill()
         except Exception:
             pass
-        try:
-            if sess.pid:
-                os.kill(sess.pid, 15)
-        except Exception:
-            pass
+        if sess.tmux_session:
+            tmux_bin = (
+                str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
+            )
+            if shutil.which(tmux_bin) is not None:
+                with contextlib.suppress(Exception):
+                    proc = await asyncio.create_subprocess_exec(
+                        tmux_bin,
+                        "kill-session",
+                        "-t",
+                        sess.tmux_session,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
         sess.close()
         await out_q.put(
             pb2.ClientToServer(
@@ -735,9 +846,73 @@ class _TerminalManager:
             )
             return
 
-        if sess.master_fd is None:
-            raise ValueError("terminal closed")
-        os.write(sess.master_fd, raw)
+        await self._tmux_input(sess=sess, raw=raw)
+
+    async def _tmux_input(self, *, sess: _TerminalSession, raw: bytes) -> None:
+        if not sess.tmux_session:
+            raise ValueError("tmux session missing")
+        if not raw:
+            return
+        tmux_bin = str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
+        if shutil.which(tmux_bin) is None:
+            raise RuntimeError(f"tmux not found: {tmux_bin}")
+
+        data = bytes(raw or b"")
+        submit = False
+        start = b"\x1b[200~"
+        end = b"\x1b[201~"
+        i = data.find(start)
+        j = data.find(end, i + len(start)) if i >= 0 else -1
+        if i >= 0 and j >= 0:
+            paste = data[i + len(start) : j]
+            suffix = data[j + len(end) :]
+            submit = (b"\r" in suffix) or (b"\n" in suffix)
+        else:
+            paste = data.replace(b"\r", b"").replace(b"\n", b"")
+            submit = (b"\r" in data) or (b"\n" in data)
+
+        buf_name = f"openfocus_{sess.terminal_id[:24]}"
+        if paste:
+            proc = await asyncio.create_subprocess_exec(
+                tmux_bin,
+                "load-buffer",
+                "-b",
+                buf_name,
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate(paste)
+            if proc.returncode != 0:
+                raise RuntimeError("tmux load-buffer failed")
+            proc = await asyncio.create_subprocess_exec(
+                tmux_bin,
+                "paste-buffer",
+                "-d",
+                "-b",
+                buf_name,
+                "-t",
+                sess.tmux_session,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError("tmux paste-buffer failed")
+        if submit:
+            proc = await asyncio.create_subprocess_exec(
+                tmux_bin,
+                "send-keys",
+                "-t",
+                sess.tmux_session,
+                "Enter",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError("tmux send-keys failed")
 
     async def resize(self, *, terminal_id: str, cols: int, rows: int) -> None:
         tid = (terminal_id or "").strip()
@@ -749,22 +924,7 @@ class _TerminalManager:
             raise ValueError("terminal not found")
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
             return
-        if sess.master_fd is None:
-            raise ValueError("terminal closed")
-
-        cols = int(cols or 0)
-        rows = int(rows or 0)
-        if cols <= 0 or rows <= 0:
-            return
-        if LOG.isEnabledFor(logging.DEBUG):
-            try:
-                LOG.debug(
-                    "terminal_resize：terminal_id=%s cols=%s rows=%s", tid, cols, rows
-                )
-            except Exception:
-                pass
-        winsz = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(sess.master_fd, termios.TIOCSWINSZ, winsz)
+        return
 
 
 def _choose_directory() -> str:
@@ -1251,13 +1411,18 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                         )
                         if not (RUNTIME.auth_token or "").strip():
                             raise RuntimeError("Companion 尚未配对")
-                        tid = await term_mgr.start(
+                        sess = await term_mgr.start(
                             terminal_id=req.terminal_id,
                             root_path=req.root_path,
+                            base_path=req.base_path,
                             out_q=out_q,
                         )
                         resp = pb2.TerminalStartResponse(
-                            request_id=req.request_id, ok=True, terminal_id=tid
+                            request_id=req.request_id,
+                            ok=True,
+                            terminal_id=sess.terminal_id,
+                            backend=sess.backend,
+                            connect_url=sess.connect_url,
                         )
                     except Exception as e:
                         try:
