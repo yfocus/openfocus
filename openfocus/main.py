@@ -1078,18 +1078,24 @@ def _startup() -> None:
         cols = [
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goals)").fetchall()
         ]
-        if "summary" not in cols:
+        if "title" not in cols:
             conn.execute(
                 text(
-                    "ALTER TABLE goals ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"
+                    "ALTER TABLE goals ADD COLUMN title VARCHAR(2000) NOT NULL DEFAULT ''"
                 )
             )
-        if "description" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE goals ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"
+            # Older schemas stored the goal title in `content`.
+            conn.execute(text("UPDATE goals SET title = content WHERE title = ''"))
+            if "description" in cols:
+                # Older schemas stored the goal body/content in `description`.
+                # Only run while adding `title` so future startups do not overwrite
+                # user-edited content from the legacy physical column.
+                conn.execute(
+                    text(
+                        "UPDATE goals SET content = description "
+                        "WHERE COALESCE(description, '') != ''"
+                    )
                 )
-            )
         if "status" not in cols:
             conn.execute(
                 text(
@@ -1120,19 +1126,19 @@ def _startup() -> None:
         task_cols = [
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(tasks)").fetchall()
         ]
-        if "summary" not in task_cols:
+        if "content" not in task_cols:
             conn.execute(
                 text(
-                    "ALTER TABLE tasks ADD COLUMN summary VARCHAR(64) NOT NULL DEFAULT ''"
+                    "ALTER TABLE tasks ADD COLUMN content VARCHAR(4000) NOT NULL DEFAULT ''"
                 )
             )
-
-        if "description" not in task_cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE tasks ADD COLUMN description VARCHAR(4000) NOT NULL DEFAULT ''"
+            if "description" in task_cols:
+                conn.execute(
+                    text(
+                        "UPDATE tasks SET content = description "
+                        "WHERE COALESCE(description, '') != ''"
+                    )
                 )
-            )
 
         if "task_type" not in task_cols:
             conn.execute(
@@ -1389,67 +1395,30 @@ def _truncate_zh(text: str, n: int = 20) -> str:
     return s[:n].rstrip() + "…"
 
 
-def _summarize_items(
-    provider: OpenAICompatibleProvider | None, texts: list[str]
-) -> list[str]:
-    """生成 <=20 字摘要（尽量走 LLM；不可用则截断兜底）。"""
-
-    cleaned = [(t or "").strip() for t in texts]
-    needs = [i for i, t in enumerate(cleaned) if len(t) > 20]
-    out: list[str] = [t if len(t) <= 20 else "" for t in cleaned]
-    if not needs:
-        return out
-
-    if provider is None:
-        for i in needs:
-            out[i] = _truncate_zh(cleaned[i], 20)
-        return out
-
-    # 单次批量生成，避免对每条都发请求。
-    import json as _json
-
-    payload = {
-        "items": [{"i": i, "text": cleaned[i]} for i in needs],
-        "rules": "每条输出一个不超过20个中文字符的摘要；不要标点堆叠；不要引号；不要换行。",
-    }
-
-    sys = "你是一个中文摘要生成器。你必须严格输出 JSON（不要 Markdown）。"
-    user = (
-        "为这些文本生成摘要。\n"
-        '输出格式：{"items":[{"i":0,"summary":"..."}, ...]}\n'
-        + _json.dumps(payload, ensure_ascii=False)
+def _add_goal_created_event(s, goal: Goal, *, agent: str = "ui") -> None:
+    s.add(
+        Event(
+            kind="goal.created",
+            agent=agent,
+            task_id=None,
+            payload={"goal_id": int(goal.id), "title": str(goal.title or "")},
+        )
     )
 
-    try:
-        res = provider.chat_completions(
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=500,
-            response_format={"type": "json_object"},
+
+def _add_task_created_event(s, task: Task, *, agent: str = "ui") -> None:
+    s.add(
+        Event(
+            kind="task.created",
+            agent=agent,
+            task_id=str(task.public_id or ""),
+            payload={
+                "goal_id": int(task.goal_id),
+                "task_public_id": str(task.public_id or ""),
+                "title": str(task.title or ""),
+            },
         )
-        data = _json.loads(res.content)
-        items = data.get("items") or []
-        mapping: dict[int, str] = {}
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            ii = it.get("i")
-            ss = it.get("summary")
-            if isinstance(ii, int) and isinstance(ss, str):
-                mapping[ii] = ss.strip().replace("\n", " ")
-        for i in needs:
-            s = mapping.get(i) or _truncate_zh(cleaned[i], 20)
-            if len(s) > 20:
-                s = _truncate_zh(s, 20)
-            out[i] = s
-        return out
-    except Exception:
-        for i in needs:
-            out[i] = _truncate_zh(cleaned[i], 20)
-        return out
+    )
 
 
 def _openfocus_data_root() -> Path:
@@ -2132,14 +2101,14 @@ def _inspiration_build_published_summary(
 ) -> str:
     lines = [
         "Idea",
-        str(space.title or "").strip() or str(goal.content or "").strip(),
+        str(space.title or "").strip() or str(goal.title or "").strip(),
         "",
         "Why now",
-        str(goal.description or "").strip()
+        str(goal.content or "").strip()
         or "Captured from the latest inspiration discussion.",
         "",
         "Goal",
-        str(goal.content or "").strip(),
+        str(goal.title or "").strip(),
         "",
         "Published tasks",
     ]
@@ -2706,13 +2675,8 @@ def _inspiration_publish_sync(
         )
         picked_tasks = list(publish_snapshot.get("picked_tasks") or [])
         draft_payload = publish_snapshot.get("draft_payload") or None
-        provider, _err = _get_llm_provider_or_error()
         goal_title = str(publish_snapshot.get("goal_title") or "").strip()
-        goal_description = str(publish_snapshot.get("goal_description") or "").strip()
-        goal_summary = _summarize_items(provider, [goal_title])[0]
-        task_summaries = _summarize_items(
-            provider, [str(item.get("title") or "") for item in picked_tasks]
-        )
+        goal_content = str(publish_snapshot.get("goal_description") or "").strip()
 
         with session_scope() as s:
             space = _inspiration_space_or_404(s, int(space_id))
@@ -2722,15 +2686,15 @@ def _inspiration_publish_sync(
             if draft is None or int(draft.space_id) != int(space_id):
                 raise RuntimeError("Draft not found during publishing")
             goal = Goal(
-                content=goal_title,
-                summary=goal_summary,
-                description=goal_description,
+                title=goal_title,
+                content=goal_content,
                 due_date=due_date,
                 source_inspiration_space_id=int(space_id),
                 source_inspiration_draft_id=int(draft.id),
             )
             s.add(goal)
             s.flush()
+            _add_goal_created_event(s, goal, agent="inspiration")
             created_goal_id = int(goal.id)
 
             created_tasks: list[Task] = []
@@ -2749,8 +2713,7 @@ def _inspiration_publish_sync(
                 task = Task(
                     goal_id=int(goal.id),
                     title=title,
-                    summary=task_summaries[idx],
-                    description=description,
+                    content=description,
                     status="todo",
                     task_type=task_type,
                     estimated_minutes=estimated_minutes,
@@ -2760,6 +2723,7 @@ def _inspiration_publish_sync(
                 )
                 s.add(task)
                 s.flush()
+                _add_task_created_event(s, task, agent="inspiration")
                 created_tasks.append(task)
                 created_task_ids.append(int(task.id))
 
@@ -3188,16 +3152,14 @@ def goals_list(request: Request) -> HTMLResponse:
         goals = [g for g in goals_all if _accept_goal(g)]
         goals.sort(key=_sort_key)
 
-        # Dashboard 左栏显示用摘要（不触发 LLM；空摘要时做截断兜底）
+        # Dashboard 左栏显示用标题截断（不再维护独立 summary 字段）。
         goal_display: dict[int, str] = {}
         for g in goals:
-            gs = (getattr(g, "summary", "") or "").strip()
-            goal_display[g.id] = gs if gs else _truncate_zh(g.content, 20)
+            goal_display[g.id] = _truncate_zh(str(g.title or "").strip(), 20)
 
         task_display: dict[str, str] = {}
         for t in tasks:
-            ts = (getattr(t, "summary", "") or "").strip()
-            task_display[t.public_id] = ts if ts else _truncate_zh(t.title, 20)
+            task_display[t.public_id] = _truncate_zh(str(t.title or "").strip(), 20)
 
         # 选中态（用于右侧详情栏默认展示）
         sel_goal_id = request.query_params.get("goal")
@@ -3259,8 +3221,7 @@ _NEXT_MOVE_TASK_TYPE_LABELS = {
 
 
 def _next_move_goal_label(goal: Goal) -> str:
-    summary = str(getattr(goal, "summary", "") or "").strip()
-    return summary if summary else _truncate_zh(str(goal.content or "").strip(), 20)
+    return _truncate_zh(str(goal.title or "").strip(), 20)
 
 
 def _next_move_task_type_label(task_type: str | None) -> str:
@@ -3684,7 +3645,7 @@ def recommendations_next(
             if not recent_focus_context:
                 recent_focus_context = _infer_context_key(
                     str(recent_focus_task.title or ""),
-                    str(recent_focus_task.description or ""),
+                    str(recent_focus_task.content or ""),
                     goal_id=int(recent_focus_task.goal_id),
                     root_path=getattr(
                         spaces_by_task.get(recent_focus_task.public_id),
@@ -3702,15 +3663,15 @@ def recommendations_next(
             space = spaces_by_task.get(t.public_id)
             task_type = str(
                 getattr(t, "task_type", "") or ""
-            ).strip().lower() or _infer_task_type(t.title, t.description)
+            ).strip().lower() or _infer_task_type(t.title, t.content)
             estimated_minutes = int(
                 getattr(t, "estimated_minutes", 0) or 0
-            ) or _infer_estimated_minutes(task_type, t.title, t.description)
+            ) or _infer_estimated_minutes(task_type, t.title, t.content)
             context_key = str(
                 getattr(t, "context_key", "") or ""
             ).strip() or _infer_context_key(
                 t.title,
-                t.description,
+                t.content,
                 goal_id=int(t.goal_id),
                 root_path=getattr(space, "root_path", None),
             )
@@ -3902,15 +3863,15 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
 
         task_type = str(
             getattr(task, "task_type", "") or ""
-        ).strip().lower() or _infer_task_type(task.title, task.description)
+        ).strip().lower() or _infer_task_type(task.title, task.content)
         estimated_minutes = int(
             getattr(task, "estimated_minutes", 0) or 0
-        ) or _infer_estimated_minutes(task_type, task.title, task.description)
+        ) or _infer_estimated_minutes(task_type, task.title, task.content)
         context_key = str(
             getattr(task, "context_key", "") or ""
         ).strip() or _infer_context_key(
             task.title,
-            task.description,
+            task.content,
             goal_id=int(task.goal_id),
             root_path=getattr(space, "root_path", None),
         )
@@ -4001,8 +3962,8 @@ def goals_new(request: Request) -> HTMLResponse:
 
 @app.post("/goals", include_in_schema=False)
 async def goals_create(
-    content: str = Form(..., min_length=1, max_length=2000),
-    description: str = Form(..., min_length=1, max_length=4000),
+    title: str = Form(..., min_length=1, max_length=2000),
+    content: str = Form(..., min_length=1, max_length=4000),
     due_date: str = Form(...),
     plan_mode: str | None = Form(default=None),
 ) -> RedirectResponse:
@@ -4012,41 +3973,41 @@ async def goals_create(
     if pm in {"1", "true", "on", "yes"}:
         return await goal_plan_create_session(
             due_date=due_date,
+            title=title,
             content=content,
-            description=description,
             draft_content=None,
         )
 
     parsed_due = dt.date.fromisoformat(due_date)
-    provider, _err = _get_llm_provider_or_error()
-    summary = _summarize_items(provider, [content.strip()])[0]
     created_goal_id = 0
     with session_scope() as s:
         goal = Goal(
+            title=title.strip(),
             content=content.strip(),
-            summary=summary,
-            description=description.strip(),
             due_date=parsed_due,
         )
         s.add(goal)
         s.flush()
+        _add_goal_created_event(s, goal, agent="ui")
         created_goal_id = int(goal.id or 0)
     _try_audit_memory(
         kind="goal.created",
         source="web",
-        summary=f"Created goal: {content.strip()}",
-        detail=f"Goal content:\n\n{content.strip()}\n\nDescription:\n\n{description.strip()}",
+        summary=f"Created goal: {title.strip()}",
+        detail=f"Goal title:\n\n{title.strip()}\n\nContent:\n\n{content.strip()}",
         goal_id=created_goal_id or None,
-        metadata={"due_date": parsed_due.isoformat(), "summary": summary},
+        metadata={"due_date": parsed_due.isoformat()},
     )
-    return RedirectResponse(url="/goals", status_code=303)
+    return RedirectResponse(
+        url=f"/goals?goal={created_goal_id}&tab=tasks", status_code=303
+    )
 
 
 @app.post("/goals/{goal_id:int}/tasks", include_in_schema=False)
 def tasks_create(
     goal_id: int,
     title: str = Form(..., min_length=1, max_length=512),
-    description: str = Form(..., min_length=1, max_length=4000),
+    content: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
     created_task_id = ""
     with session_scope() as s:
@@ -4054,19 +4015,16 @@ def tasks_create(
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
         title_text = title.strip()
-        description_text = description.strip()
-        provider, _err = _get_llm_provider_or_error()
-        summary = _summarize_items(provider, [title_text])[0]
-        task_type = _infer_task_type(title_text, description_text)
+        content_text = content.strip()
+        task_type = _infer_task_type(title_text, content_text)
         estimated_minutes = _infer_estimated_minutes(
-            task_type, title_text, description_text
+            task_type, title_text, content_text
         )
-        context_key = _infer_context_key(title_text, description_text, goal_id=goal_id)
+        context_key = _infer_context_key(title_text, content_text, goal_id=goal_id)
         task = Task(
             goal_id=goal_id,
             title=title_text,
-            summary=summary,
-            description=description_text,
+            content=content_text,
             status="todo",
             task_type=task_type,
             estimated_minutes=estimated_minutes,
@@ -4074,22 +4032,22 @@ def tasks_create(
         )
         s.add(task)
         s.flush()
+        _add_task_created_event(s, task, agent="ui")
         created_task_id = str(task.public_id or "")
     _try_audit_memory(
         kind="task.created",
         source="web",
         summary=f"Created task: {title_text}",
-        detail=f"Task title:\n\n{title_text}\n\nDescription:\n\n{description_text}",
+        detail=f"Task title:\n\n{title_text}\n\nContent:\n\n{content_text}",
         goal_id=goal_id,
         task_public_id=created_task_id or None,
         metadata={
-            "summary": summary,
             "task_type": task_type,
             "estimated_minutes": estimated_minutes,
             "context_key": context_key,
         },
     )
-    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
+    return RedirectResponse(url=f"/goals?goal={goal_id}&tab=tasks", status_code=303)
 
 
 @app.post("/goals/{goal_id:int}/done", include_in_schema=False)
@@ -4114,7 +4072,7 @@ def goals_mark_done(goal_id: int) -> RedirectResponse:
             _try_audit_memory(
                 kind="goal.finished",
                 source="web",
-                summary=f"Finished goal: {g.content}",
+                summary=f"Finished goal: {g.title}",
                 detail=f"Goal moved from `{old}` to `done`.",
                 goal_id=int(goal_id),
                 metadata={"from": old, "to": "done"},
@@ -4143,7 +4101,7 @@ def goals_reopen(goal_id: int) -> RedirectResponse:
             _try_audit_memory(
                 kind="goal.reopened",
                 source="web",
-                summary=f"Reopened goal: {g.content}",
+                summary=f"Reopened goal: {g.title}",
                 detail="Goal moved from `done` back to `active`.",
                 goal_id=int(goal_id),
                 metadata={"to": "active"},
@@ -4236,30 +4194,25 @@ def tasks_reopen(task_id: int) -> RedirectResponse:
 def tasks_update(
     task_id: int,
     title: str = Form(..., min_length=1, max_length=512),
-    description: str = Form(..., min_length=1, max_length=4000),
+    content: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
     old_title = ""
-    old_description = ""
+    old_content = ""
     with session_scope() as s:
         t = s.get(Task, task_id)
         if t is None:
             raise HTTPException(status_code=404, detail="Task not found")
         old_title = str(t.title or "")
-        old_description = str(t.description or "")
+        old_content = str(t.content or "")
         title_text = title.strip()
-        description_text = description.strip()
-        provider, _err = _get_llm_provider_or_error()
-        summary = _summarize_items(provider, [title_text])[0]
-        task_type = _infer_task_type(title_text, description_text)
+        content_text = content.strip()
+        task_type = _infer_task_type(title_text, content_text)
         estimated_minutes = _infer_estimated_minutes(
-            task_type, title_text, description_text
+            task_type, title_text, content_text
         )
-        context_key = _infer_context_key(
-            title_text, description_text, goal_id=t.goal_id
-        )
+        context_key = _infer_context_key(title_text, content_text, goal_id=t.goal_id)
         t.title = title_text
-        t.summary = summary
-        t.description = description_text
+        t.content = content_text
         t.task_type = task_type
         t.estimated_minutes = estimated_minutes
         t.context_key = context_key
@@ -4271,14 +4224,13 @@ def tasks_update(
         summary=f"Edited task: {title_text}",
         detail=(
             f"Previous title: {old_title}\n\n"
-            f"Previous description:\n\n{old_description}\n\n"
+            f"Previous content:\n\n{old_content}\n\n"
             f"Updated title: {title_text}\n\n"
-            f"Updated description:\n\n{description_text}"
+            f"Updated content:\n\n{content_text}"
         ),
         goal_id=goal_id,
         task_public_id=pid,
         metadata={
-            "summary": summary,
             "task_type": task_type,
             "estimated_minutes": estimated_minutes,
             "context_key": context_key,
@@ -4335,24 +4287,24 @@ def tasks_delete(task_id: int) -> RedirectResponse:
 @app.post("/goals/{goal_id:int}/edit", include_in_schema=False)
 def goals_update(
     goal_id: int,
-    content: str = Form(..., min_length=1, max_length=2000),
-    description: str = Form(..., min_length=1, max_length=4000),
+    title: str = Form(..., min_length=1, max_length=2000),
+    content: str = Form(..., min_length=1, max_length=4000),
     due_date: str = Form(...),
     status: str = Form("active", max_length=32),
     priority: str = Form("normal", max_length=32),
     importance: str = Form("normal", max_length=32),
 ) -> RedirectResponse:
     parsed_due = dt.date.fromisoformat(due_date)
+    old_title = ""
     old_content = ""
-    old_description = ""
     with session_scope() as s:
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
+        old_title = str(goal.title or "")
         old_content = str(goal.content or "")
-        old_description = str(goal.description or "")
+        goal.title = title.strip()
         goal.content = content.strip()
-        goal.description = description.strip()
         goal.due_date = parsed_due
         goal.status = status.strip() or "active"
         goal.priority = priority.strip() or "normal"
@@ -4360,12 +4312,12 @@ def goals_update(
     _try_audit_memory(
         kind="goal.edited",
         source="web",
-        summary=f"Edited goal: {content.strip()}",
+        summary=f"Edited goal: {title.strip()}",
         detail=(
-            f"Previous content: {old_content}\n\n"
-            f"Previous description:\n\n{old_description}\n\n"
-            f"Updated content: {content.strip()}\n\n"
-            f"Updated description:\n\n{description.strip()}"
+            f"Previous title: {old_title}\n\n"
+            f"Previous content:\n\n{old_content}\n\n"
+            f"Updated title: {title.strip()}\n\n"
+            f"Updated content:\n\n{content.strip()}"
         ),
         goal_id=goal_id,
         metadata={
@@ -4378,118 +4330,21 @@ def goals_update(
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
-@app.post("/api/goals/extract_content_from_description")
-def api_extract_goal_from_description(payload: dict) -> dict:
-    """Extract goal content from the detailed description for New Goal."""
-
-    desc = payload.get("description") if isinstance(payload, dict) else ""
-    desc = str(desc or "").strip()
-    if not desc:
-        raise HTTPException(status_code=400, detail="description is required")
-
-    provider, err = _get_llm_provider_or_error()
-    if provider is None:
-        raise HTTPException(
-            status_code=400, detail=err or "LLM provider not configured"
-        )
-
-    import json as _json
-
-    sys = "You extract a clear, executable goal from the user's description. Return strict JSON only."
-    user = (
-        "Extract one clear, executable goal from the detailed description below.\n"
-        "Requirements: output only the goal content, no extra explanation, no quotes, no line breaks, max 2000 characters.\n"
-        + _json.dumps({"description": desc}, ensure_ascii=False)
-    )
-
-    trace = [
-        "Read the detailed description",
-        "Extract one executable goal",
-        "Validate the 2000-character limit",
-    ]
-
-    res = provider.chat_completions(
-        messages=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=300,
-        response_format={"type": "json_object"},
-    )
-    data = _json.loads(res.content)
-    content = data.get("content") or data.get("goal") or ""
-    content = str(content).strip().replace("\n", " ")
-    if not content:
-        raise HTTPException(status_code=502, detail="LLM returned empty content")
-    if len(content) > 2000:
-        content = content[:2000]
-    return {"ok": True, "content": content, "trace": trace}
-
-
-@app.post("/api/tasks/extract_title_from_description")
-def api_extract_task_title_from_description(payload: dict) -> dict:
-    """Extract a task title from the detailed description for New Task."""
-
-    desc = payload.get("description") if isinstance(payload, dict) else ""
-    desc = str(desc or "").strip()
-    if not desc:
-        raise HTTPException(status_code=400, detail="description is required")
-
-    provider, err = _get_llm_provider_or_error()
-    if provider is None:
-        raise HTTPException(
-            status_code=400, detail=err or "LLM provider not configured"
-        )
-
-    import json as _json
-
-    sys = "You extract a short, actionable task title from the user's description. Return strict JSON only."
-    user = (
-        "Extract one short, clear, actionable task title from the detailed description below.\n"
-        "Requirements: output only the title, no extra explanation, no quotes, no line breaks, max 512 characters.\n"
-        + _json.dumps({"description": desc}, ensure_ascii=False)
-    )
-    trace = [
-        "Read the detailed description",
-        "Extract one actionable task title",
-        "Validate the 512-character limit",
-    ]
-
-    res = provider.chat_completions(
-        messages=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=200,
-        response_format={"type": "json_object"},
-    )
-    data = _json.loads(res.content)
-    title = data.get("title") or data.get("task") or ""
-    title = str(title).strip().replace("\n", " ")
-    if not title:
-        raise HTTPException(status_code=502, detail="LLM returned empty title")
-    if len(title) > 512:
-        title = title[:512]
-    return {"ok": True, "title": title, "trace": trace}
-
-
 @app.post("/goals/{goal_id:int}/delete", include_in_schema=False)
 def goals_delete(goal_id: int) -> RedirectResponse:
-    deleted_content = ""
+    deleted_title = ""
     with session_scope() as s:
         goal = s.get(Goal, goal_id)
         if goal is None:
             raise HTTPException(status_code=404, detail="Goal not found")
-        deleted_content = str(goal.content or "")
+        deleted_title = str(goal.title or "")
         # 清理关联 tasks（MVP 先做简单级联）
         s.query(Task).filter(Task.goal_id == goal_id).delete()
         s.delete(goal)
     _try_audit_memory(
         kind="goal.deleted",
         source="web",
-        summary=f"Deleted goal: {deleted_content}",
+        summary=f"Deleted goal: {deleted_title}",
         detail="Goal and its tasks were deleted.",
         goal_id=goal_id,
         metadata={},
@@ -4532,7 +4387,7 @@ def goal_plan_start(request: Request) -> HTMLResponse:
                     with session_scope() as s:
                         g = s.get(Goal, gid)
                         if g is not None:
-                            draft_content = str(g.content or "").strip()
+                            draft_content = str(g.title or "").strip()
                             if getattr(g, "due_date", None):
                                 default_due_obj = g.due_date
                 except Exception:
@@ -4559,7 +4414,7 @@ def _plan_system_prompt(*, remaining_turns: int) -> str:
         '1) Ask a follow-up question: {"type":"question", "question":"..."}\n'
         '2) Return a final plan: {"type":"final", "goal":{...}, "tasks":[...], "conflicts":[...], "relations":[...]}\n'
         f"Remaining follow-up turns: {remaining_turns}. When remaining_turns <= 0 you must return `final`.\n"
-        "`final.goal` must include: content, description, status, priority, importance.\n"
+        "`final.goal` must include: title, content, status, priority, importance.\n"
         "Each item in `tasks` must include at least `title` as a string."
     )
 
@@ -4577,9 +4432,9 @@ def _plan_llm_step(
     convo: list[dict] = [{"role": "system", "content": sys}]
     extra = ""
     if source_goal is not None:
-        extra += f"\nCurrent goal: {source_goal.content}\n"
-        if source_goal.description:
-            extra += f"Goal description: {source_goal.description}\n"
+        extra += f"\nCurrent goal: {source_goal.title}\n"
+        if source_goal.content:
+            extra += f"Goal content: {source_goal.content}\n"
         extra += f"Goal status: {source_goal.status} · priority={source_goal.priority} · importance={source_goal.importance}\n"
     if existing_tasks:
         extra += "\nExisting tasks:\n"
@@ -4743,6 +4598,7 @@ async def _kickoff_plan_session_first_step(session_id: int) -> None:
 async def goal_plan_create_session(
     due_date: str = Form(...),
     draft_content: str | None = Form(default=None),
+    title: str | None = Form(default=None),
     content: str | None = Form(default=None),
     description: str | None = Form(default=None),
 ) -> RedirectResponse:
@@ -4752,11 +4608,16 @@ async def goal_plan_create_session(
 
         raw = (draft_content or "").strip()
         if not raw:
-            c = (content or "").strip()
-            d = (description or "").strip()
-            raw = c
-            if d:
-                raw = (c + "\n\nDescription:\n" + d).strip()
+            title_text = (title or "").strip()
+            content_text = (content or "").strip()
+            # Backward compatibility for older callers that posted
+            # content=<title>, description=<content>.
+            if not title_text and description is not None:
+                title_text = content_text
+                content_text = (description or "").strip()
+            raw = title_text
+            if content_text:
+                raw = (title_text + "\n\nContent:\n" + content_text).strip()
         _try_audit_memory(
             kind="plan.session_start_requested",
             source="web",
@@ -4773,11 +4634,16 @@ async def goal_plan_create_session(
     parsed_due = dt.date.fromisoformat(due_date)
     raw = (draft_content or "").strip()
     if not raw:
-        c = (content or "").strip()
-        d = (description or "").strip()
-        raw = c
-        if d:
-            raw = (c + "\n\nDescription:\n" + d).strip()
+        title_text = (title or "").strip()
+        content_text = (content or "").strip()
+        # Backward compatibility for older callers that posted
+        # content=<title>, description=<content>.
+        if not title_text and description is not None:
+            title_text = content_text
+            content_text = (description or "").strip()
+        raw = title_text
+        if content_text:
+            raw = (title_text + "\n\nContent:\n" + content_text).strip()
     if not raw:
         raise HTTPException(status_code=400, detail="draft_content/content is required")
     if len(raw) > 2000:
@@ -5012,18 +4878,19 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
             target_goal_id = int(sess.source_goal_id)
         else:
             goal_obj = data.get("goal") or {}
-            content = str(goal_obj.get("content") or sess.draft_content).strip()
-            description = str(goal_obj.get("description") or "").strip()
+            title = str(
+                goal_obj.get("title") or goal_obj.get("content") or sess.draft_content
+            ).strip()
+            goal_content = str(
+                goal_obj.get("content") or goal_obj.get("description") or ""
+            ).strip()
             status = str(goal_obj.get("status") or "active").strip() or "active"
             priority = str(goal_obj.get("priority") or "normal").strip() or "normal"
             importance = str(goal_obj.get("importance") or "normal").strip() or "normal"
 
-            provider, _err = _get_llm_provider_or_error()
-            summary = _summarize_items(provider, [content])[0]
             g = Goal(
-                content=content,
-                summary=summary,
-                description=description,
+                title=title,
+                content=goal_content,
                 due_date=sess.due_date,
                 status=status,
                 priority=priority,
@@ -5031,21 +4898,21 @@ async def goal_plan_confirm(request: Request, session_id: int) -> RedirectRespon
             )
             s.add(g)
             s.flush()
+            _add_goal_created_event(s, g, agent="plan")
             target_goal_id = g.id
             sess.created_goal_id = g.id
 
         # Create tasks from the selected draft items.
-        provider, _err = _get_llm_provider_or_error()
-        summaries = _summarize_items(provider, picked)
-        for i, title in enumerate(picked):
-            s.add(
-                Task(
-                    goal_id=target_goal_id,
-                    title=title,
-                    summary=summaries[i],
-                    status="todo",
-                )
+        for title in picked:
+            task = Task(
+                goal_id=target_goal_id,
+                title=title,
+                content="",
+                status="todo",
             )
+            s.add(task)
+            s.flush()
+            _add_task_created_event(s, task, agent="plan")
 
         sess.status = "completed"
         if sess.created_goal_id is None:
@@ -5126,18 +4993,19 @@ async def goal_plan_create_single_task(
             target_goal_id = int(sess.created_goal_id)
         else:
             goal_obj = data.get("goal") or {}
-            content = str(goal_obj.get("content") or sess.draft_content).strip()
-            description = str(goal_obj.get("description") or "").strip()
+            title = str(
+                goal_obj.get("title") or goal_obj.get("content") or sess.draft_content
+            ).strip()
+            goal_content = str(
+                goal_obj.get("content") or goal_obj.get("description") or ""
+            ).strip()
             status = str(goal_obj.get("status") or "active").strip() or "active"
             priority = str(goal_obj.get("priority") or "normal").strip() or "normal"
             importance = str(goal_obj.get("importance") or "normal").strip() or "normal"
 
-            provider, _err = _get_llm_provider_or_error()
-            summary = _summarize_items(provider, [content])[0]
             g = Goal(
-                content=content,
-                summary=summary,
-                description=description,
+                title=title,
+                content=goal_content,
                 due_date=sess.due_date,
                 status=status,
                 priority=priority,
@@ -5145,16 +5013,14 @@ async def goal_plan_create_single_task(
             )
             s.add(g)
             s.flush()
+            _add_goal_created_event(s, g, agent="plan")
             target_goal_id = g.id
             sess.created_goal_id = g.id
 
-        provider, _err = _get_llm_provider_or_error()
-        t_summary = _summarize_items(provider, [title])[0]
-        task = Task(
-            goal_id=target_goal_id, title=title, summary=t_summary, status="todo"
-        )
+        task = Task(goal_id=target_goal_id, title=title, content="", status="todo")
         s.add(task)
         s.flush()
+        _add_task_created_event(s, task, agent="plan")
 
         s.add(
             GoalPlanMessage(
@@ -6590,7 +6456,7 @@ def calendar_month(ym: str | None = None) -> dict:
                 "task_public_id": t.public_id,
                 "task_title": t.title,
                 "goal_id": int(t.goal_id),
-                "goal_title": (g.content if g is not None else ""),
+                "goal_title": (g.title if g is not None else ""),
                 "completed_at": t.completed_at.isoformat()
                 if hasattr(t.completed_at, "isoformat")
                 else str(t.completed_at),
@@ -6605,7 +6471,7 @@ def calendar_month(ym: str | None = None) -> dict:
         goals_out.append(
             {
                 "id": gid,
-                "title": g.content,
+                "title": g.title,
                 "status": g.status,
                 "created_at": g.created_at.isoformat()
                 if hasattr(g.created_at, "isoformat")

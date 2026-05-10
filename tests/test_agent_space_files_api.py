@@ -66,10 +66,10 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
         try:
             # create a goal/task
             with session_scope() as s:
-                g = Goal(content="g", description="d", due_date=dt.date.today())
+                g = Goal(title="g", content="d", due_date=dt.date.today())
                 s.add(g)
                 s.flush()
-                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                t = Task(goal_id=g.id, title="t", content="d", status="todo")
                 s.add(t)
                 s.flush()
                 task_pid = t.public_id
@@ -169,10 +169,10 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
         )
         try:
             with session_scope() as s:
-                g = Goal(content="g", description="d", due_date=dt.date.today())
+                g = Goal(title="g", content="d", due_date=dt.date.today())
                 s.add(g)
                 s.flush()
-                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                t = Task(goal_id=g.id, title="t", content="d", status="todo")
                 s.add(t)
                 s.flush()
                 pid = t.public_id
@@ -265,10 +265,10 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
         )
         try:
             with session_scope() as s:
-                g = Goal(content="g", description="d", due_date=dt.date.today())
+                g = Goal(title="g", content="d", due_date=dt.date.today())
                 s.add(g)
                 s.flush()
-                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                t = Task(goal_id=g.id, title="t", content="d", status="todo")
                 s.add(t)
                 s.flush()
                 pid = t.public_id
@@ -351,10 +351,10 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
         )
         try:
             with session_scope() as s:
-                g = Goal(content="g", description="d", due_date=dt.date.today())
+                g = Goal(title="g", content="d", due_date=dt.date.today())
                 s.add(g)
                 s.flush()
-                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                t = Task(goal_id=g.id, title="t", content="d", status="todo")
                 s.add(t)
                 s.flush()
                 pid = t.public_id
@@ -449,10 +449,10 @@ def test_agent_space_agent_offline_returns_502(tmp_path):
 
         # create a goal/task + a fake active companion (but no online gRPC connection)
         with session_scope() as s:
-            g = Goal(content="g", description="d", due_date=dt.date.today())
+            g = Goal(title="g", content="d", due_date=dt.date.today())
             s.add(g)
             s.flush()
-            t = Task(goal_id=g.id, title="t", description="d", status="todo")
+            t = Task(goal_id=g.id, title="t", content="d", status="todo")
             s.add(t)
             s.flush()
             pid = t.public_id

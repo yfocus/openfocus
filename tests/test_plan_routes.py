@@ -34,8 +34,8 @@ async def test_plan_session_writes_audit_memory(monkeypatch, tmp_path):
             "/goals/plan/start",
             data={
                 "due_date": "2026-12-31",
-                "content": "build memory pipeline",
-                "description": "need a plan first",
+                "title": "build memory pipeline",
+                "content": "need a plan first",
             },
             follow_redirects=False,
         )

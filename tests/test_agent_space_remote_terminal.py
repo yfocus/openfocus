@@ -65,10 +65,10 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
         )
         try:
             with session_scope() as s:
-                g = Goal(content="g", description="d", due_date=dt.date.today())
+                g = Goal(title="g", content="d", due_date=dt.date.today())
                 s.add(g)
                 s.flush()
-                t = Task(goal_id=g.id, title="t", description="d", status="todo")
+                t = Task(goal_id=g.id, title="t", content="d", status="todo")
                 s.add(t)
                 s.flush()
                 task_pid = t.public_id

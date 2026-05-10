@@ -17,9 +17,29 @@ class Goal(Base):
     __tablename__ = "goals"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    content: Mapped[str] = mapped_column(String(2000), nullable=False)
-    summary: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    description: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    content: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+
+    @property
+    def description(self) -> str:
+        """Backward-compatible alias for old rows/code; public model is title/content."""
+
+        return self.content
+
+    @description.setter
+    def description(self, value: str) -> None:
+        self.content = str(value or "")
+
+    @property
+    def summary(self) -> str:
+        """Deprecated display summary; titles are truncated at render time instead."""
+
+        return ""
+
+    @summary.setter
+    def summary(self, value: str) -> None:
+        # Intentionally ignored: Goal only exposes title/content now.
+        return None
 
     # 可先用枚举字符串（后续再做 Enum/字典表）
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
@@ -70,8 +90,29 @@ class Task(Base):
 
     goal_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
-    summary: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    description: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    content: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+
+    @property
+    def description(self) -> str:
+        """Backward-compatible alias for old rows/code; public model is title/content."""
+
+        return self.content
+
+    @description.setter
+    def description(self, value: str) -> None:
+        self.content = str(value or "")
+
+    @property
+    def summary(self) -> str:
+        """Deprecated display summary; titles are truncated at render time instead."""
+
+        return ""
+
+    @summary.setter
+    def summary(self, value: str) -> None:
+        # Intentionally ignored: Task only exposes title/content now.
+        return None
+
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo")
     task_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -15,10 +15,10 @@ async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm
 
     # seed goal + task
     with session_scope() as s:
-        g = Goal(content="g", description="", due_date=dt.date.today())
+        g = Goal(title="g", content="", due_date=dt.date.today())
         s.add(g)
         s.flush()
-        t = Task(goal_id=g.id, title="t", description="d", status="todo")
+        t = Task(goal_id=g.id, title="t", content="d", status="todo")
         s.add(t)
         s.flush()
         public_id = t.public_id
@@ -51,10 +51,10 @@ async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm
     from openfocus.models import Event, Goal, Task
 
     with session_scope() as s:
-        g = Goal(content="g2", description="", due_date=dt.date.today())
+        g = Goal(title="g2", content="", due_date=dt.date.today())
         s.add(g)
         s.flush()
-        t = Task(goal_id=g.id, title="skill-task", description="d", status="todo")
+        t = Task(goal_id=g.id, title="skill-task", content="d", status="todo")
         s.add(t)
         s.flush()
         public_id = t.public_id
@@ -95,10 +95,10 @@ async def test_agent_and_skill_events_write_audit_memory(monkeypatch, tmp_path):
     from openfocus.models import Goal, Task
 
     with session_scope() as s:
-        g = Goal(content="g3", description="d", due_date=dt.date.today())
+        g = Goal(title="g3", content="d", due_date=dt.date.today())
         s.add(g)
         s.flush()
-        t = Task(goal_id=g.id, title="task-audit", description="d", status="todo")
+        t = Task(goal_id=g.id, title="task-audit", content="d", status="todo")
         s.add(t)
         s.flush()
         public_id = t.public_id

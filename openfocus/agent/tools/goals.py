@@ -89,7 +89,7 @@ def build_goal_tools() -> SimpleToolRegistry:
     reg.register(
         ToolSpec(
             name="describe_goal",
-            description="查看 goal 的详细信息：描述、时间信息、以及其下 tasks 列表。",
+            description="查看 goal 的详细信息：title/content、时间信息、以及其下 tasks 列表。",
             parameters_json_schema={
                 "type": "object",
                 "properties": {
@@ -190,8 +190,8 @@ def _tool_list_goals(args: Json) -> str:
             out.append(
                 {
                     "goal_id": g.id,
+                    "title": g.title,
                     "content": g.content,
-                    "description": g.description,
                     "status": g.status,
                     "priority": g.priority,
                     "importance": g.importance,
@@ -229,6 +229,7 @@ def _tool_describe_goal(args: Json) -> str:
                         "id": t.id,
                         "public_id": t.public_id,
                         "title": t.title,
+                        "content": t.content,
                         "status": t.status,
                         "created_at": t.created_at.isoformat(),
                         "completed_at": t.completed_at.isoformat()
@@ -240,8 +241,8 @@ def _tool_describe_goal(args: Json) -> str:
         out = {
             "goal": {
                 "goal_id": g.id,
+                "title": g.title,
                 "content": g.content,
-                "description": g.description,
                 "status": g.status,
                 "priority": g.priority,
                 "importance": g.importance,

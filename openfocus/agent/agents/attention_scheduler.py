@@ -62,7 +62,10 @@ class AttentionSchedulerAgent:
 
         # 构建给 LLM 的上下文（压缩版）
         goals_text = "\n".join(
-            [f"- goal_id={g.id} due={g.due_date} content={g.content}" for g in goals_q]
+            [
+                f"- goal_id={g.id} due={g.due_date} title={g.title} content={g.content}"
+                for g in goals_q
+            ]
         )
         tasks_text = "\n".join(
             [

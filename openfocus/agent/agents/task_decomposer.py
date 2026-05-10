@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...db import session_scope
-from ...models import Goal, Task
+from ...models import Event, Goal, Task
 from ..core.loop import AgentLoopConfig, parse_json_strict, run_tool_loop
 from ..core.types import EventSink, Json
 from ..llm.types import LLMProvider
@@ -44,7 +44,8 @@ class TaskDecomposerAgent:
                 raise ValueError(f"Goal not found: {self.goal_id}")
 
         user_input = (
-            f"Goal 内容：{goal.content}\n"
+            f"Goal title：{goal.title}\n"
+            f"Goal content：{goal.content}\n"
             f"完成时间：{goal.due_date.isoformat()}\n"
             "请输出 JSON。"
         )
@@ -78,11 +79,33 @@ class TaskDecomposerAgent:
                 title = str(t.get("title") or "").strip()
                 if not title:
                     continue
-                obj = Task(goal_id=self.goal_id, title=title, status="todo")
+                content = str(t.get("rationale") or "").strip()
+                obj = Task(
+                    goal_id=self.goal_id,
+                    title=title,
+                    content=content,
+                    status="todo",
+                )
                 s.add(obj)
                 s.flush()
+                s.add(
+                    Event(
+                        kind="task.created",
+                        agent=self.name,
+                        task_id=str(obj.public_id or ""),
+                        payload={
+                            "goal_id": int(obj.goal_id),
+                            "task_public_id": str(obj.public_id or ""),
+                            "title": str(obj.title or ""),
+                        },
+                    )
+                )
                 created.append(
-                    {"id": obj.id, "public_id": obj.public_id, "title": obj.title}
+                    {
+                        "id": obj.id,
+                        "public_id": obj.public_id,
+                        "title": obj.title,
+                    }
                 )
 
         sink.emit(

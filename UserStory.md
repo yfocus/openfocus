@@ -38,8 +38,8 @@ flowchart TD
 1. 左侧栏只展示目标列表（用于扫视与选择目标），不在目标卡片下展开/展示 task。
    - Task 的查看与选择统一在中间详情里完成（例如在目标详情的 Tasks 表格中点击进入任务详情）。
 2. Information density follows the current implementation:
-   - Left goal cards show a short summary, a done/total ratio, and a status dot.
-   - Goal detail shows original content, DDL, elapsed time, related tasks, and related events.
+   - Left goal cards show a truncated goal `title`, a done/total ratio, and a status dot.
+   - Goal detail shows original `title`/`content`, DDL, elapsed time, related tasks, and related events.
    - Task detail shows original title/content, DDL, elapsed time, stable `taskId`, and related events.
    - Task status must remain visually distinguishable (`todo` / `in progress` / `done`).
 3. Dashboard 采用纵向**三栏布局**：左侧「目标列表」+ 中间「详情」+ 右侧「辅助栏」。
@@ -56,18 +56,15 @@ flowchart TD
 6. 顶部导航栏提供一个明显的 `New Goal` 按钮（弹窗/对话框均可），用于快速创建目标。
    - 视觉强约束：`New Goal` 必须与 `Dashboard/Memory/Companion` 同一套导航按钮样式。
    - 交互强约束（New Goal 形态升级）：
-     - 对话框包含：`Title`（goal content, <=2000）+ `Content`（详细描述, 必填）+ `DDL`（必填）。
-     - `Auto` 开关必须放在 `Title` 输入框右侧：
-       - `Auto=ON`：`Title` 不允许输入（只读），并显示 `Auto generate from content`。
-       - On `Save`, the system must use LLM-based smart extraction from `Content` to produce `Title`.
-       - `Auto=OFF`：`Title` 才允许输入。
-       - 必须移除 `gen` 按钮（不再通过按钮生成 Title）。
+     - 对话框只包含：`Title`（必填，<=2000）+ `Content`（必填，<=4000）+ `DDL`（必填）。
+     - `Title` 必须由用户或发布流程明确提供；OpenFocus 不再提供 `Auto` 开关，也不再通过 LLM/Agent 从 `Content` 自动提炼或生成 `Title`。
+     - 必须移除 `gen` / `Auto generate from content` 等自动标题生成入口。
      - 顶部导航栏提供独立的 `Inspiration` 入口；`New Goal` 对话框内不再承载 `Plan Mode` 或其他规划入口。
      - 提交按钮固定显示为 `Save`；点击后立即创建 goal。
-7. 「摘要」规则（强约束）：
-  - Goal/Task 创建时：若原文长度超过 20 个字符，必须生成一个**不超过 20 个字符**的短摘要；否则摘要=原文。
-  - Dashboard 左侧栏只展示摘要（节省空间，便于扫视）；原文只在中间详情栏展示。
-  - 摘要用于展示，不改变原文内容。
+7. `Title`/`Content` 规则（强约束）：
+  - Goal 和 Task 的用户语义字段只保留 `title` 与 `content`；不再维护独立 `summary` / `description` 语义。
+  - Dashboard 左侧栏需要短展示时，只在渲染层截断 `title`（例如 20 字符左右）；截断只影响展示，不写回数据库，也不改变原始 `title`。
+  - 系统不得在创建 Goal/Task 时调用 Agent/LLM 从 `content` 生成 `title` 或 `summary`。
 8. Recent Events：
   - 事件按“越近越靠前”排序。
   - 事件项若关联 task，应支持一键跳转到该 task 的详情。
@@ -79,7 +76,7 @@ flowchart TD
      - 状态需可读化（例如把 `status=succeeded` 展示为 `Completed (pending confirmation)`）。
 9. 选中态视觉（强约束）：被选中的 goal/task **整张卡片框**必须高亮（不仅是文字/按钮高亮）。
 10. 左侧信息密度（强约束）：
-   - 左侧列表以“扫视”为主，状态/耗时等信息不得挤占摘要主信息区（避免出现「待启动/已进行」大段占位）。
+   - 左侧列表以“扫视”为主，状态/耗时等信息不得挤占 title 主信息区（避免出现「待启动/已进行」大段占位）。
    - 状态可以用小图标/颜色点位表达；详细状态/耗时在中间详情栏展开。
 11. 完成确认（强约束）：
    - 外部 Agent/Skill 的“完成上报”（例如 `POST /api/agent/events` 的 `task.completed` 或 `POST /api/skills/focus_report` 的 `status=succeeded`）**不等于任务真实完成**。
@@ -91,12 +88,14 @@ flowchart TD
 
 13. 新建 Task（交互强约束）：
    - 新建 Task 不允许在左侧 GOALS/TASKS 栏内直接输入创建；必须与 New Goal 一样通过弹窗/对话框创建。
-   - 对话框包含「任务标题」与「详细描述」两个输入框，且**两个都必填**。
+   - 对话框包含 `Title` 与 `Content` 两个输入框，且**两个都必填**。
+   - 保存成功后返回当前 goal 的 `Tasks` tab。
    - 点击保存后立即落库。
 
 14. 目标详情编辑：
-   - 目标详情需展示目标与详细描述原文。
+   - 目标详情需展示原始 `title` 与 `content`。
    - 支持在目标详情内编辑（不依赖跳转到单独编辑页）。
+   - 如果 goal 来自 Inspiration，`inspiration` 链接展示在 DDL / elapsed / task count 所在 meta 行，小写小字体，以链接形式跳转。
 
 15. 顶端导航栏提供 `Inspiration` 选项，点击后跳转到灵感空间列表页。
    - Inspiration 使用独立页面与独立 URL，不嵌在 `New Goal` 对话框里。

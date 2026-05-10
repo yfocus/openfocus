@@ -64,13 +64,17 @@
       /* Center detail */
       #dashboard .detail-wrap{ position: relative; }
       #dashboard .detail-head{ display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
+      #dashboard .detail-title-box{ flex: 1 1 auto; min-width: 0; }
       #dashboard .detail-actions{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
+      #dashboard .detail-actions{ flex: 0 0 auto; }
       #dashboard .detail-actions > form{ display:inline-flex; align-items:center; margin:0; }
       #dashboard .detail-actions > button,
       #dashboard .detail-actions > a,
       #dashboard .detail-actions form > button{ display:inline-flex; align-items:center; }
       #dashboard .detail-actions .btn-danger{ padding: 8px 12px; }
       #dashboard .detail-meta{ margin-top: 8px; display:flex; gap: 10px; flex-wrap:wrap; color: rgba(255,255,255,0.70); font-size: 12px; }
+      #dashboard .detail-meta-link{ font-size: 11px; color: rgba(215,255,233,0.72); text-decoration: none; }
+      #dashboard .detail-meta-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
       #dashboard .detail-body{ margin-top: 12px; display:grid; grid-template-columns: 1fr 110px; gap: 12px; min-height: 0; }
       #dashboard .detail-nav{ border-left: 1px solid rgba(255,255,255,0.10); padding-left: 12px; display:flex; flex-direction:column; gap: 10px; }
       #dashboard .detail-nav button{ width: 100%; text-align:right; padding: 6px 0; border:0; background: transparent; color: rgba(255,255,255,0.70); cursor:pointer; }
@@ -299,7 +303,7 @@
                     tabindex="-1"
                     style="text-align:left; border:0; background:transparent; padding: 0; flex:1; min-width: 0;"
                   >
-                    <div class="gname" title="{{ g.content }}"><strong>#</strong> {{ goal_display.get(g.id, g.content) }}</div>
+                    <div class="gname" title="{{ g.title }}"><strong>#</strong> {{ goal_display.get(g.id, g.title) }}</div>
                   </button>
                   <div class="gmeta">
                     <span class="ratio">{{ done_n }}/{{ total_n }}</span>
@@ -313,18 +317,18 @@
             <template id="detail-goal-{{ g.id }}">
               <div class="pad detail-wrap" data-detail-root>
                 <div class="detail-head">
-                  <div style="min-width:0;">
-                    <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if g.status == 'done' else 'rgba(255,209,102,0.92)' }};">{{ g.content }}</div>
+                  <div class="detail-title-box">
+                    <div class="wb-title" title="{{ g.title }}" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if g.status == 'done' else 'rgba(255,209,102,0.92)' }};">{{ g.title }}</div>
                     <div class="detail-meta">
                       <span>DDL {{ g.due_date }}</span>
                       <span>已进行 {{ g.created_at|human_since(now=now) }}</span>
                       <span>{{ done_n }}/{{ total_n }}</span>
+                      {% if g.source_inspiration_space_id %}
+                        <a href="/inspirations/{{ g.source_inspiration_space_id }}" class="detail-meta-link">inspiration</a>
+                      {% endif %}
                     </div>
                   </div>
                   <div class="detail-actions">
-                    {% if g.source_inspiration_space_id %}
-                      <a href="/inspirations/{{ g.source_inspiration_space_id }}" class="btn-ghost action-link" role="button">Inspiration</a>
-                    {% endif %}
                     {% if g.status != 'done' %}
                       <button type="button" class="btn-ghost action-link js-open-new-task" data-goal="{{ g.id }}">New Task</button>
                     {% endif %}
@@ -340,8 +344,8 @@
                     {% if g.status != 'done' %}
                       <button type="button" class="btn-ghost action-link js-open-goal-edit"
                         data-goal="{{ g.id }}"
+                        data-title="{{ g.title }}"
                         data-content="{{ g.content }}"
-                        data-description="{{ g.description }}"
                         data-due="{{ g.due_date }}"
                       >Edit</button>
                     {% endif %}
@@ -355,7 +359,7 @@
                   <div style="min-width:0;">
                     <div class="detail-sec" data-sec="basic">
                       <div class="sec-title">Basic</div>
-                      <div class="sec-body" style="white-space: pre-wrap;">{{ g.description or '—' }}</div>
+                      <div class="sec-body" style="white-space: pre-wrap;">{{ g.content or '—' }}</div>
                     </div>
 
                     <div class="detail-sec" data-sec="tasks">
@@ -445,7 +449,7 @@
               <template id="detail-task-{{ t.public_id }}">
                 <div class="pad detail-wrap" data-detail-root>
                   <div class="detail-head">
-                    <div style="min-width:0;">
+                    <div class="detail-title-box">
                       <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if t.status == 'done' else 'rgba(255,255,255,0.92)' }};">{{ t.title }}</div>
                       <div class="detail-meta">
                         <span>DDL {{ g.due_date }}</span>
@@ -482,7 +486,7 @@
                         data-task-public-id="{{ t.public_id }}"
                         data-goal="{{ g.id }}"
                         data-title="{{ t.title }}"
-                        data-description="{{ t.description }}"
+                        data-content="{{ t.content }}"
                       >Edit</button>
                     {% endif %}
 
@@ -496,7 +500,7 @@
                     <div style="min-width:0;">
                       <div class="detail-sec" data-sec="basic">
                         <div class="sec-title">Basic</div>
-                        <div class="sec-body" style="white-space: pre-wrap;">{{ t.description or '—' }}</div>
+                        <div class="sec-body" style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
                       </div>
 
                       <div class="detail-sec" data-sec="detail">
@@ -651,20 +655,15 @@
       <form method="post" action="/goals" id="new-goal-form">
         <div class="dlg-field">
           <div class="dlg-label">
-            <label for="goal-content">Title</label>
-            <label class="sw" title="Auto generate title from content">
-              <span class="sw-label">Auto</span>
-              <input type="checkbox" id="goal-auto" checked />
-              <span class="sw-track" aria-hidden="true"><span class="sw-thumb"></span></span>
-            </label>
+            <label for="goal-title">Title</label>
           </div>
-          <textarea name="content" rows="2" maxlength="2000" id="goal-content" placeholder="A clear goal title..."></textarea>
+          <textarea name="title" rows="2" required maxlength="2000" id="goal-title" placeholder="A clear goal title..."></textarea>
         </div>
         <div class="dlg-field">
           <div class="dlg-label">
-            <label for="goal-description">Content</label>
+            <label for="goal-content">Content</label>
           </div>
-          <textarea name="description" rows="6" required maxlength="4000" id="goal-description" placeholder="Describe the goal in detail..."></textarea>
+          <textarea name="content" rows="6" required maxlength="4000" id="goal-content" placeholder="Describe the goal in detail..."></textarea>
         </div>
         <div class="dlg-field">
           <div class="dlg-label"><label for="goal-ddl">DDL</label></div>
@@ -700,9 +699,8 @@
           <textarea name="title" rows="2" required maxlength="512" id="task-title" placeholder="A concrete next step..."></textarea>
         </div>
         <div class="dlg-field">
-          <div class="dlg-label"><label for="task-description">Content</label></div>
-          <textarea name="description" rows="7" required maxlength="4000" id="task-description" placeholder="What needs to be done, constraints, context..."></textarea>
-          <div id="task-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
+          <div class="dlg-label"><label for="task-content">Content</label></div>
+          <textarea name="content" rows="7" required maxlength="4000" id="task-content" placeholder="What needs to be done, constraints, context..."></textarea>
         </div>
         <div class="dlg-footer">
           <span></span>
@@ -728,15 +726,13 @@
       <form method="post" action="" id="edit-goal-form">
         <div style="margin-bottom: 10px;">
           <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <label class="muted">目标内容（必填）</label>
-            <button type="button" class="btn-ghost" id="goal-edit-gen" title="从详细描述提炼目标">从详细描述生成</button>
+            <label class="muted">Title（必填）</label>
           </div>
-          <textarea name="content" rows="3" required maxlength="2000" id="goal-edit-content"></textarea>
+          <textarea name="title" rows="3" required maxlength="2000" id="goal-edit-title"></textarea>
         </div>
         <div style="margin-bottom: 10px;">
-          <label class="muted">详细描述（必填）</label>
-          <textarea name="description" rows="4" required maxlength="4000" id="goal-edit-description"></textarea>
-          <div id="goal-edit-gen-trace" class="muted" style="margin-top: 8px; display:none; white-space: pre-wrap;"></div>
+          <label class="muted">Content（必填）</label>
+          <textarea name="content" rows="4" required maxlength="4000" id="goal-edit-content"></textarea>
         </div>
         <div class="row">
           <div>
@@ -772,8 +768,8 @@
           <textarea name="title" rows="2" required maxlength="512" id="task-edit-title"></textarea>
         </div>
         <div style="margin-bottom: 10px;">
-          <label class="muted" for="task-edit-description">Content（必填）</label>
-          <textarea name="description" rows="6" required maxlength="4000" id="task-edit-description"></textarea>
+          <label class="muted" for="task-edit-content">Content（必填）</label>
+          <textarea name="content" rows="6" required maxlength="4000" id="task-edit-content"></textarea>
         </div>
         <div style="display:flex; align-items:center; justify-content:flex-end; gap: 10px;">
           <button type="submit">保存</button>
@@ -871,77 +867,6 @@
       return x.replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
     }
 
-    function _setTraceBox(box, lines){
-      if(!box) return;
-      box.style.display = 'block';
-      box.textContent = (Array.isArray(lines) ? lines.join('\n') : String(lines || ''));
-    }
-
-    async function _extractGoalFromDescriptionGeneric({ descEl, outEl, btnEl, traceEl } = {}){
-      const d = String(descEl?.value || '').trim();
-      if(!d){ toast('请先填写详细描述'); return; }
-
-      if(btnEl) btnEl.disabled = true;
-      _setTraceBox(traceEl, ['[1/3] 读取详细描述…', '[2/3] 提炼目标内容…', '[3/3] 校验长度与格式…']);
-
-      try{
-        const r = await fetch('/api/goals/extract_content_from_description', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: d }),
-        });
-        if(!r.ok){
-          const txt = await r.text().catch(()=> '');
-          throw new Error(txt || ('HTTP ' + r.status));
-        }
-        const data = await r.json();
-        const content = (data && data.content) ? String(data.content) : '';
-        const trace = (data && Array.isArray(data.trace)) ? data.trace : [];
-        if(trace.length) _setTraceBox(traceEl, trace);
-        if(outEl) outEl.value = content;
-        toast('已生成目标');
-      }catch(e){
-        _setTraceBox(traceEl, '生成失败：' + String(e && e.message ? e.message : e));
-        toast('生成失败');
-      }finally{
-        if(btnEl) btnEl.disabled = false;
-      }
-    }
-
-    async function _extractTaskTitleFromDescription(){
-      const desc = document.getElementById('task-description');
-      const out = document.getElementById('task-title');
-      const btn = document.getElementById('task-gen');
-      const box = document.getElementById('task-gen-trace');
-      const d = String(desc?.value || '').trim();
-      if(!d){ toast('请先填写详细描述'); return; }
-
-      if(btn) btn.disabled = true;
-      _setTraceBox(box, ['[1/3] 读取详细描述…', '[2/3] 提炼任务标题…', '[3/3] 校验长度与格式…']);
-      try{
-        const r = await fetch('/api/tasks/extract_title_from_description', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: d }),
-        });
-        if(!r.ok){
-          const txt = await r.text().catch(()=> '');
-          throw new Error(txt || ('HTTP ' + r.status));
-        }
-        const data = await r.json();
-        const title = (data && data.title) ? String(data.title) : '';
-        const trace = (data && Array.isArray(data.trace)) ? data.trace : [];
-        if(trace.length) _setTraceBox(box, trace);
-        if(out) out.value = title;
-        toast('已生成标题');
-      }catch(e){
-        _setTraceBox(box, '生成失败：' + String(e && e.message ? e.message : e));
-        toast('生成失败');
-      }finally{
-        if(btn) btn.disabled = false;
-      }
-    }
-
     function _openNextFeedbackDialog(fromEl){
       const dlg = document.getElementById('next-feedback-dialog');
       const hint = document.getElementById('next-feedback-task-hint');
@@ -971,11 +896,9 @@
       if(hint) hint.textContent = 'goalId=' + gid;
       try{ dlg?.showModal(); }catch(_){ }
       const t1 = document.getElementById('task-title');
-      const t2 = document.getElementById('task-description');
+      const t2 = document.getElementById('task-content');
       if(t1) t1.value = '';
       if(t2) t2.value = '';
-      const trace = document.getElementById('task-gen-trace');
-      if(trace){ trace.textContent=''; trace.style.display='none'; }
       setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
     }
 
@@ -986,19 +909,16 @@
       if(!gid){ toast('goalId 缺失'); return; }
       if(form) form.action = '/goals/' + encodeURIComponent(gid) + '/edit';
 
+      const title = String(fromEl?.getAttribute('data-title') || '');
       const content = String(fromEl?.getAttribute('data-content') || '');
-      const desc = String(fromEl?.getAttribute('data-description') || '');
       const due = String(fromEl?.getAttribute('data-due') || '');
 
-      const c = document.getElementById('goal-edit-content');
-      const d = document.getElementById('goal-edit-description');
+      const c = document.getElementById('goal-edit-title');
+      const d = document.getElementById('goal-edit-content');
       const du = document.getElementById('goal-edit-due');
-      if(c) c.value = content;
-      if(d) d.value = desc;
+      if(c) c.value = title;
+      if(d) d.value = content;
       if(du) du.value = due;
-
-      const trace = document.getElementById('goal-edit-gen-trace');
-      if(trace){ trace.textContent=''; trace.style.display='none'; }
 
       try{ dlg?.showModal(); }catch(_){ }
       setTimeout(()=>{ try{ d?.focus(); }catch(_){ } }, 30);
@@ -1012,11 +932,11 @@
       if(form) form.action = '/tasks/' + encodeURIComponent(id) + '/edit';
 
       const title = String(fromEl?.getAttribute('data-title') || '');
-      const desc = String(fromEl?.getAttribute('data-description') || '');
+      const content = String(fromEl?.getAttribute('data-content') || '');
       const t1 = document.getElementById('task-edit-title');
-      const t2 = document.getElementById('task-edit-description');
+      const t2 = document.getElementById('task-edit-content');
       if(t1) t1.value = title;
-      if(t2) t2.value = desc;
+      if(t2) t2.value = content;
 
       try{ dlg?.showModal(); }catch(_){ }
       setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
@@ -1779,16 +1699,6 @@
 
     document.getElementById('next-refresh')?.addEventListener('click', ()=> refreshNext('manual_refresh'));
     document.getElementById('ev-refresh')?.addEventListener('click', refreshEvents);
-    document.getElementById('task-gen')?.addEventListener('click', _extractTaskTitleFromDescription);
-    document.getElementById('goal-edit-gen')?.addEventListener('click', async ()=>{
-      await _extractGoalFromDescriptionGeneric({
-        descEl: document.getElementById('goal-edit-description'),
-        outEl: document.getElementById('goal-edit-content'),
-        btnEl: document.getElementById('goal-edit-gen'),
-        traceEl: document.getElementById('goal-edit-gen-trace'),
-      });
-    });
-
     // AgentSpace dialog wiring
     const AGENT_SPACE_STATE = { taskPid: '', companionId: '' };
     const AGENT_SPACE_LAST_COMPANION_KEY = 'openfocus:last_companion_id';
@@ -2057,66 +1967,22 @@
       const ht = document.getElementById('new-goal-hint-text');
       if(!f || !b || !h || !ht) return;
 
-      const auto = document.getElementById('goal-auto');
-      const titleEl = document.getElementById('goal-content');
-      const descEl = document.getElementById('goal-description');
+      const titleEl = document.getElementById('goal-title');
+      const contentEl = document.getElementById('goal-content');
       const dueEl = document.getElementById('goal-ddl');
 
       let _submitting = false;
-      let _manualTitleCache = '';
-
-      function _syncNewGoalAutoUI(){
-        if(!(auto instanceof HTMLInputElement)) return;
-        if(!(titleEl instanceof HTMLTextAreaElement)) return;
-        const on = !!auto.checked;
-        if(on){
-          // cache current manual title
-          const cur = String(titleEl.value || '').trim();
-          if(cur && cur !== 'Auto generate from content') _manualTitleCache = cur;
-
-          titleEl.readOnly = true;
-          titleEl.placeholder = '';
-          // Auto=ON: always show a fixed hint text in the Title box.
-          titleEl.value = 'Auto generate from content';
-        }else{
-          titleEl.readOnly = false;
-          titleEl.placeholder = 'A clear goal title...';
-          // restore manual title if any
-          if(_manualTitleCache) titleEl.value = _manualTitleCache;
-          else if(String(titleEl.value || '').trim() === 'Auto generate from content') titleEl.value = '';
-        }
-      }
-
-      auto?.addEventListener('change', _syncNewGoalAutoUI);
-      _syncNewGoalAutoUI();
 
       f.addEventListener('submit', (e)=>{
         if(_submitting) return;
 
-        const useAuto = Boolean(auto && auto.checked);
-
         const title = String(titleEl?.value || '').trim();
-        const desc = String(descEl?.value || '').trim();
+        const content = String(contentEl?.value || '').trim();
         const due = String(dueEl?.value || '').trim();
 
-        if(!desc || !due){
+        if(!title || !content || !due){
           e.preventDefault();
           toast('请先把表单填完整');
-          return;
-        }
-
-        if(useAuto){
-          // Lightweight auto-title (no LLM): first non-empty line from Content.
-          const lines = String(desc || '').split(/\r?\n/).map(s=> String(s||'').trim()).filter(Boolean);
-          let t = lines.length ? lines[0] : String(desc||'').trim();
-          if(t.length > 2000) t = t.slice(0, 2000);
-          if(titleEl) titleEl.value = t;
-        }
-
-        const submitTitle = String(titleEl?.value || '').trim();
-        if(!submitTitle){
-          e.preventDefault();
-          toast('请填写 Title 或开启 Auto');
           return;
         }
 

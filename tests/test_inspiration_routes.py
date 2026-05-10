@@ -854,8 +854,8 @@ async def test_inspiration_publish_does_not_hold_db_write_lock_during_summarizat
         goal_resp = await client.post(
             "/goals",
             data={
-                "content": "Regular goal",
-                "description": "Used to verify unrelated writes stay responsive.",
+                "title": "Regular goal",
+                "content": "Used to verify unrelated writes stay responsive.",
                 "due_date": (dt.date.today() + dt.timedelta(days=5)).isoformat(),
             },
             follow_redirects=False,
@@ -902,7 +902,7 @@ async def test_inspiration_publish_does_not_hold_db_write_lock_during_summarizat
             f"/goals/{goal_id}/tasks",
             data={
                 "title": "parallel task",
-                "description": "should not wait for publish summary",
+                "content": "should not wait for publish summary",
             },
             follow_redirects=False,
         )

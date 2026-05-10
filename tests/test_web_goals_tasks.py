@@ -21,8 +21,8 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         r = await client.post(
             "/goals",
             data={
-                "content": "目标-单测",
-                "description": "desc-必填",
+                "title": "目标-单测",
+                "content": "desc-必填",
                 "due_date": (dt.date.today() + dt.timedelta(days=3)).isoformat(),
             },
             follow_redirects=False,
@@ -114,7 +114,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         # add task
         r = await client.post(
             f"/goals/{goal_id}/tasks",
-            data={"title": "task-1", "description": "task desc"},
+            data={"title": "task-1", "content": "task desc"},
             follow_redirects=False,
         )
         assert r.status_code == 303
@@ -129,7 +129,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
                 .first()
             )
             assert t.title == "task-1"
-            assert t.description == "task desc"
+            assert t.content == "task desc"
             assert hasattr(t, "recommended_prompt") is False
             task_id = t.id
             task_public_id = t.public_id
@@ -137,7 +137,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         # edit task
         r = await client.post(
             f"/tasks/{task_id}/edit",
-            data={"title": "task-1-edit", "description": "task desc edit"},
+            data={"title": "task-1-edit", "content": "task desc edit"},
             follow_redirects=False,
         )
         assert r.status_code == 303
@@ -145,7 +145,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
             t = s.get(Task, task_id)
             assert t is not None
             assert t.title == "task-1-edit"
-            assert t.description == "task desc edit"
+            assert t.content == "task desc edit"
 
         # recommendations should include task
         r = await client.get("/api/recommendations/next?limit=5")
@@ -209,8 +209,8 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
         r = await client.post(
             "/goals",
             data={
-                "content": "过期目标",
-                "description": "需要调整DDL",
+                "title": "过期目标",
+                "content": "需要调整DDL",
                 "due_date": overdue_due,
             },
             follow_redirects=False,
@@ -227,7 +227,7 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
 
         r = await client.post(
             f"/goals/{goal_id}/tasks",
-            data={"title": "等待处理", "description": "先挂起，不推进"},
+            data={"title": "等待处理", "content": "先挂起，不推进"},
             follow_redirects=False,
         )
         assert r.status_code == 303
@@ -239,8 +239,8 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
         r = await client.post(
             f"/goals/{goal_id}/edit",
             data={
-                "content": "过期目标",
-                "description": "需要调整DDL",
+                "title": "过期目标",
+                "content": "需要调整DDL",
                 "due_date": future_due,
                 "status": "active",
                 "priority": "normal",
@@ -272,8 +272,8 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         r = await client.post(
             "/goals",
             data={
-                "content": "任务排序目标",
-                "description": "验证 dashboard goal detail 的默认排序与表头排序能力",
+                "title": "任务排序目标",
+                "content": "验证 dashboard goal detail 的默认排序与表头排序能力",
                 "due_date": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
             },
             follow_redirects=False,
@@ -289,7 +289,7 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         for title in task_titles:
             r = await client.post(
                 f"/goals/{goal_id}/tasks",
-                data={"title": title, "description": f"desc for {title}"},
+                data={"title": title, "content": f"desc for {title}"},
                 follow_redirects=False,
             )
             assert r.status_code == 303
@@ -353,8 +353,8 @@ async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tm
         r = await client.post(
             "/goals",
             data={
-                "content": "Next Move 测试目标",
-                "description": "验证三条推荐与反馈学习",
+                "title": "Next Move 测试目标",
+                "content": "验证三条推荐与反馈学习",
                 "due_date": (dt.date.today() + dt.timedelta(days=1)).isoformat(),
             },
             follow_redirects=False,
@@ -375,7 +375,7 @@ async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tm
         for title, description in tasks:
             r = await client.post(
                 f"/goals/{goal_id}/tasks",
-                data={"title": title, "description": description},
+                data={"title": title, "content": description},
                 follow_redirects=False,
             )
             assert r.status_code == 303
@@ -485,8 +485,8 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
         r = await client.post(
             "/goals",
             data={
-                "content": "memory pipeline test goal",
-                "description": "needs to trigger audit rotation",
+                "title": "memory pipeline test goal",
+                "content": "needs to trigger audit rotation",
                 "due_date": (dt.date.today() + dt.timedelta(days=1)).isoformat(),
             },
             follow_redirects=False,
@@ -501,7 +501,7 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
 
         r = await client.post(
             f"/goals/{goal_id}/tasks",
-            data={"title": "task-memory", "description": "task desc"},
+            data={"title": "task-memory", "content": "task desc"},
             follow_redirects=False,
         )
         assert r.status_code == 303
@@ -539,8 +539,8 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
         r = await client.post(
             "/goals",
             data={
-                "content": "manual audit summary goal",
-                "description": "create one audit file first",
+                "title": "manual audit summary goal",
+                "content": "create one audit file first",
                 "due_date": (dt.date.today() + dt.timedelta(days=1)).isoformat(),
             },
             follow_redirects=False,
