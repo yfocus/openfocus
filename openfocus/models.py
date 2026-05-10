@@ -180,6 +180,10 @@ class InspirationSpace(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, default="built_in")
+    workspace_path: Mapped[str] = mapped_column(
+        String(4000), nullable=False, default=""
+    )
     published_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     forked_from_space_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_activity_at: Mapped[dt.datetime] = mapped_column(
@@ -234,6 +238,8 @@ class InspirationResource(Base):
     text_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     url_content: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
     file_path: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    external_path: Mapped[str] = mapped_column(String(4000), nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="user")
     is_system_generated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )

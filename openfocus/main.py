@@ -415,6 +415,11 @@ def _ttyd_embed_path(space_id: int, terminal_id: str) -> str:
     return f"/api/agent_spaces/{int(space_id)}/terminals/{tid}/ttyd/"
 
 
+def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
+    tid = urllib.parse.quote(str(terminal_id or ""), safe="")
+    return f"/api/inspirations/{int(space_id)}/terminals/{tid}/ttyd/"
+
+
 _MEMORY_LOCK = threading.RLock()
 
 
@@ -1158,6 +1163,52 @@ def _startup() -> None:
                 text("ALTER TABLE tasks ADD COLUMN source_inspiration_draft_id INTEGER")
             )
 
+        # inspiration_spaces 补字段（workspace + BYO Agent terminal）
+        try:
+            insp_space_cols = [
+                r[1]
+                for r in conn.exec_driver_sql(
+                    "PRAGMA table_info(inspiration_spaces)"
+                ).fetchall()
+            ]
+            if "mode" not in insp_space_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE inspiration_spaces ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT 'built_in'"
+                    )
+                )
+            if "workspace_path" not in insp_space_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE inspiration_spaces ADD COLUMN workspace_path VARCHAR(4000) NOT NULL DEFAULT ''"
+                    )
+                )
+        except Exception:
+            pass
+
+        # inspiration_resources 补字段（文件桥接来源）
+        try:
+            insp_res_cols = [
+                r[1]
+                for r in conn.exec_driver_sql(
+                    "PRAGMA table_info(inspiration_resources)"
+                ).fetchall()
+            ]
+            if "external_path" not in insp_res_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE inspiration_resources ADD COLUMN external_path VARCHAR(4000) NOT NULL DEFAULT ''"
+                    )
+                )
+            if "source" not in insp_res_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE inspiration_resources ADD COLUMN source VARCHAR(64) NOT NULL DEFAULT 'user'"
+                    )
+                )
+        except Exception:
+            pass
+
         # goal_plan_sessions 补字段（用于“已有 goal 进入 plan”）
         sess_cols = [
             r[1]
@@ -1423,12 +1474,101 @@ def _inspiration_space_files_dir(space_id: int) -> Path:
     return path
 
 
+def _inspiration_workspace_path(space: InspirationSpace | None, space_id: int) -> Path:
+    raw = str(getattr(space, "workspace_path", "") or "").strip()
+    if raw:
+        p = Path(raw).expanduser()
+    else:
+        p = _inspiration_space_files_dir(int(space_id))
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "resources").mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _inspiration_resources_dir(space: InspirationSpace | None, space_id: int) -> Path:
+    p = _inspiration_workspace_path(space, int(space_id)) / "resources"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _safe_resource_filename(name: str, fallback: str) -> str:
+    raw = str(name or "").strip() or str(fallback or "resource")
+    raw = re.sub(r"[\\/\x00-\x1f]+", "-", raw)
+    raw = re.sub(r"\s+", " ", raw).strip().strip(".")
+    if not raw:
+        raw = str(fallback or "resource")
+    return raw[:160]
+
+
+def _inspiration_resource_file_path(
+    *, space: InspirationSpace | None, space_id: int, seq_id: int, name: str, ext: str
+) -> Path:
+    suffix = ext if str(ext or "").startswith(".") else f".{str(ext or 'txt')}"
+    stem = _safe_resource_filename(name, f"resource_{int(seq_id)}")
+    return (
+        _inspiration_resources_dir(space, int(space_id))
+        / f"resource_{int(seq_id)}_{stem}{suffix}"
+    )
+
+
+def _inspiration_write_resource_file(
+    resource: InspirationResource, space: InspirationSpace | None = None
+) -> None:
+    kind = str(getattr(resource, "type", "") or "text").strip().lower()
+    sid = int(getattr(resource, "space_id", 0) or 0)
+    seq = int(getattr(resource, "resource_seq_id", 0) or 0)
+    if sid <= 0 or seq <= 0 or kind == "image":
+        return
+    name = str(getattr(resource, "name", "") or f"resource-{seq}")
+    if kind == "url":
+        path = _inspiration_resource_file_path(
+            space=space, space_id=sid, seq_id=seq, name=name, ext=".url.md"
+        )
+        url = str(getattr(resource, "url_content", "") or "").strip()
+        body = f"# {name}\n\nURL: {url}\n"
+    else:
+        path = _inspiration_resource_file_path(
+            space=space, space_id=sid, seq_id=seq, name=name, ext=".md"
+        )
+        body = str(getattr(resource, "text_content", "") or "")
+    path.write_text(body, encoding="utf-8")
+    resource.file_path = str(path)
+    resource.external_path = str(
+        path.relative_to(_inspiration_workspace_path(space, sid))
+    )
+
+
+def _inspiration_create_initial_note_resource(
+    s, space: InspirationSpace, *, title: str, first_note: str
+) -> InspirationResource:
+    sid = int(space.id)
+    clean_title = str(title or "Inspiration").strip() or "Inspiration"
+    clean_note = str(first_note or "").strip()
+    body = f"# {clean_title}\n"
+    if clean_note:
+        body += f"\n{clean_note}\n"
+    resource = InspirationResource(
+        space_id=sid,
+        resource_seq_id=_inspiration_next_resource_seq(s, sid),
+        type="text",
+        name="First Note",
+        text_content=body[:20000],
+        source="create_space",
+        is_system_generated=True,
+    )
+    s.add(resource)
+    s.flush()
+    _inspiration_write_resource_file(resource, space)
+    s.add(resource)
+    return resource
+
+
 async def _inspiration_store_uploaded_resource_file(
     *, space_id: int, seq_id: int, file: UploadFile
 ) -> tuple[Path, str]:
     original_name = str(file.filename or "image")
     ext = Path(original_name).suffix or ".bin"
-    target_dir = _inspiration_space_files_dir(int(space_id))
+    target_dir = _inspiration_resources_dir(None, int(space_id))
     target_path = target_dir / f"resource_{int(seq_id)}{ext}"
     content = await file.read()
     if not content:
@@ -1465,6 +1605,178 @@ def _inspiration_resource_preview(res: InspirationResource) -> str:
     if kind == "url":
         return str(getattr(res, "url_content", "") or "").strip()
     return str(getattr(res, "text_content", "") or "").strip()
+
+
+def _inspiration_sync_draft_summary_file(
+    s, space: InspirationSpace
+) -> InspirationResource | None:
+    """Sync resources/draft_summary.md into a Summary resource.
+
+    terminal agent 是“不受信协作者”：这里只把文件作为资源导入，不创建 Goal/Task。
+    """
+
+    sid = int(space.id)
+    path = _inspiration_resources_dir(space, sid) / "draft_summary.md"
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        text_body = path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"failed to read draft_summary.md: {e}"
+        )
+    text_body = str(text_body or "").strip()
+    if not text_body:
+        raise HTTPException(status_code=400, detail="draft_summary.md is empty")
+
+    existing = (
+        s.query(InspirationResource)
+        .filter(InspirationResource.space_id == sid)
+        .filter(InspirationResource.deleted_at.is_(None))
+        .filter(InspirationResource.type == "summary")
+        .filter(InspirationResource.name.in_(["Summary", "Draft Summary"]))
+        .order_by(InspirationResource.id.desc())
+        .first()
+    )
+    if existing is None:
+        existing = InspirationResource(
+            space_id=sid,
+            resource_seq_id=_inspiration_next_resource_seq(s, sid),
+            type="summary",
+            name="Summary",
+            source="terminal_agent",
+            is_system_generated=True,
+        )
+        s.add(existing)
+    existing.name = "Summary"
+    existing.text_content = text_body[:20000]
+    existing.file_path = str(path)
+    existing.external_path = "resources/draft_summary.md"
+    existing.source = "terminal_agent"
+    existing.is_system_generated = True
+    existing.updated_at = _utcnow()
+    space.last_activity_at = _utcnow()
+    s.flush()
+    return existing
+
+
+def _inspiration_resource_name_from_path(path: Path) -> str:
+    name = path.name
+    if name == "draft_summary.md":
+        return "Summary"
+    if name.endswith(".url.md"):
+        name = name[: -len(".url.md")]
+    else:
+        name = path.stem
+    name = re.sub(r"^resource_\d+_?", "", name).strip() or path.stem
+    return name[:512]
+
+
+def _inspiration_parse_url_resource_file(path: Path) -> str:
+    try:
+        body = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    for line in body.splitlines():
+        cleaned = str(line or "").strip()
+        if cleaned.lower().startswith("url:"):
+            return cleaned.split(":", 1)[1].strip()[:4000]
+        if cleaned.startswith("http://") or cleaned.startswith("https://"):
+            return cleaned[:4000]
+    return ""
+
+
+def _inspiration_sync_resources_dir(
+    s, space: InspirationSpace
+) -> list[InspirationResource]:
+    """Refresh InspirationResource rows from files under workspace/resources/."""
+
+    sid = int(space.id)
+    workspace = _inspiration_workspace_path(space, sid)
+    resources_dir = _inspiration_resources_dir(space, sid)
+    synced: list[InspirationResource] = []
+    paths = sorted(p for p in resources_dir.rglob("*") if p.is_file())
+    for path in paths:
+        try:
+            external_path = str(path.relative_to(workspace))
+        except Exception:
+            continue
+        if not external_path.startswith("resources/"):
+            continue
+        is_draft_summary = external_path == "resources/draft_summary.md"
+        media_type = _guess_media_type(path)
+        if is_draft_summary:
+            kind = "summary"
+        elif str(media_type or "").startswith("image/"):
+            kind = "image"
+        elif path.name.endswith(".url.md"):
+            kind = "url"
+        else:
+            kind = "text"
+
+        body = ""
+        url = ""
+        if kind in {"text", "summary"}:
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")[:20000]
+            except Exception:
+                continue
+            if is_draft_summary and not str(body or "").strip():
+                continue
+        elif kind == "url":
+            url = _inspiration_parse_url_resource_file(path)
+
+        existing = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.space_id == sid)
+            .filter(InspirationResource.external_path == external_path)
+            .order_by(InspirationResource.id.desc())
+            .first()
+        )
+        if existing is None and is_draft_summary:
+            existing = (
+                s.query(InspirationResource)
+                .filter(InspirationResource.space_id == sid)
+                .filter(InspirationResource.type == "summary")
+                .filter(InspirationResource.name.in_(["Summary", "Draft Summary"]))
+                .order_by(InspirationResource.id.desc())
+                .first()
+            )
+        if existing is None:
+            existing = InspirationResource(
+                space_id=sid,
+                resource_seq_id=_inspiration_next_resource_seq(s, sid),
+                type=kind,
+                name=_inspiration_resource_name_from_path(path),
+                source="terminal_agent",
+                is_system_generated=is_draft_summary,
+            )
+            s.add(existing)
+        existing.type = kind
+        existing.file_path = str(path)
+        existing.external_path = external_path
+        existing.deleted_at = None
+        existing.updated_at = _utcnow()
+        if is_draft_summary:
+            existing.name = "Summary"
+            existing.source = "terminal_agent"
+            existing.is_system_generated = True
+        elif not str(existing.source or "").strip():
+            existing.source = "terminal_agent"
+        if kind in {"text", "summary"}:
+            existing.text_content = body
+            existing.url_content = ""
+        elif kind == "url":
+            existing.url_content = url
+            existing.text_content = ""
+        else:
+            existing.text_content = ""
+            existing.url_content = ""
+        synced.append(existing)
+    if synced:
+        space.last_activity_at = _utcnow()
+    s.flush()
+    return synced
 
 
 def _inspiration_non_deleted_resources(
@@ -1874,16 +2186,28 @@ def _inspiration_clone_resource(
         text_content=str(source.text_content or ""),
         url_content=str(source.url_content or ""),
         file_path="",
+        external_path="",
+        source=str(getattr(source, "source", "") or "user"),
         is_system_generated=bool(source.is_system_generated),
     )
     if str(source.file_path or "").strip():
         src_path = Path(str(source.file_path or "")).expanduser()
         if src_path.exists() and src_path.is_file():
-            target_dir = _inspiration_space_files_dir(int(target_space_id))
+            target_dir = _inspiration_resources_dir(None, int(target_space_id))
             ext = src_path.suffix or ""
             dst = target_dir / f"resource_{int(seq_id)}{ext}"
             shutil.copyfile(src_path, dst)
             cloned.file_path = str(dst)
+            try:
+                cloned.external_path = str(
+                    dst.relative_to(
+                        _inspiration_workspace_path(None, int(target_space_id))
+                    )
+                )
+            except Exception:
+                cloned.external_path = str(dst)
+    elif str(cloned.type or "") in {"url", "text", "summary"}:
+        _inspiration_write_resource_file(cloned, None)
     s.add(cloned)
     s.flush()
     return cloned
@@ -1901,6 +2225,8 @@ def _inspiration_space_payload(
         "id": int(space.id),
         "title": str(space.title or ""),
         "status": str(space.status or "open"),
+        "mode": str(getattr(space, "mode", "") or "built_in"),
+        "workspace_path": str(getattr(space, "workspace_path", "") or ""),
         "published_goal_id": (
             int(space.published_goal_id)
             if getattr(space, "published_goal_id", None)
@@ -1967,6 +2293,8 @@ def _inspiration_resource_payload(
         "reference": _inspiration_resource_reference(resource),
         "url_content": str(resource.url_content or ""),
         "text_content": str(resource.text_content or "") if include_text else "",
+        "external_path": str(getattr(resource, "external_path", "") or ""),
+        "source": str(getattr(resource, "source", "") or "user"),
         "is_system_generated": bool(resource.is_system_generated),
         "has_file": bool(file_path),
         "raw_url": (
@@ -2019,6 +2347,12 @@ def _inspiration_space_or_404(s, space_id: int) -> InspirationSpace:
     space = s.get(InspirationSpace, int(space_id))
     if space is None:
         raise HTTPException(status_code=404, detail="Inspiration space not found")
+    # Backfill workspace lazily for spaces created before workspace support.
+    workspace = _inspiration_workspace_path(space, int(space_id))
+    if not str(getattr(space, "workspace_path", "") or "").strip():
+        space.workspace_path = str(workspace)
+    if not str(getattr(space, "mode", "") or "").strip():
+        space.mode = "built_in"
     return space
 
 
@@ -2040,7 +2374,9 @@ def _inspiration_command_kind(content: str) -> str:
     text = str(content or "").strip()
     if text in {"/summary_title", "/summary-title"}:
         return "summary_title"
-    if text in {"/plan", "/draft_goal_tasks"}:
+    if text in {"/plan", "/draft_goal_tasks"} or text.startswith(
+        ("/plan\n", "/draft_goal_tasks\n")
+    ):
         return "plan"
     return "message"
 
@@ -2164,14 +2500,23 @@ async def _kickoff_inspiration_followup(
 
         provider, _err = _get_llm_provider_or_error()
         user_text = str(user_message.content or "")
-        result = await asyncio.to_thread(
-            _inspiration_generate_followup_result,
-            command_kind=command_kind,
-            provider=provider,
-            space=space,
-            messages=messages,
-            resources=resources,
-            user_text=user_text,
+        try:
+            timeout_seconds = float(
+                os.environ.get("OPENFOCUS_INSPIRATION_AGENT_TIMEOUT_SECONDS") or 120
+            )
+        except Exception:
+            timeout_seconds = 120.0
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                _inspiration_generate_followup_result,
+                command_kind=command_kind,
+                provider=provider,
+                space=space,
+                messages=messages,
+                resources=resources,
+                user_text=user_text,
+            ),
+            timeout=max(10.0, timeout_seconds),
         )
         audit_kind = str(result.get("audit_kind") or audit_kind)
         audit_detail = str(result.get("audit_detail") or audit_detail)
@@ -2430,13 +2775,15 @@ def _inspiration_publish_sync(
                 space_id=int(space_id),
                 resource_seq_id=int(seq_id),
                 type="summary",
-                name=f"Published Summary v{int(draft.version)}",
+                name="Published Summary",
                 text_content=summary_text,
                 url_content="",
                 file_path="",
+                source="system",
                 is_system_generated=True,
             )
             s.add(summary_resource)
+            _inspiration_write_resource_file(summary_resource, space)
             s.flush()
             record = InspirationPublishRecord(
                 space_id=int(space_id),
@@ -2521,6 +2868,11 @@ async def _kickoff_inspiration_publish(
         due_date_iso=str(due_date_iso),
         previous_status=str(previous_status or "open"),
     )
+    with session_scope() as s:
+        space = s.get(InspirationSpace, int(space_id))
+        is_published = space is not None and str(space.status or "") == "published"
+    if is_published:
+        await _inspiration_release_terminals(int(space_id))
 
 
 async def _inspiration_enqueue_turn(space_id: int, content: str) -> dict:
@@ -4893,6 +5245,13 @@ def inspirations_create_api(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid payload")
     title = str(payload.get("title") or "").strip()
+    mode = (
+        str(payload.get("mode") or payload.get("surface") or "built_in").strip().lower()
+    )
+    if mode in {"bring_your_own_agent", "byo", "remote_terminal"}:
+        mode = "terminal"
+    if mode not in {"built_in", "terminal"}:
+        mode = "built_in"
     initial_message = str(
         payload.get("initial_message") or payload.get("message") or ""
     ).strip()
@@ -4911,11 +5270,17 @@ def inspirations_create_api(payload: dict) -> dict:
         space = InspirationSpace(
             title=title,
             status="open",
+            mode=mode,
             last_activity_at=now,
         )
         s.add(space)
         s.flush()
         space_id = int(space.id)
+        workspace = _inspiration_workspace_path(space, space_id)
+        space.workspace_path = str(workspace)
+        _inspiration_create_initial_note_resource(
+            s, space, title=title, first_note=initial_message
+        )
         s.add(
             InspirationMessage(
                 space_id=space_id,
@@ -4963,13 +5328,13 @@ def inspirations_create_api(payload: dict) -> dict:
                     content=reply,
                 )
             )
-        created_payload = _inspiration_space_payload(space)
+        created_payload = _inspiration_space_payload(space, resource_count=1)
     _try_audit_memory(
         kind="inspiration.space_created",
         source="web",
         summary=f"Created inspiration space {space_id}.",
         detail=initial_message or title,
-        metadata={"space_id": space_id, "title": title},
+        metadata={"space_id": space_id, "title": title, "mode": mode},
     )
     if initial_message:
         _inspiration_maybe_emit_phase_summary(space_id)
@@ -5038,7 +5403,7 @@ async def inspiration_message_create_api(space_id: int, payload: dict) -> dict:
 
 
 @app.post("/api/inspirations/{space_id:int}/close")
-def inspiration_close_api(space_id: int) -> dict:
+async def inspiration_close_api(space_id: int) -> dict:
     with session_scope() as s:
         space = _inspiration_space_or_404(s, space_id)
         if str(space.status or "open") == "published":
@@ -5053,6 +5418,13 @@ def inspiration_close_api(space_id: int) -> dict:
         space.status = "closed"
         space.closed_at = now
         space.last_activity_at = now
+        s.query(InspirationMessage).filter(
+            InspirationMessage.space_id == int(space_id),
+            InspirationMessage.kind == "draft_generated",
+        ).delete(synchronize_session=False)
+        s.query(InspirationDraft).filter(
+            InspirationDraft.space_id == int(space_id)
+        ).delete(synchronize_session=False)
         s.add(
             InspirationMessage(
                 space_id=int(space_id),
@@ -5062,6 +5434,7 @@ def inspiration_close_api(space_id: int) -> dict:
             )
         )
         payload = _inspiration_space_payload(space)
+    await _inspiration_release_terminals(int(space_id))
     _try_audit_memory(
         kind="inspiration.closed",
         source="web",
@@ -5176,6 +5549,7 @@ async def inspiration_resource_create_api(
             if not url_text:
                 raise HTTPException(status_code=400, detail="url_content is required")
             resource.url_content = url_text[:4000]
+            resource.source = "user"
             if not resource_name:
                 resource.name = url_text[:512]
         elif normalized_type in {"text", "summary"}:
@@ -5183,8 +5557,10 @@ async def inspiration_resource_create_api(
             if not body:
                 raise HTTPException(status_code=400, detail="text_content is required")
             resource.text_content = body[:20000]
+            resource.source = "user"
             if normalized_type == "summary":
                 resource.is_system_generated = True
+                resource.source = "built_in_agent"
             if not resource_name:
                 resource.name = f"{normalized_type}-{int(seq_id)}"
         else:
@@ -5201,8 +5577,19 @@ async def inspiration_resource_create_api(
                 file=file,
             )
             resource.file_path = str(target_path)
+            try:
+                resource.external_path = str(
+                    target_path.relative_to(
+                        _inspiration_workspace_path(space, int(space_id))
+                    )
+                )
+            except Exception:
+                resource.external_path = str(target_path)
+            resource.source = "user"
             resource.name = resource_name or uploaded_name
         s.add(resource)
+        if normalized_type in {"url", "text", "summary"}:
+            _inspiration_write_resource_file(resource, space)
         space.last_activity_at = now
         s.flush()
         payload = _inspiration_resource_payload(
@@ -5256,6 +5643,8 @@ def inspiration_resource_update_api(
             if not body:
                 raise HTTPException(status_code=400, detail="text_content is required")
             resource.text_content = body[:20000]
+        if str(resource.type or "") in {"url", "text", "summary"}:
+            _inspiration_write_resource_file(resource, space)
         space.last_activity_at = _utcnow()
         payload_out = _inspiration_resource_payload(
             int(space_id), resource, include_text=True
@@ -5298,6 +5687,14 @@ async def inspiration_resource_replace_api(
             file=file,
         )
         resource.file_path = str(new_path_obj)
+        try:
+            resource.external_path = str(
+                new_path_obj.relative_to(
+                    _inspiration_workspace_path(space, int(space_id))
+                )
+            )
+        except Exception:
+            resource.external_path = str(new_path_obj)
         next_name = str(name or "").strip()
         if next_name:
             resource.name = next_name[:512]
@@ -5359,6 +5756,44 @@ def inspiration_resource_raw_api(space_id: int, resource_id: int) -> FileRespons
         )
 
 
+@app.post("/api/inspirations/{space_id:int}/resources/sync")
+def inspiration_resources_sync_api(space_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        if str(space.status or "open") == "published":
+            raise HTTPException(
+                status_code=400, detail="Published spaces are read-only"
+            )
+        items = _inspiration_sync_resources_dir(s, space)
+        payloads = [
+            _inspiration_resource_payload(int(space_id), item, include_text=True)
+            for item in items
+        ]
+        draft_item = next(
+            (
+                item
+                for item in payloads
+                if item.get("external_path") == "resources/draft_summary.md"
+            ),
+            None,
+        )
+    _try_audit_memory(
+        kind="inspiration.resources_synced",
+        source="web",
+        summary=f"Synced resources directory for inspiration space {int(space_id)}.",
+        detail=json.dumps(
+            [item.get("external_path") for item in payloads], ensure_ascii=False
+        )[:4000],
+        metadata={"space_id": int(space_id), "resource_count": len(payloads)},
+    )
+    return {
+        "ok": True,
+        "synced": bool(payloads),
+        "items": payloads,
+        "item": draft_item,
+    }
+
+
 @app.post("/api/inspirations/{space_id:int}/commands/summary_title")
 async def inspiration_summary_title_api(space_id: int) -> dict:
     return await _inspiration_enqueue_turn(int(space_id), "/summary_title")
@@ -5367,6 +5802,50 @@ async def inspiration_summary_title_api(space_id: int) -> dict:
 @app.post("/api/inspirations/{space_id:int}/drafts/generate")
 async def inspiration_draft_generate_api(space_id: int) -> dict:
     return await _inspiration_enqueue_turn(int(space_id), "/plan")
+
+
+@app.post("/api/inspirations/{space_id:int}/drafts/generate_from_draft_summary")
+async def inspiration_draft_generate_from_draft_summary_api(space_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        item = _inspiration_sync_draft_summary_file(s, space)
+        if item is None:
+            raise HTTPException(status_code=400, detail="Summary is missing")
+    return await _inspiration_enqueue_turn(int(space_id), "/plan")
+
+
+@app.post("/api/inspirations/{space_id:int}/drafts/generate_from_resource")
+async def inspiration_draft_generate_from_resource_api(
+    space_id: int, payload: dict
+) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    try:
+        resource_id = int(payload.get("resource_id") or 0)
+    except Exception:
+        resource_id = 0
+    if resource_id <= 0:
+        raise HTTPException(status_code=400, detail="resource_id is required")
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        resource = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.space_id == int(space_id))
+            .filter(InspirationResource.id == int(resource_id))
+            .filter(InspirationResource.deleted_at.is_(None))
+            .one_or_none()
+        )
+        if resource is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        resource_ref = _inspiration_resource_reference(resource)
+    prompt = (
+        "/plan\n"
+        "Create a Goal and Tasks using this resource as the primary source. "
+        "If it follows the OpenFocus bridge Markdown format, map the level-1 heading to the goal title, "
+        "the content under it to the goal content, and each level-2 heading plus its body to one task.\n\n"
+        f"{resource_ref}"
+    )
+    return await _inspiration_enqueue_turn(int(space_id), prompt)
 
 
 @app.get("/api/inspirations/{space_id:int}/drafts")
@@ -5442,12 +5921,14 @@ def inspiration_fork_api(space_id: int, payload: dict) -> dict:
         forked = InspirationSpace(
             title=target_title,
             status="open",
+            mode=str(getattr(source_space, "mode", "") or "built_in"),
             forked_from_space_id=int(source_space.id),
             last_activity_at=now,
         )
         s.add(forked)
         s.flush()
         new_space_id = int(forked.id)
+        forked.workspace_path = str(_inspiration_workspace_path(forked, new_space_id))
 
         resources = _inspiration_non_deleted_resources(s, int(space_id))
         seq_id = 1
@@ -5510,6 +5991,8 @@ def _inspiration_detail_page_context(space_id: int | None) -> dict:
             _inspiration_is_waiting(s, int(space_id)) if space is not None else False
         )
         is_publishing = _inspiration_is_publishing(space)
+        terminals: list[RemoteTerminalSession] = []
+        inspiration_terminal: dict | None = None
         messages: list[InspirationMessage] = []
         resources: list[InspirationResource] = []
         published_goal: Goal | None = None
@@ -5521,6 +6004,18 @@ def _inspiration_detail_page_context(space_id: int | None) -> dict:
                 .all()
             )
             resources = _inspiration_non_deleted_resources(s, int(space_id))
+            owner_sid = _inspiration_terminal_space_id(int(space_id))
+            terminals = (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.space_id == owner_sid)
+                .filter(RemoteTerminalSession.status != "closed")
+                .order_by(RemoteTerminalSession.id.asc())
+                .all()
+            )
+            if terminals:
+                inspiration_terminal = _inspiration_terminal_payload(
+                    int(space_id), terminals[0]
+                )
             published_goal = (
                 s.get(Goal, int(space.published_goal_id))
                 if getattr(space, "published_goal_id", None)
@@ -5533,6 +6028,12 @@ def _inspiration_detail_page_context(space_id: int | None) -> dict:
         "is_publishing": is_publishing,
         "messages": messages,
         "resources": resources,
+        "inspiration_terminal": inspiration_terminal,
+        "inspiration_terminal_count": len(terminals),
+        "has_online_companion": _has_online_companion(),
+        "draft_summary_prompt": _build_inspiration_draft_summary_prompt(space)
+        if space
+        else "",
         "published_goal": published_goal,
         "default_due": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
     }
@@ -6633,6 +7134,413 @@ def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
     return conn
 
 
+def _inspiration_terminal_space_id(space_id: int) -> int:
+    return -int(space_id)
+
+
+def _select_online_companion(
+    companion_id: int | None = None,
+) -> tuple[Companion, object]:
+    with session_scope() as s:
+        q = s.query(Companion)
+        if companion_id:
+            q = q.filter(Companion.id == int(companion_id))
+        comps = q.order_by(Companion.id.desc()).all()
+        for comp in comps:
+            if (comp.status or "").strip() == "pending_certification" or not (
+                comp.auth_token or ""
+            ).strip():
+                continue
+            conn = COMPANION_GRPC.registry.get(int(comp.id))
+            if conn is None:
+                continue
+            return comp, conn
+    raise HTTPException(status_code=502, detail="No online Companion is available")
+
+
+def _has_online_companion() -> bool:
+    with session_scope() as s:
+        comps = s.query(Companion).order_by(Companion.id.desc()).all()
+        for comp in comps:
+            if (comp.status or "").strip() == "pending_certification" or not (
+                comp.auth_token or ""
+            ).strip():
+                continue
+            if COMPANION_GRPC.registry.get(int(comp.id)) is not None:
+                return True
+    return False
+
+
+def _inspiration_terminal_payload(space_id: int, t: RemoteTerminalSession) -> dict:
+    backend = str(getattr(t, "backend", "") or "ttyd").strip() or "ttyd"
+    connect_url = str(getattr(t, "connect_url", "") or "").strip()
+    tid = str(t.terminal_id or "")
+    out = {
+        "terminal_id": tid,
+        "name": str(t.name or ""),
+        "status": str(t.status or "active"),
+        "backend": backend,
+        "created_at": t.created_at.isoformat()
+        if hasattr(t.created_at, "isoformat")
+        else str(t.created_at),
+    }
+    if backend == "ttyd" and connect_url:
+        out["embed_url"] = _inspiration_ttyd_embed_path(int(space_id), tid)
+    return out
+
+
+def _build_inspiration_draft_summary_prompt(space: InspirationSpace) -> str:
+    base = str(os.environ.get("OPENFOCUS_BASE_URL") or "").strip()
+    title = str(space.title or "Inspiration").strip()
+    parts = [
+        "You are collaborating with OpenFocus as a terminal agent.",
+        "Read the current workspace and resources/ directory, ask the user in this terminal if key context is missing, then create or update resources/draft_summary.md.",
+        "The file is the bridge from your custom agent to OpenFocus goal generation: it must be Markdown with one level-1 heading as the goal title, the text under that heading as the goal content, and then one level-2 heading per task with that task's content below it.",
+        f"Inspiration title: {title}.",
+    ]
+    if base:
+        parts.append(f"OpenFocus: {base}.")
+    parts.append(
+        "After saving resources/draft_summary.md, stop and tell the user it is ready to sync in OpenFocus."
+    )
+    return " ".join(parts)
+
+
+def _inspiration_terminal_conn(companion_id: int | None):
+    comp_id = int(companion_id or 0)
+    if not comp_id:
+        raise HTTPException(status_code=400, detail="Terminal has no Companion")
+    _comp, conn = _select_online_companion(comp_id)
+    return conn
+
+
+async def _inspiration_release_terminals(space_id: int) -> int:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    with session_scope() as s:
+        terms = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == owner_sid)
+            .all()
+        )
+        term_infos = [
+            {
+                "terminal_id": str(t.terminal_id or ""),
+                "companion_id": int(t.companion_id or 0),
+            }
+            for t in terms
+        ]
+    for info in term_infos:
+        tid = str(info.get("terminal_id") or "").strip()
+        comp_id = int(info.get("companion_id") or 0)
+        if not tid or not comp_id:
+            continue
+        with contextlib.suppress(Exception):
+            conn = _inspiration_terminal_conn(comp_id)
+            await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=5.0)
+    with session_scope() as s:
+        s.query(RemoteTerminalSession).filter(
+            RemoteTerminalSession.space_id == owner_sid
+        ).delete(synchronize_session=False)
+        s.query(RemoteTerminalOutput).filter(
+            RemoteTerminalOutput.space_id == owner_sid
+        ).delete(synchronize_session=False)
+    for info in term_infos:
+        _TTYD_AGENT_MODE.pop(str(info.get("terminal_id") or ""), None)
+    return len(term_infos)
+
+
+@app.get("/api/inspirations/{space_id:int}/terminals")
+def inspiration_terminals_list(space_id: int) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        _inspiration_workspace_path(space, int(space_id))
+        owner_sid = _inspiration_terminal_space_id(int(space_id))
+        terms = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == owner_sid)
+            .filter(RemoteTerminalSession.status != "closed")
+            .order_by(RemoteTerminalSession.id.asc())
+            .all()
+        )
+    return {
+        "ok": True,
+        "companion": {"online": _has_online_companion()},
+        "terminals": [_inspiration_terminal_payload(int(space_id), t) for t in terms],
+    }
+
+
+@app.post("/api/inspirations/{space_id:int}/terminals/new")
+async def inspiration_terminals_new(space_id: int, request: Request) -> dict:
+    payload: dict = {}
+    try:
+        if (
+            (request.headers.get("content-type") or "")
+            .lower()
+            .startswith("application/json")
+        ):
+            raw_payload = await request.json()
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+    except Exception:
+        payload = {}
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        if str(space.status or "open") != "open":
+            raise HTTPException(
+                status_code=400, detail="Only open spaces can start terminals"
+            )
+        workspace = _inspiration_workspace_path(space, int(space_id))
+        space.mode = "terminal"
+        space.workspace_path = str(workspace)
+        s.flush()
+        workspace_path = str(workspace)
+    companion_id = payload.get("companion_id") if isinstance(payload, dict) else None
+    try:
+        comp, conn = _select_online_companion(
+            int(companion_id) if companion_id else None
+        )
+    except (TypeError, ValueError):
+        comp, conn = _select_online_companion(None)
+
+    terminal_id = str(uuid.uuid4())
+    ttyd_base_path = _inspiration_ttyd_embed_path(int(space_id), terminal_id)
+    try:
+        res = await conn.request_terminal_start(
+            terminal_id=terminal_id,
+            root_path=workspace_path,
+            base_path=ttyd_base_path,
+            timeout_seconds=10.0,
+        )
+    except CompanionGrpcError as e:
+        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+    real_tid = (res.terminal_id or "").strip() or terminal_id
+    backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
+    connect_url = str(getattr(res, "connect_url", "") or "").strip()
+    if backend == "ttyd" and not connect_url:
+        raise HTTPException(
+            status_code=502, detail="Companion Terminal 启动失败：missing connect_url"
+        )
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    with session_scope() as s:
+        existing = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == owner_sid)
+            .all()
+        )
+        used = {
+            str((t.name or "").strip()) for t in existing if str((t.name or "").strip())
+        }
+        base_name = "terminal"
+        name = base_name
+        if name in used:
+            i = 2
+            while True:
+                cand = f"{base_name}-{i}"
+                if cand not in used:
+                    name = cand
+                    break
+                i += 1
+        t = RemoteTerminalSession(
+            space_id=owner_sid,
+            task_public_id="",
+            companion_id=int(comp.id),
+            root_path=workspace_path,
+            name=name,
+            terminal_id=real_tid,
+            backend=backend,
+            connect_url=connect_url,
+            status="active",
+        )
+        s.add(t)
+        s.flush()
+        terminal_payload = _inspiration_terminal_payload(int(space_id), t)
+    _try_audit_memory(
+        kind="inspiration.terminal_created",
+        source="web",
+        summary=f"Created inspiration terminal `{name}`.",
+        detail=f"InspirationSpace {int(space_id)} created terminal {real_tid} at {workspace_path}.",
+        metadata={"space_id": int(space_id), "terminal_id": real_tid, "name": name},
+    )
+    return {"ok": True, "terminal": terminal_payload}
+
+
+@app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/inject")
+async def inspiration_terminals_inject(
+    space_id: int, terminal_id: str, payload: dict
+) -> dict:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        comp_id = int(t.companion_id or 0)
+    conn = _inspiration_terminal_conn(comp_id)
+    raw = b""
+    data_b64 = str((payload or {}).get("data_b64") or "")
+    if data_b64:
+        with contextlib.suppress(Exception):
+            raw = base64.b64decode(data_b64)
+    if not raw:
+        raw = str((payload or {}).get("text") or "").encode("utf-8")
+    if not raw:
+        raise HTTPException(status_code=400, detail="data is required")
+    try:
+        await conn.request_terminal_input(
+            terminal_id=tid, data=raw, timeout_seconds=10.0
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"terminal inject failed: {e}")
+    _try_audit_memory(
+        kind="inspiration.terminal_input",
+        source="web",
+        summary=f"Injected input to inspiration terminal `{tid}`.",
+        detail=_memory_decode_terminal_bytes(raw),
+        metadata={"space_id": int(space_id), "terminal_id": tid},
+    )
+    return {"ok": True}
+
+
+@app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/rename")
+async def inspiration_terminals_rename(
+    space_id: int, terminal_id: str, payload: dict
+) -> dict:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    raw_name = str((payload or {}).get("name") or "").strip()
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="name 不能为空")
+    if len(raw_name) > 128:
+        raise HTTPException(status_code=400, detail="name 过长（<=128）")
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        dup = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.space_id == owner_sid)
+            .filter(RemoteTerminalSession.terminal_id != tid)
+            .filter(RemoteTerminalSession.name == raw_name)
+            .one_or_none()
+        )
+        if dup is not None:
+            raise HTTPException(status_code=400, detail="name 已存在")
+        t.name = raw_name
+        s.add(t)
+    return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
+
+
+@app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/agent_mode")
+async def inspiration_terminals_agent_mode(
+    space_id: int, terminal_id: str, payload: dict
+) -> dict:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+    enabled = bool((payload or {}).get("enabled"))
+    prefix = str((payload or {}).get("prefix") or "").strip()
+    if enabled and prefix:
+        _TTYD_AGENT_MODE[tid] = {"enabled": True, "prefix": prefix}
+    else:
+        _TTYD_AGENT_MODE.pop(tid, None)
+    return {"ok": True, "enabled": enabled}
+
+
+@app.post(
+    "/api/inspirations/{space_id:int}/terminals/{terminal_id}/prepare_draft_summary"
+)
+async def inspiration_terminal_prepare_draft_summary(
+    space_id: int, terminal_id: str
+) -> dict:
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        prompt = _build_inspiration_draft_summary_prompt(space)
+    return await inspiration_terminals_inject(
+        int(space_id),
+        str(terminal_id),
+        {"data_b64": base64.b64encode(prompt.encode("utf-8")).decode("ascii")},
+    )
+
+
+@app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/close")
+async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    comp_id = 0
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        comp_id = int(t.companion_id or 0)
+    with contextlib.suppress(Exception):
+        conn = _inspiration_terminal_conn(comp_id)
+        await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
+    with session_scope() as s:
+        s.query(RemoteTerminalSession).filter(
+            RemoteTerminalSession.terminal_id == tid
+        ).delete(synchronize_session=False)
+        s.query(RemoteTerminalOutput).filter(
+            RemoteTerminalOutput.terminal_id == tid
+        ).delete(synchronize_session=False)
+    _TTYD_AGENT_MODE.pop(tid, None)
+    return {"ok": True}
+
+
+def _load_inspiration_ttyd_terminal(
+    space_id: int, terminal_id: str
+) -> tuple[InspirationSpace, str]:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        space = _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        backend = str(getattr(t, "backend", "") or "ttyd").strip()
+        connect_url = str(getattr(t, "connect_url", "") or "").strip()
+    if backend != "ttyd" or not connect_url:
+        raise HTTPException(status_code=404, detail="ttyd terminal not found")
+    return space, connect_url.rstrip("/")
+
+
 @app.get("/api/agent_spaces/{space_id}/terminals")
 def terminals_list(space_id: int) -> dict:
     sp, comp = _load_space_and_optional_companion(space_id)
@@ -7063,6 +7971,124 @@ async def terminals_ttyd_ws_proxy(
             await websocket.close(code=1011, reason=f"websockets unavailable: {e}")
             return
 
+        async with websockets.connect(
+            target, open_timeout=10, subprotocols=subprotocols or None
+        ) as upstream:
+
+            async def _client_to_upstream() -> None:
+                while True:
+                    msg = await websocket.receive()
+                    typ = msg.get("type")
+                    if typ == "websocket.disconnect":
+                        await upstream.close()
+                        return
+                    if msg.get("bytes") is not None:
+                        await upstream.send(
+                            _rewrite_ttyd_input_for_agent_mode(
+                                terminal_id, msg["bytes"]
+                            )
+                        )
+                    elif msg.get("text") is not None:
+                        await upstream.send(
+                            _rewrite_ttyd_input_for_agent_mode(terminal_id, msg["text"])
+                        )
+
+            async def _upstream_to_client() -> None:
+                async for msg in upstream:
+                    if isinstance(msg, bytes):
+                        await websocket.send_bytes(msg)
+                    else:
+                        await websocket.send_text(str(msg))
+
+            a = asyncio.create_task(_client_to_upstream())
+            b = asyncio.create_task(_upstream_to_client())
+            done, pending = await asyncio.wait(
+                {a, b}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for tsk in pending:
+                tsk.cancel()
+            for tsk in done:
+                with contextlib.suppress(Exception):
+                    _ = tsk.exception()
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011)
+
+
+@app.api_route(
+    "/api/inspirations/{space_id:int}/terminals/{terminal_id}/ttyd/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def inspiration_terminals_ttyd_proxy(
+    request: Request, space_id: int, terminal_id: str, path: str = ""
+) -> Response:
+    _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
+    proxy_prefix = _inspiration_ttyd_embed_path(space_id, terminal_id)
+    target_tail = proxy_prefix.lstrip("/") + str(path or "")
+    target = _ttyd_target_url(connect_url, target_tail, request.url.query)
+    body = await request.body()
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in {"host", "connection", "content-length", "accept-encoding"}
+    }
+    try:
+        req = urllib.request.Request(
+            target,
+            data=body if body else None,
+            headers=headers,
+            method=request.method,
+        )
+        resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=30)
+        data = await asyncio.to_thread(resp.read)
+    except urllib.error.HTTPError as e:
+        data = await asyncio.to_thread(e.read)
+        media_type = e.headers.get("content-type") or "application/octet-stream"
+        return Response(content=data, status_code=int(e.code), media_type=media_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ttyd proxy failed: {e}")
+    excluded = {"content-encoding", "transfer-encoding", "connection", "content-length"}
+    out_headers = {
+        k: v for k, v in resp.headers.items() if str(k).lower() not in excluded
+    }
+    media_type = resp.headers.get("content-type") or "application/octet-stream"
+    data = _maybe_inject_ttyd_bridge(data, media_type)
+    return Response(
+        content=data,
+        status_code=int(getattr(resp, "status", 200) or 200),
+        headers=out_headers,
+        media_type=media_type,
+    )
+
+
+@app.websocket(
+    "/api/inspirations/{space_id:int}/terminals/{terminal_id}/ttyd/{path:path}"
+)
+async def inspiration_terminals_ttyd_ws_proxy(
+    websocket: WebSocket, space_id: int, terminal_id: str, path: str = ""
+) -> None:
+    subprotocols = [
+        str(x).strip()
+        for x in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if str(x).strip()
+    ]
+    await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
+    try:
+        _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
+        proxy_prefix = _inspiration_ttyd_embed_path(space_id, terminal_id)
+        target_tail = proxy_prefix.lstrip("/") + str(path or "")
+        target = _ttyd_target_url(connect_url, target_tail, websocket.url.query)
+        if target.startswith("http://"):
+            target = "ws://" + target[len("http://") :]
+        elif target.startswith("https://"):
+            target = "wss://" + target[len("https://") :]
+        try:
+            import websockets
+        except Exception as e:
+            await websocket.close(code=1011, reason=f"websockets unavailable: {e}")
+            return
         async with websockets.connect(
             target, open_timeout=10, subprotocols=subprotocols or None
         ) as upstream:

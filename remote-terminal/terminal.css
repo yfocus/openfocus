@@ -109,6 +109,108 @@
   padding:8px 10px;
 }
 
+.rt-goal-picker{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding:8px;
+  border:1px solid rgba(0,229,255,0.18);
+  border-radius:12px;
+  background:rgba(0,0,0,0.20);
+}
+
+.rt-goal-picker[hidden]{
+  display:none;
+}
+
+.rt-goal-picker input{
+  width:100%;
+  box-sizing:border-box;
+  padding:7px 8px;
+  border:1px solid rgba(0,229,255,0.20);
+  border-radius:10px;
+  background:rgba(0,0,0,0.22);
+  color:rgba(215,255,233,0.92);
+  font-size:12px;
+}
+
+.rt-goal-picker input::placeholder{
+  color:rgba(215,255,233,0.42);
+}
+
+.rt-goal-hint{
+  font-size:11px;
+  line-height:1.25;
+  color:rgba(215,255,233,0.52);
+}
+
+.rt-modal-backdrop{
+  position:fixed;
+  inset:0;
+  z-index:80;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
+  background:rgba(4,9,14,0.62);
+  backdrop-filter:blur(3px);
+}
+
+.rt-modal-backdrop[hidden]{ display:none; }
+
+.rt-modal-card{
+  width:min(520px, calc(100vw - 40px));
+  border:1px solid rgba(255,255,255,0.16);
+  border-radius:18px;
+  background:rgba(10,16,24,0.97);
+  box-shadow:0 18px 48px rgba(0,0,0,0.36);
+  color:rgba(215,255,233,0.92);
+}
+
+.rt-modal-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:12px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.10);
+}
+
+.rt-modal-body{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  padding:14px;
+}
+
+.rt-modal-body label{
+  font-size:12px;
+  color:rgba(215,255,233,0.62);
+}
+
+.rt-modal-body input,
+.rt-modal-body select{
+  width:100%;
+  box-sizing:border-box;
+  padding:9px 10px;
+  border:1px solid rgba(0,229,255,0.20);
+  border-radius:10px;
+  background:rgba(0,0,0,0.24);
+  color:rgba(215,255,233,0.92);
+}
+
+.rt-modal-actions{
+  display:flex;
+  justify-content:flex-end;
+  gap:10px;
+  padding:12px 14px 14px;
+}
+
+.rt-modal-actions button,
+.rt-modal-head button{
+  width:auto;
+}
+
 @media (max-width: 1100px){
   .rt-shell{ flex-direction:column; }
   .rt-side{ width:auto; min-width:0; max-width:none; }

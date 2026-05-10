@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19">
   {% set is_busy = is_waiting or is_publishing %}
+  {% set is_terminal_mode = space and ((space.mode or 'built_in') == 'terminal') %}
   <style>
     #insp-page-root{ display:flex; flex-direction:column; min-height:0; }
     .insp-detail{ display:grid; grid-template-columns: 300px minmax(0, 1fr); gap:16px; align-items:stretch; min-height:0; height:calc(100vh - 124px); }
@@ -96,6 +98,16 @@
     .publish-mask[hidden]{ display:none; }
     .publish-mask-card{ min-width:240px; padding:18px 20px; border-radius:16px; border:1px solid rgba(255,255,255,0.16); background:rgba(10,16,24,0.94); text-align:center; box-shadow:0 18px 48px rgba(0,0,0,0.30); }
     .publish-mask-title{ font-size:18px; font-weight:700; color:rgba(255,255,255,0.95); }
+    .insp-terminal-wrap{ position:relative; flex:0 0 44%; min-height:260px; border-bottom:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.18); }
+    .insp-terminal-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; border-bottom:1px solid rgba(255,255,255,0.10); }
+    .insp-terminal-body{ height:100%; min-height:220px; padding:8px; }
+    .insp-shell.terminal-mode .insp-terminal-wrap{ flex:1 1 auto; min-height:0; border-bottom:none; }
+    .insp-shell.terminal-mode .insp-terminal-body{ min-height:0; }
+    .terminal-drafts{ flex:0 0 auto; max-height:38%; min-height:0; border-top:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.16); }
+    .terminal-drafts.published-view{ flex:1 1 auto; max-height:none; min-height:0; border-top:none; }
+    .terminal-drafts .chat{ min-height:0; max-height:100%; }
+    .terminal-input-mask{ position:absolute; inset:8px; z-index:12; display:flex; align-items:center; justify-content:center; border-radius:12px; background:rgba(4,9,14,0.54); backdrop-filter:blur(2px); color:rgba(255,209,102,0.96); font-weight:700; pointer-events:auto; }
+    .terminal-input-mask[hidden]{ display:none; }
     @media (max-width: 1220px){ .insp-detail{ grid-template-columns:260px 1fr; height:auto; } .insp-work-area{ grid-template-columns:1fr; height:auto; } .insp-side{ height:auto; } }
     @media (max-width: 840px){ .insp-detail{ grid-template-columns:1fr; height:auto; } }
   </style>
@@ -117,6 +129,13 @@
             <div>
               <label for="insp-message">First Note</label>
               <textarea id="insp-message" rows="7" maxlength="20000" placeholder="What are you exploring, what context matters, and what should this become?"></textarea>
+            </div>
+            <div>
+              <label for="insp-mode">Mode</label>
+              <select id="insp-mode">
+                <option value="built_in">Built-in Planner</option>
+                <option value="terminal">Bring Your Own Agent</option>
+              </select>
             </div>
             <div class="modal-actions">
               <span id="insp-create-hint" class="muted2" style="display:none;"><span class="spin"></span> Creating…</span>
@@ -207,15 +226,17 @@
           </div>
         </div>
 
-        <main class="insp-shell stretch">
+        <main class="insp-shell stretch {{ 'terminal-mode' if is_terminal_mode else '' }}">
           {% if space %}
             <div class="insp-head">
               <div>
                 <div class="insp-title">{{ space.title }}</div>
                 <div class="insp-meta">
                   <span>{{ space.status }}</span>
+                  <span>{{ space.mode or 'built_in' }}</span>
+                  {% if space.workspace_path %}<span title="{{ space.workspace_path|e }}">workspace</span>{% endif %}
                   <span>{{ space.message_turn_count or 0 }} turns</span>
-                  {% if is_waiting %}<span class="waiting-note">waiting for agent</span>{% endif %}
+                  {% if is_waiting %}<span class="waiting-note">{{ 'generating draft' if is_terminal_mode else 'waiting for agent' }}</span>{% endif %}
                   {% if is_publishing %}<span id="insp-publish-state" class="busy-note">publishing</span>{% endif %}
                   {% if space.forked_from_space_id %}<span>Forked from #{{ space.forked_from_space_id }}</span>{% endif %}
                   {% if published_goal %}<a href="/goals?goal={{ published_goal.id }}">Goal #{{ published_goal.id }}</a>{% endif %}
@@ -236,7 +257,14 @@
               </div>
             </div>
             <div class="divider"></div>
-            <div class="chat" id="insp-chat">
+            {% if is_terminal_mode and space.status == 'open' %}
+              <div class="insp-terminal-wrap">
+                <div class="insp-terminal-body"><div id="insp-remote-terminal" style="height:100%; min-height:0;"></div></div>
+                <div id="insp-terminal-input-mask" class="terminal-input-mask" {% if not is_busy %}hidden{% endif %}><span class="spin"></span> Create Goal ongoing…</div>
+              </div>
+            {% endif %}
+            {% if not is_terminal_mode %}
+              <div class="chat" id="insp-chat">
               {% for message in messages %}
                 {% set is_user = (message.role == 'user') %}
                 {% set msg_cls = 'user' if is_user else ('pending' if message.kind == 'pending' else ('error' if message.kind == 'error' else ('system' if message.kind in ['system','published','draft_generated','title_suggestions'] else 'agent'))) %}
@@ -286,7 +314,8 @@
                                   <label for="draft-due-{{ draft.get('id') }}">Goal DDL</label>
                                   <input id="draft-due-{{ draft.get('id') }}" type="date" name="due_date" value="{{ default_due }}" />
                                 </div>
-                                <div style="margin-top:10px; display:flex; justify-content:flex-end;">
+                                <div style="margin-top:10px; display:flex; justify-content:flex-end; gap:10px;">
+                                  <button type="button" class="btn-ghost insp-draft-cancel-btn">Cancel</button>
                                   <button type="submit" class="btn-primary insp-publish-btn" data-default-label="Publish">Publish</button>
                                 </div>
                               </form>
@@ -298,9 +327,9 @@
                   </div>
                 </div>
               {% endfor %}
-            </div>
-            <div class="composer">
-              {% if space.status == 'open' %}
+              </div>
+              <div class="composer">
+                {% if space.status == 'open' %}
                 <form id="insp-message-form">
                   <div class="composer-tools">
                     <button type="button" class="btn-ghost composer-tool-btn insp-command-btn" id="insp-title-suggest" {% if is_busy %}disabled{% endif %}>Suggest Titles</button>
@@ -316,10 +345,66 @@
                     </span>
                   </div>
                 </form>
-              {% else %}
+                {% else %}
                 <div class="mini">This space is read-only. Fork it to continue exploring another direction.</div>
+                {% endif %}
+              </div>
+            {% else %}
+              {% set terminal_draft_messages = messages|selectattr('kind', 'equalto', 'draft_generated')|list %}
+              {% if terminal_draft_messages %}
+                <div class="terminal-drafts {{ 'published-view' if space.status == 'published' else '' }}">
+                  <div class="chat" id="insp-chat">
+                    {% for message in terminal_draft_messages %}
+                      {% set draft = (message.payload or {}).get('draft') or {} %}
+                      <div class="msg-row agent">
+                        <div class="msg system">
+                          <div class="pad">
+                            <div class="msg-role">draft</div>
+                            <div class="draft-card">
+                              <div class="pad">
+                                <div class="draft-head">
+                                  <div>
+                                    <div class="draft-title">{{ draft.get('goal_title') or 'Untitled Goal' }}</div>
+                                    <div class="mini">Draft v{{ draft.get('version') or message.draft_version or '?' }} · generated from Summary</div>
+                                  </div>
+                                </div>
+                                {% if draft.get('goal_description') %}
+                                  <div class="resource-preview">{{ draft.get('goal_description') }}</div>
+                                {% endif %}
+                                <div class="task-list">
+                                  {% for task in draft.get('tasks') or [] %}
+                                    <div class="task-row">
+                                      <div>{{ loop.index }}.</div>
+                                      <div>
+                                        <strong>{{ task.get('title') }}</strong>
+                                        {% if task.get('description') %}<span class="desc">{{ task.get('description') }}</span>{% endif %}
+                                      </div>
+                                    </div>
+                                  {% endfor %}
+                                </div>
+                                {% if space.status in ['open', 'closed'] and not is_busy %}
+                                  <form class="insp-publish-form" style="margin-top:12px;">
+                                    <input type="hidden" name="draft_id" value="{{ draft.get('id') }}" />
+                                    <div>
+                                      <label for="terminal-draft-due-{{ draft.get('id') }}">Goal DDL</label>
+                                      <input id="terminal-draft-due-{{ draft.get('id') }}" type="date" name="due_date" value="{{ default_due }}" />
+                                    </div>
+                                    <div style="margin-top:10px; display:flex; justify-content:flex-end; gap:10px;">
+                                      <button type="button" class="btn-ghost insp-draft-cancel-btn">Cancel</button>
+                                      <button type="submit" class="btn-primary insp-publish-btn" data-default-label="Publish">Publish</button>
+                                    </div>
+                                  </form>
+                                {% endif %}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
               {% endif %}
-            </div>
+            {% endif %}
           {% else %}
             <div class="insp-head">
               <div>
@@ -346,7 +431,7 @@
                   <div class="resources-items-scroll" id="insp-resources-scroll">
                   {% if resources %}
                   {% for resource in resources %}
-                    <div class="card" data-resource-card data-resource-id="{{ resource.id }}" data-resource-type="{{ resource.type }}">
+                    <div class="card" data-resource-card data-resource-id="{{ resource.id }}" data-resource-type="{{ resource.type }}" data-resource-path="{{ resource.external_path }}">
                       <div class="pad">
                         <div class="card-title">#{{ resource.resource_seq_id }} · {{ resource.name }}</div>
                         <div class="mini">{{ resource.type }}{% if resource.is_system_generated %} · system{% endif %}</div>
@@ -402,7 +487,10 @@
                   </div>
                 </div>
                 {% if space.status == 'open' %}
-                  <button type="button" class="btn-primary insp-create-btn" id="insp-open-resource-modal" style="margin-top:auto;">Add Resource</button>
+                  <div style="margin-top:auto; display:flex; flex-direction:column; gap:8px;">
+                    <button type="button" class="btn-primary insp-create-btn" id="insp-open-resource-modal">Add Resource</button>
+                    {% if is_terminal_mode %}<button type="button" class="btn-primary insp-create-btn" id="insp-resource-sync" {% if is_busy %}disabled{% endif %}>Sync Resource</button>{% endif %}
+                  </div>
                 {% endif %}
               </div>
             </section>
@@ -412,10 +500,12 @@
     </div>
   </div>
 
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19"></script>
   <script>
     (function(){
       let hasSpace = {{ 'true' if space else 'false' }};
       const spaceId = {{ space.id if space else 0 }};
+      const isTerminalMode = {{ 'true' if is_terminal_mode else 'false' }};
       let waiting = {{ 'true' if is_waiting else 'false' }};
       let publishing = {{ 'true' if is_publishing else 'false' }};
       let busyPollTimer = null;
@@ -487,8 +577,13 @@
         publishing = !!on;
         const mask = document.getElementById('insp-publish-mask');
         const state = document.getElementById('insp-publish-state');
+        const terminalMask = document.getElementById('insp-terminal-input-mask');
         if(mask) mask.hidden = !publishing;
         if(state) state.style.display = publishing ? 'inline' : 'none';
+        if(terminalMask){
+          terminalMask.hidden = !(publishing || waiting);
+          terminalMask.innerHTML = '<span class="spin"></span> ' + (publishing ? 'Publishing…' : 'Create Goal ongoing…');
+        }
         document.querySelectorAll('.insp-work-area button, .insp-work-area input, .insp-work-area textarea, .insp-work-area select').forEach((el)=>{
           if(activeButton && el === activeButton){
             el.disabled = publishing;
@@ -506,6 +601,11 @@
       function setWaitingUI(on){
         waiting = !!on;
         const hint = document.getElementById('insp-message-hint');
+        const terminalMask = document.getElementById('insp-terminal-input-mask');
+        if(terminalMask){
+          terminalMask.hidden = !(waiting || publishing);
+          terminalMask.innerHTML = '<span class="spin"></span> ' + (publishing ? 'Publishing…' : 'Create Goal ongoing…');
+        }
         if(hint){
           hint.style.visibility = (waiting || publishing) ? 'visible' : 'hidden';
           hint.innerHTML = '<span class="spin"></span> ' + (publishing ? 'Publishing...' : (waiting ? 'Waiting for agent…' : 'Sending…'));
@@ -544,8 +644,35 @@
         }, Number(delay || 900));
       }
 
-      function appendResourceReference(reference){
+      function terminalApi(){
+        const root = document.getElementById('insp-remote-terminal');
+        return root?.__openfocusRemoteTerminal || null;
+      }
+
+      function terminalResourceText(card, fallback){
+        if(!card) return String(fallback || '');
+        const externalPath = String(card.dataset.resourcePath || '').trim();
+        if(externalPath){
+          return externalPath.startsWith('./') || externalPath.startsWith('/') ? externalPath : './' + externalPath;
+        }
+        return String(fallback || '');
+      }
+
+      function appendResourceReference(reference, card){
         if(waiting || publishing || !hasSpace) return;
+        if(isTerminalMode){
+          const api = terminalApi();
+          if(!api || typeof api.injectPromptToTerminal !== 'function'){
+            toast('Terminal is not ready');
+            return;
+          }
+          const text = terminalResourceText(card, reference);
+          if(!String(text || '').trim()){ toast('Nothing to send'); return; }
+          void api.injectPromptToTerminal(text, { bracketedPaste: true, submit: false, focus: true })
+            .then((ok)=>{ if(ok) toast('Sent to terminal'); })
+            .catch((err)=> toast(String(err && err.message ? err.message : err || 'send failed')));
+          return;
+        }
         const input = document.getElementById('insp-message-input');
         if(!input || input.disabled || input.readOnly) return;
         const ref = String(reference || '');
@@ -738,7 +865,7 @@
         document.querySelectorAll('[data-resource-send]').forEach((btn)=>{
           btn.addEventListener('click', ()=>{
             if(btn.disabled) return;
-            appendResourceReference(btn.getAttribute('data-resource-send') || '');
+            appendResourceReference(btn.getAttribute('data-resource-send') || '', resourceCardFromNode(btn));
           });
         });
 
@@ -823,6 +950,7 @@
           e.preventDefault();
           const title = String(document.getElementById('insp-title')?.value || '').trim();
           const initialMessage = String(document.getElementById('insp-message')?.value || '').trim();
+          const mode = String(document.getElementById('insp-mode')?.value || 'built_in');
           if(!title && !initialMessage){ toast('请填写 Title 或 First Note'); return; }
           if(createBtn) createBtn.disabled = true;
           if(createHint) createHint.style.display = 'inline-flex';
@@ -830,7 +958,7 @@
             const data = await callJson('/api/inspirations', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title, initial_message: initialMessage })
+              body: JSON.stringify({ title, initial_message: initialMessage, mode })
             });
             const id = data && data.item ? data.item.id : 0;
             if(!id) throw new Error('missing space id');
@@ -913,6 +1041,48 @@
             await submitTurn('/plan');
           });
 
+          async function syncResources(){
+            await callJson('/api/inspirations/' + spaceId + '/resources/sync', { method: 'POST' });
+            await refreshPageFromServer({ preserveScroll: true });
+          }
+
+          document.getElementById('insp-sync-resources')?.addEventListener('click', async ()=>{
+            if(waiting || publishing) return;
+            try{ await syncResources(); toast('Resources synced'); }
+            catch(err){ toast(String(err && err.message ? err.message : err || 'sync failed')); }
+          });
+
+          async function generateFromDraftSummary(){
+            if(waiting || publishing) return;
+            appendPendingTurn('/plan from Summary', 'Generating a publish-ready draft…');
+            setWaitingUI(true);
+            try{
+              await callJson('/api/inspirations/' + spaceId + '/drafts/generate_from_draft_summary', { method: 'POST' });
+              scheduleBusyPoll(400);
+            }catch(err){
+              toast(String(err && err.message ? err.message : err || 'generate failed'));
+              try{ await refreshPageFromServer({ preserveScroll: true, scrollChat: true }); }catch(_){ setWaitingUI(false); }
+            }
+          }
+
+          document.getElementById('insp-generate-summary-draft')?.addEventListener('click', generateFromDraftSummary);
+
+          document.getElementById('insp-resource-sync')?.addEventListener('click', async ()=>{
+            if(waiting || publishing) return;
+            try{
+              await callJson('/api/inspirations/' + spaceId + '/resources/sync', { method: 'POST' });
+              location.reload();
+            }catch(err){ toast(String(err && err.message ? err.message : err || 'sync failed')); }
+          });
+
+          document.getElementById('insp-open-terminal')?.addEventListener('click', async ()=>{
+            if(waiting || publishing) return;
+            try{
+              await callJson('/api/inspirations/' + spaceId + '/terminals/new', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+              location.reload();
+            }catch(err){ toast(String(err && err.message ? err.message : err || 'terminal failed')); }
+          });
+
           document.getElementById('insp-close-space')?.addEventListener('click', async ()=>{
             if(publishing) return;
             try{ await callJson('/api/inspirations/' + spaceId + '/close', { method: 'POST' }); location.reload(); }
@@ -947,6 +1117,17 @@
             }catch(err){ toast(String(err && err.message ? err.message : err || 'fork failed')); }
           });
 
+          document.querySelectorAll('.insp-draft-cancel-btn').forEach((btn)=>{
+            btn.addEventListener('click', ()=>{
+              const row = btn.closest('.msg-row');
+              if(row){ row.remove(); }
+              const terminalDrafts = document.querySelector('.terminal-drafts');
+              if(terminalDrafts && !terminalDrafts.querySelector('.msg-row')){
+                terminalDrafts.remove();
+              }
+            });
+          });
+
           document.querySelectorAll('.insp-publish-form').forEach((form)=>{
             form.addEventListener('submit', async (e)=>{
               e.preventDefault();
@@ -972,6 +1153,58 @@
           });
 
           bindResourceControls();
+
+          const termRoot = document.getElementById('insp-remote-terminal');
+          if(termRoot && window.OpenFocusRemoteTerminal){
+            const draftPrompt = {{ draft_summary_prompt|tojson }};
+            const goalResources = {{ resources|map(attribute='id')|list|tojson }}.map((id)=>{
+              const card = document.querySelector('[data-resource-card][data-resource-id="' + String(id) + '"]');
+              const title = card ? String(card.querySelector('.card-title')?.textContent || '').trim() : ('Resource #' + id);
+              const seq = Number((title.match(/^#(\d+)/) || [])[1] || 0);
+              return { id, seq, title };
+            });
+            function resolveGoalResource(selection){
+              if(!goalResources.length) return null;
+              const raw = String(selection || '').trim();
+              if(!raw) return goalResources.length === 1 ? goalResources[0] : null;
+              const rawLower = raw.toLowerCase();
+              const numeric = Number(raw.replace(/^#/, ''));
+              if(Number.isFinite(numeric) && numeric > 0){
+                const byNumber = goalResources.find((r, idx)=> Number(r.id) === numeric || Number(r.seq) === numeric || idx + 1 === numeric);
+                if(byNumber) return byNumber;
+              }
+              return goalResources.find((r)=> String(r.title || '').toLowerCase() === rawLower)
+                || goalResources.find((r)=> String(r.title || '').toLowerCase().includes(rawLower))
+                || null;
+            }
+            window.OpenFocusRemoteTerminal.mount(termRoot, {
+              spaceId,
+              mode: 'inspiration',
+              apiBase: '/api/inspirations/' + spaceId + '/terminals',
+              syncUrl: '/api/inspirations/' + spaceId + '/resources/sync',
+              draftSummaryPrompt: draftPrompt,
+              agentPrefix: 'OpenFocus Inspiration #' + spaceId + ' · write resources/draft_summary.md; do not create Goals/Tasks directly',
+              goalResources,
+              createGoalFromResource: async (selection)=>{
+                if(waiting || publishing) return;
+                if(!goalResources.length){ toast('No resources to use'); return; }
+                const item = resolveGoalResource(selection);
+                if(!item){ toast('Type or choose a resource first'); return; }
+                setWaitingUI(true);
+                try{
+                  await callJson('/api/inspirations/' + spaceId + '/drafts/generate_from_resource', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ resource_id: item.id })
+                  });
+                  scheduleBusyPoll(400);
+                }catch(err){
+                  setWaitingUI(false);
+                  toast(String(err && err.message ? err.message : err || 'create failed'));
+                }
+              },
+            });
+          }
         }
 
         setWaitingUI(waiting);

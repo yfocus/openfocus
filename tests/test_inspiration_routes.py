@@ -5,6 +5,8 @@ import datetime as dt
 import re
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -190,10 +192,10 @@ async def test_inspiration_detail_renders_sidebar_status_and_resource_controls(
         assert "data-resource-copy" in html
         assert "data-resource-delete" in html
         assert "data-resource-replace" in html
-        assert 'data-resource-send="[#1 Long context] "' in html
-        assert 'data-resource-send="[#2 Outline note] "' in html
-        assert 'data-resource-send="[#3 Reference link] "' in html
-        assert 'data-resource-send="[#4 Mockup] "' in html
+        assert 'data-resource-send="[#2 Long context] "' in html
+        assert 'data-resource-send="[#3 Outline note] "' in html
+        assert 'data-resource-send="[#4 Reference link] "' in html
+        assert 'data-resource-send="[#5 Mockup] "' in html
         assert 'download="Mockup"' in html
         assert ">Expand</button>" in html
         assert "scheduleBusyPoll(900)" in html
@@ -203,7 +205,7 @@ async def test_inspiration_detail_renders_sidebar_status_and_resource_controls(
             not in html
         )
         assert re.search(
-            r'class="btn-ghost resource-send-btn" data-resource-send="\[#1 Long context\] "\s*>Send</button>',
+            r'class="btn-ghost resource-send-btn" data-resource-send="\[#2 Long context\] "\s*>Send</button>',
             html,
         )
         assert re.search(
@@ -316,6 +318,257 @@ async def test_inspiration_resource_actions_support_edit_replace_and_delete(
         assert url_id not in remaining_ids
 
 
+@pytest.mark.anyio
+async def test_inspiration_workspace_resource_files_and_draft_summary_sync(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    from openfocus.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations",
+            json={
+                "title": "Terminal ideation",
+                "initial_message": "First terminal context",
+                "mode": "terminal",
+            },
+        )
+        assert create_resp.status_code == 200
+        item = create_resp.json()["item"]
+        space_id = int(item["id"])
+        assert item["mode"] == "terminal"
+        workspace = Path(item["workspace_path"])
+        assert workspace.exists()
+        assert (workspace / "resources").exists()
+        initial_resources = sorted((workspace / "resources").glob("resource_1_*.md"))
+        assert initial_resources
+        initial_body = initial_resources[0].read_text(encoding="utf-8")
+        assert "# Terminal ideation" in initial_body
+        assert "First terminal context" in initial_body
+
+        text_resp = await client.post(
+            f"/api/inspirations/{space_id}/resources",
+            data={"type": "text", "name": "Idea note", "text_content": "hello idea"},
+        )
+        assert text_resp.status_code == 200
+        text_item = text_resp.json()["item"]
+        assert text_item["external_path"].startswith("resources/")
+        assert (workspace / text_item["external_path"]).read_text(
+            encoding="utf-8"
+        ) == "hello idea"
+
+        draft_summary = workspace / "resources" / "draft_summary.md"
+        draft_summary.write_text(
+            "Idea\nBuild something\n\nWhy now\nNow\n\nGoal\nShip it\n\nProposed tasks\n- Task A\n\nOpen questions\n- None\n\nRejected / deferred ideas\n- Later",
+            encoding="utf-8",
+        )
+        external_note = workspace / "resources" / "external_note.md"
+        external_note.write_text(
+            "# External note\n\nCreated outside OpenFocus", encoding="utf-8"
+        )
+        sync_resp = await client.post(f"/api/inspirations/{space_id}/resources/sync")
+        assert sync_resp.status_code == 200
+        sync_data = sync_resp.json()
+        assert sync_data["synced"] is True
+        assert sync_data["item"]["name"] == "Summary"
+        assert sync_data["item"]["source"] == "terminal_agent"
+        assert sync_data["item"]["external_path"] == "resources/draft_summary.md"
+        synced_paths = {item["external_path"] for item in sync_data["items"]}
+        assert "resources/external_note.md" in synced_paths
+
+        space_after_sync = await client.get(f"/api/inspirations/{space_id}")
+        assert space_after_sync.status_code == 200
+        resource_paths = {
+            item["external_path"] for item in space_after_sync.json()["resources"]
+        }
+        assert "resources/external_note.md" in resource_paths
+
+        gen_resp = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_draft_summary"
+        )
+        assert gen_resp.status_code == 200
+        settled = await _wait_until_not_waiting(client, space_id)
+        assert any(msg["kind"] == "draft_generated" for msg in settled["messages"])
+
+        resource_gen_resp = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json={"resource_id": int(text_item["id"])},
+        )
+        assert resource_gen_resp.status_code == 200
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while True:
+            settled = await _wait_until_not_waiting(client, space_id)
+            if len(settled.get("drafts") or []) >= 2:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("resource-based draft was not generated in time")
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.anyio
+async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    import openfocus.main as main
+    from openfocus.db import session_scope
+    from openfocus.models import RemoteTerminalSession
+
+    class FakeConn:
+        def __init__(self):
+            self.started = []
+            self.inputs = []
+            self.stopped = []
+
+        async def request_terminal_start(self, **kwargs):
+            self.started.append(kwargs)
+            return SimpleNamespace(
+                terminal_id=kwargs["terminal_id"],
+                backend="ttyd",
+                connect_url="http://127.0.0.1:43210",
+            )
+
+        async def request_terminal_input(self, **kwargs):
+            self.inputs.append(kwargs)
+
+        async def request_terminal_stop(self, **kwargs):
+            self.stopped.append(kwargs)
+
+    fake_conn = FakeConn()
+
+    def fake_select_online_companion(companion_id=None):
+        return SimpleNamespace(id=77), fake_conn
+
+    monkeypatch.setattr(main, "_select_online_companion", fake_select_online_companion)
+    monkeypatch.setattr(main, "_has_online_companion", lambda: True)
+
+    app = main.app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "BYO terminal", "mode": "terminal"}
+        )
+        assert create_resp.status_code == 200
+        item = create_resp.json()["item"]
+        space_id = int(item["id"])
+        workspace = Path(item["workspace_path"])
+
+        page_resp = await client.get(f"/inspirations/{space_id}")
+        assert page_resp.status_code == 200
+        page_html = page_resp.text
+        assert 'id="insp-remote-terminal"' in page_html
+        assert "Remote Terminal" not in page_html
+        assert 'id="insp-message-form"' not in page_html
+        assert 'id="insp-open-terminal"' not in page_html
+        assert 'id="insp-sync-resources"' not in page_html
+        assert 'id="insp-terminal-draft-summary"' not in page_html
+        assert 'id="insp-generate-from-summary"' not in page_html
+        assert 'id="insp-resource-sync"' in page_html
+        assert "terminal agent is an untrusted collaborator" not in page_html
+        assert "Suggest Titles" not in page_html
+        assert "Generate Draft" not in page_html
+        assert "Agent Mode" not in page_html
+        assert "Draft Summary" not in page_html
+
+        term_resp = await client.post(f"/api/inspirations/{space_id}/terminals/new")
+        assert term_resp.status_code == 200
+        term = term_resp.json()["terminal"]
+        tid = term["terminal_id"]
+        assert term["embed_url"].startswith(
+            f"/api/inspirations/{space_id}/terminals/{tid}/ttyd/"
+        )
+        assert fake_conn.started
+        assert Path(fake_conn.started[-1]["root_path"]) == workspace
+
+        with session_scope() as s:
+            row = (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == tid)
+                .one()
+            )
+            assert row.space_id == -space_id
+            assert row.root_path == str(workspace)
+
+        prep = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/prepare_draft_summary"
+        )
+        assert prep.status_code == 200
+        assert fake_conn.inputs
+        raw = fake_conn.inputs[-1]["data"]
+        assert b"resources/draft_summary.md" in raw
+        assert b"level-1 heading as the goal title" in raw
+        assert b"\x1b[200~" not in raw
+        assert b"\x1b[201~" not in raw
+        assert b"\n" not in raw
+        assert not raw.endswith(b"\r")
+
+        detail = await client.get(f"/api/inspirations/{space_id}")
+        assert detail.status_code == 200
+        resource_id = int(detail.json()["resources"][0]["id"])
+        gen_before_close = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json={"resource_id": resource_id},
+        )
+        assert gen_before_close.status_code == 200
+        await _wait_until_not_waiting(client, space_id)
+        draft_page = await client.get(f"/inspirations/{space_id}")
+        assert draft_page.status_code == 200
+        assert "terminal-drafts" in draft_page.text
+        assert "insp-draft-cancel-btn" in draft_page.text
+
+        close = await client.post(f"/api/inspirations/{space_id}/close")
+        assert close.status_code == 200
+        assert fake_conn.stopped[-1]["terminal_id"] == tid
+        closed_page = await client.get(f"/inspirations/{space_id}")
+        assert closed_page.status_code == 200
+        assert 'id="insp-remote-terminal"' not in closed_page.text
+        assert '<div class="terminal-drafts' not in closed_page.text
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == tid)
+                .one_or_none()
+                is None
+            )
+
+        reopen = await client.post(f"/api/inspirations/{space_id}/reopen")
+        assert reopen.status_code == 200
+        reopened_page = await client.get(f"/inspirations/{space_id}")
+        assert reopened_page.status_code == 200
+        assert 'id="insp-remote-terminal"' in reopened_page.text
+        assert '<div class="terminal-drafts' not in reopened_page.text
+
+        term_resp2 = await client.post(f"/api/inspirations/{space_id}/terminals/new")
+        assert term_resp2.status_code == 200
+        tid2 = term_resp2.json()["terminal"]["terminal_id"]
+
+        detail = await client.get(f"/api/inspirations/{space_id}")
+        assert detail.status_code == 200
+        resource_id = int(detail.json()["resources"][0]["id"])
+        gen_resp = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json={"resource_id": resource_id},
+        )
+        assert gen_resp.status_code == 200
+        draft_detail = await _wait_until_not_waiting(client, space_id)
+        draft_messages = [
+            msg for msg in draft_detail["messages"] if msg["kind"] == "draft_generated"
+        ]
+        assert draft_messages
+        draft_id = int(draft_messages[-1]["payload"]["draft"]["id"])
+        publish = await client.post(
+            f"/api/inspirations/{space_id}/publish", json={"draft_id": draft_id}
+        )
+        assert publish.status_code == 200
+        published = await _wait_until_published(client, space_id)
+        assert published["item"]["status"] == "published"
+        assert fake_conn.stopped[-1]["terminal_id"] == tid2
+        published_page = await client.get(f"/inspirations/{space_id}")
+        assert published_page.status_code == 200
+        assert 'id="insp-remote-terminal"' not in published_page.text
+        assert '<div class="terminal-drafts published-view"' in published_page.text
+
+
 async def _wait_until_not_waiting(
     client: AsyncClient, space_id: int, *, timeout: float = 3.0
 ):
@@ -414,9 +667,9 @@ async def test_inspiration_waiting_state_and_command_flow(monkeypatch):
         assert page.status_code == 200
         assert "waiting for agent" in page.text
         assert "readonly disabled" in page.text
-        assert 'data-resource-send="[#1 context] "' in page.text
+        assert 'data-resource-send="[#2 context] "' in page.text
         assert re.search(
-            r'class="btn-ghost resource-send-btn" data-resource-send="\[#1 context\] "\s+disabled>Send</button>',
+            r'class="btn-ghost resource-send-btn" data-resource-send="\[#2 context\] "\s+disabled>Send</button>',
             page.text,
         )
 
@@ -839,7 +1092,10 @@ async def test_inspiration_image_resource_raw_preview(monkeypatch):
         detail = await client.get(f"/api/inspirations/{space_id}")
         assert detail.status_code == 200
         resources = detail.json()["resources"]
-        assert resources[0]["raw_url"].endswith(
+        image_resource = next(
+            item for item in resources if int(item["id"]) == resource_id
+        )
+        assert image_resource["raw_url"].endswith(
             f"/api/inspirations/{space_id}/resources/{resource_id}/raw"
         )
 
