@@ -13,6 +13,15 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+
+# Python bytecode cache (should never be committed)
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyi
+*.pyi[cod]
 node_modules/
 
 .coverage
