@@ -5,9 +5,9 @@
 
 ## 0. 项目目标
 
-- 所有命名为 `Design.md` 和 `SPEC.md` 的文件，都是规范文件/SPEC，定义了项目的完整设计，是source of truth。
-- 开发前必须先阅读 SPEC，确认当前要实现的目标与范围边界。
-- 若实现与 SPEC 不一致，优先与用户确认并修改SPEC，更新 SPEC 后再进行开发。
+- `spec/README.md` 是规范入口；`spec/architecture.md`、`spec/product-requirements.md` 及专题 spec 文件共同定义项目的完整设计，是 source of truth。
+- 开发前必须先阅读 `spec/README.md` 及相关专题 spec，确认当前要实现的目标与范围边界。
+- 若实现与 spec 不一致，优先与用户确认并修改 spec，更新 spec 后再进行开发。
 
 ## 1. 代码组织与抽象
 - 模块要放置在独立的目录下，模块根目录下要放置一个SPEC文件定义模块行为。
@@ -50,7 +50,7 @@
   - 未使用的 import、死代码、重复实现、遗留调试输出
 - 删除/移动文件需确保：
   - 测试全绿
-  - `Design.md` 与实现一致
+  - `spec/` 下规范文档与实现一致
 
 ## 5. Skill 规范
 
