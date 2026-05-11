@@ -252,6 +252,21 @@ message TerminalResizeResponse {
   string error = 3;
 }
 
+message TerminalMouseModeRequest {
+  string request_id = 1;
+  string terminal_id = 2;
+  // true means scroll: let tmux handle wheel/copy-mode scrolling.
+  // false means copy: keep browser-native drag selection friendly.
+  bool enabled = 3;
+}
+
+message TerminalMouseModeResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  bool enabled = 4;
+}
+
 message TerminalOutput {
   string terminal_id = 1;
   bytes data = 2;
@@ -291,6 +306,7 @@ message ServerToClient {
     TerminalInputRequest terminal_input = 32;
     TerminalResizeRequest terminal_resize = 33;
     TerminalListSessionsRequest terminal_list_sessions = 34;
+    TerminalMouseModeRequest terminal_mouse_mode = 35;
   }
 }
 
@@ -317,6 +333,7 @@ message ClientToServer {
     TerminalResizeResponse terminal_resize_resp = 33;
     TerminalOutput terminal_output = 34;
     TerminalListSessionsResponse terminal_list_sessions_resp = 35;
+    TerminalMouseModeResponse terminal_mouse_mode_resp = 36;
   }
 }
 

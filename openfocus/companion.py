@@ -601,13 +601,12 @@ async def _wait_tcp_ready(
 
 
 async def _ensure_tmux_terminal_session(
-    *, tmux_bin: str, tmux_name: str, root_path: str, shell: str
+    *, tmux_bin: str, tmux_name: str, root_path: str, shell: str, mouse: bool = True
 ) -> None:
-    """Create/reuse a tmux session and keep mouse selection browser-friendly.
+    """Create/reuse a tmux session and configure wheel/copy behavior.
 
-    tmux mouse mode intercepts normal drag events, which prevents xterm.js/ttyd from
-    creating a browser selection.  We explicitly turn it off for OpenFocus-managed
-    sessions so users can drag-select text in the embedded terminal and copy it.
+    Scroll mode keeps tmux mouse on so wheel scrolls tmux history.
+    Copy mode can turn it off later so users can drag-select text in the browser.
     """
 
     has = await asyncio.create_subprocess_exec(
@@ -643,13 +642,13 @@ async def _ensure_tmux_terminal_session(
         "-t",
         tmux_name,
         "mouse",
-        "off",
+        "on" if bool(mouse) else "off",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
     await opt.wait()
     if opt.returncode != 0:
-        raise RuntimeError("tmux set-option mouse off failed")
+        raise RuntimeError("tmux set-option mouse failed")
 
 
 class _TerminalManager:
@@ -707,7 +706,11 @@ class _TerminalManager:
 
         shell = os.environ.get("SHELL") or "/bin/zsh"
         await _ensure_tmux_terminal_session(
-            tmux_bin=tmux_bin, tmux_name=tmux_name, root_path=rp, shell=shell
+            tmux_bin=tmux_bin,
+            tmux_name=tmux_name,
+            root_path=rp,
+            shell=shell,
+            mouse=True,
         )
         cmd = [
             ttyd_bin,
@@ -925,6 +928,48 @@ class _TerminalManager:
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
             return
         return
+
+    async def set_mouse_mode(self, *, terminal_id: str, enabled: bool) -> bool:
+        tid = (terminal_id or "").strip()
+        if not tid:
+            raise ValueError("terminal_id is required")
+        async with self._lock:
+            sess = self._sessions.get(tid)
+        if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            return bool(enabled)
+        tmux_name = ""
+        if sess is not None:
+            tmux_name = str(sess.tmux_session or "").strip()
+        if not tmux_name:
+            tmux_name = _safe_tmux_session_name(tid)
+        tmux_bin = str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
+        if shutil.which(tmux_bin) is None:
+            raise RuntimeError(f"tmux not found: {tmux_bin}")
+        has = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "has-session",
+            "-t",
+            tmux_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await has.wait()
+        if has.returncode != 0:
+            raise ValueError("terminal not found")
+        proc = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "set-option",
+            "-t",
+            tmux_name,
+            "mouse",
+            "on" if bool(enabled) else "off",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("tmux set-option mouse failed")
+        return bool(enabled)
 
 
 def _choose_directory() -> str:
@@ -1496,6 +1541,31 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                             request_id=req.request_id, ok=False, error=str(e)
                         )
                     await out_q.put(pb2.ClientToServer(terminal_resize_resp=resp))
+                    continue
+
+                if which == "terminal_mouse_mode":
+                    req = msg.terminal_mouse_mode
+                    try:
+                        enabled = await term_mgr.set_mouse_mode(
+                            terminal_id=req.terminal_id, enabled=bool(req.enabled)
+                        )
+                        resp = pb2.TerminalMouseModeResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            enabled=bool(enabled),
+                        )
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_mouse_mode 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalMouseModeResponse(
+                            request_id=req.request_id,
+                            ok=False,
+                            error=str(e),
+                            enabled=bool(req.enabled),
+                        )
+                    await out_q.put(pb2.ClientToServer(terminal_mouse_mode_resp=resp))
                     continue
         except grpc.aio.AioRpcError as e:
             # 连接断开/服务端关闭

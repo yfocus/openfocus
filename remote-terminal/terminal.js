@@ -57,12 +57,28 @@
       return `openfocus.${mode}.terminal.agent_mode.${String(spaceId)}.${tid}`;
     }
 
+    function mouseModeKey(terminalId){
+      const tid = String(terminalId || '').trim();
+      return `openfocus.${mode}.terminal.mouse_mode.${String(spaceId)}.${tid}`;
+    }
+
     function loadAgentMode(terminalId){
       try{ return (localStorage.getItem(agentModeKey(terminalId)) || '') === '1'; }catch(_){ return false; }
     }
 
     function saveAgentMode(terminalId, v){
       try{ localStorage.setItem(agentModeKey(terminalId), v ? '1' : '0'); }catch(_){ }
+    }
+
+    function loadMouseMode(terminalId){
+      try{
+        const v = localStorage.getItem(mouseModeKey(terminalId));
+        return v === null ? true : v === '1';
+      }catch(_){ return true; }
+    }
+
+    function saveMouseMode(terminalId, v){
+      try{ localStorage.setItem(mouseModeKey(terminalId), v ? '1' : '0'); }catch(_){ }
     }
 
     function buildAgentPrefix(){
@@ -101,6 +117,7 @@
         <div class="rt-side">
           <div class="rt-side-title">Prompt Zone</div>
           ${isInspiration ? '' : '<label class="rt-agent-switch" title="Enable Agent Mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">Agent Mode</span></label>'}
+          <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
           ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
@@ -112,6 +129,8 @@
     const statusEl = $('#rt-status', rootEl);
     const btnNew = $('#rt-new', rootEl);
     const agentSwitch = $('#rt-agent-switch', rootEl);
+    const mouseSwitch = $('#rt-mouse-switch', rootEl);
+    const mouseText = $('#rt-mouse-text', rootEl);
     const btnLessons = $('#rt-lessons', rootEl);
     const btnCustom = $('#rt-custom', rootEl);
     const btnDraftSummary = $('#rt-draft-summary', rootEl);
@@ -134,6 +153,18 @@
       const on = !!(it && it.__agent_mode);
       if(agentSwitch && agentSwitch instanceof HTMLInputElement){
         agentSwitch.checked = on;
+      }
+    }
+
+    function applyMouseUi(){
+      const it = activeTerminal();
+      const on = it ? it.__mouse_mode !== false : true;
+      if(mouseSwitch && mouseSwitch instanceof HTMLInputElement){
+        mouseSwitch.checked = on;
+        mouseSwitch.disabled = !it;
+      }
+      if(mouseText){
+        mouseText.textContent = on ? 'scroll' : 'copy';
       }
     }
 
@@ -220,6 +251,20 @@
       }catch(_){ }
     }
 
+    async function syncMouseMode(it){
+      if(!it) return false;
+      const enabled = it.__mouse_mode !== false;
+      const data = await fetchJson(`${apiBase}/${encodeURIComponent(it.terminalId)}/mouse_mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      it.__mouse_mode = !!(data && typeof data.enabled !== 'undefined' ? data.enabled : enabled);
+      saveMouseMode(it.terminalId, it.__mouse_mode);
+      applyMouseUi();
+      return it.__mouse_mode;
+    }
+
     function attachTtydAgentModeHook(it){
       if(isInspiration) return;
       if(!it || !it.iframeEl) return;
@@ -247,6 +292,7 @@
       if(it){
         focusActive();
         applyAgentUi();
+        applyMouseUi();
         syncTtydAgentMode(it);
       }
     }
@@ -307,8 +353,10 @@
 
       const it = { terminalId: tid, name: nm, backend: 'ttyd', embedUrl, iframeEl, tabEl: tab, nameEl, viewEl: view };
       it.__agent_mode = isInspiration ? false : loadAgentMode(tid);
+      it.__mouse_mode = loadMouseMode(tid);
       terminals.set(tid, it);
       attachTtydAgentModeHook(it);
+      setTimeout(()=> syncMouseMode(it).catch(()=>{}), 50);
 
       tab.addEventListener('click', (e)=>{
         const isClose = (e && e.target && (e.target.classList && e.target.classList.contains('rt-x')));
@@ -427,6 +475,22 @@
       try{ toast(it.__agent_mode ? 'Agent Mode: ON' : 'Agent Mode: OFF'); }catch(_){ }
       focusActive();
     });
+    mouseSwitch?.addEventListener('change', ()=>{
+      const it = activeTerminal();
+      if(!it){ applyMouseUi(); return; }
+      it.__mouse_mode = !!(mouseSwitch && mouseSwitch instanceof HTMLInputElement && mouseSwitch.checked);
+      saveMouseMode(it.terminalId, it.__mouse_mode);
+      applyMouseUi();
+      void syncMouseMode(it)
+        .then((on)=> toast(on ? 'scroll: on' : 'copy: on'))
+        .catch((err)=>{
+          it.__mouse_mode = !it.__mouse_mode;
+          saveMouseMode(it.terminalId, it.__mouse_mode);
+          applyMouseUi();
+          toast(String(err && err.message ? err.message : err || 'mouse mode failed'));
+        })
+        .finally(()=> focusActive());
+    });
     btnLessons?.addEventListener('click', ()=> pasteToActive(buildPasteText('lessons')));
     btnCustom?.addEventListener('click', ()=> pasteToActive(buildPasteText('custom')));
     btnDraftSummary?.addEventListener('click', ()=> {
@@ -455,6 +519,7 @@
 
     loadExisting();
     applyAgentUi();
+    applyMouseUi();
 
     const api = {
       createNew,

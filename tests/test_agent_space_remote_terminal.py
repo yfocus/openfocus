@@ -153,6 +153,20 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                     assert blob[:1024] in hist_b
                     assert r.json().get("truncated") is False
 
+                    r = await client.post(
+                        f"/api/agent_spaces/{space_id}/terminals/{tid}/mouse_mode",
+                        json={"enabled": False},
+                    )
+                    assert r.status_code == 200
+                    assert r.json()["enabled"] is False
+
+                    r = await client.post(
+                        f"/api/agent_spaces/{space_id}/terminals/{tid}/mouse_mode",
+                        json={"enabled": True},
+                    )
+                    assert r.status_code == 200
+                    assert r.json()["enabled"] is True
+
                     await client.post(
                         f"/api/agent_spaces/{space_id}/terminals/{tid}/close"
                     )

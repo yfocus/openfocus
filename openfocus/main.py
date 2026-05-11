@@ -7337,6 +7337,35 @@ async def inspiration_terminals_agent_mode(
     return {"ok": True, "enabled": enabled}
 
 
+@app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/mouse_mode")
+async def inspiration_terminals_mouse_mode(
+    space_id: int, terminal_id: str, payload: dict
+) -> dict:
+    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        _inspiration_space_or_404(s, int(space_id))
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != owner_sid:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        comp_id = int(t.companion_id or 0)
+    conn = _inspiration_terminal_conn(comp_id)
+    enabled = bool((payload or {}).get("enabled"))
+    try:
+        res = await conn.request_terminal_mouse_mode(
+            terminal_id=tid, enabled=enabled, timeout_seconds=10.0
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"terminal mouse mode failed: {e}")
+    return {"ok": True, "enabled": bool(getattr(res, "enabled", enabled))}
+
+
 @app.post(
     "/api/inspirations/{space_id:int}/terminals/{terminal_id}/prepare_draft_summary"
 )
@@ -7630,6 +7659,31 @@ async def terminals_agent_mode(space_id: int, terminal_id: str, payload: dict) -
     else:
         _TTYD_AGENT_MODE.pop(tid, None)
     return {"ok": True, "enabled": enabled}
+
+
+@app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/mouse_mode")
+async def terminals_mouse_mode(space_id: int, terminal_id: str, payload: dict) -> dict:
+    sp, comp = _load_space_and_optional_companion(space_id)
+    conn = _require_companion_online(sp=sp, comp=comp)
+    tid = str(terminal_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="terminal_id is required")
+    with session_scope() as s:
+        t = (
+            s.query(RemoteTerminalSession)
+            .filter(RemoteTerminalSession.terminal_id == tid)
+            .one_or_none()
+        )
+        if t is None or int(t.space_id) != int(sp.id):
+            raise HTTPException(status_code=404, detail="Terminal not found")
+    enabled = bool((payload or {}).get("enabled"))
+    try:
+        res = await conn.request_terminal_mouse_mode(
+            terminal_id=tid, enabled=enabled, timeout_seconds=10.0
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"terminal mouse mode failed: {e}")
+    return {"ok": True, "enabled": bool(getattr(res, "enabled", enabled))}
 
 
 @app.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/close")

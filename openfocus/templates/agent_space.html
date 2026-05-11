@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=13">
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
   <style>
     .codebox { font-family: var(--mono); font-size: 12px; white-space: pre; overflow: auto; }
     .code-line { display: flex; gap: 12px; }
@@ -144,7 +144,7 @@
     </div>
   </div>
 
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=13"></script>
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15"></script>
   <script>
     const SPACE_ID = {{ space.id }};
     const TASK_PUBLIC_ID = "{{ task.public_id|e }}";

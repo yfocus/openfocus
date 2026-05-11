@@ -53,6 +53,8 @@
 }
 .rt-agent-text{ font-size:12px; color:rgba(215,255,233,0.55); }
 .rt-agent-switch input:checked ~ .rt-agent-text{ color:rgba(43,255,183,0.92); }
+.rt-mouse-switch input:not(:checked) ~ .rt-agent-text{ color:rgba(255,209,102,0.90); }
+.rt-mouse-switch .rt-agent-text{ text-transform:lowercase; }
 .rt-agent-slider{
   position:relative;
   width:34px;

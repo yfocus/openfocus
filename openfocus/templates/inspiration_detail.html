@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19">
+  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21">
   {% set is_busy = is_waiting or is_publishing %}
   {% set is_terminal_mode = space and ((space.mode or 'built_in') == 'terminal') %}
   <style>
@@ -500,7 +500,7 @@
     </div>
   </div>
 
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19"></script>
+  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21"></script>
   <script>
     (function(){
       let hasSpace = {{ 'true' if space else 'false' }};

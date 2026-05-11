@@ -3,7 +3,10 @@
 import grpc
 import warnings
 
-from . import companion_rpc_pb2 as companion__rpc__pb2
+try:
+    from . import companion_rpc_pb2 as companion__rpc__pb2
+except ImportError:  # pragma: no cover
+    import companion_rpc_pb2 as companion__rpc__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__

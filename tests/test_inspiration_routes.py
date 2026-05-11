@@ -419,6 +419,7 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
             self.started = []
             self.inputs = []
             self.stopped = []
+            self.mouse_modes = []
 
         async def request_terminal_start(self, **kwargs):
             self.started.append(kwargs)
@@ -433,6 +434,10 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
 
         async def request_terminal_stop(self, **kwargs):
             self.stopped.append(kwargs)
+
+        async def request_terminal_mouse_mode(self, **kwargs):
+            self.mouse_modes.append(kwargs)
+            return SimpleNamespace(enabled=bool(kwargs.get("enabled")))
 
     fake_conn = FakeConn()
 
@@ -479,6 +484,23 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
         )
         assert fake_conn.started
         assert Path(fake_conn.started[-1]["root_path"]) == workspace
+
+        mouse_off = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/mouse_mode",
+            json={"enabled": False},
+        )
+        assert mouse_off.status_code == 200
+        assert mouse_off.json()["enabled"] is False
+        assert fake_conn.mouse_modes[-1]["terminal_id"] == tid
+        assert fake_conn.mouse_modes[-1]["enabled"] is False
+
+        mouse_on = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/mouse_mode",
+            json={"enabled": True},
+        )
+        assert mouse_on.status_code == 200
+        assert mouse_on.json()["enabled"] is True
+        assert fake_conn.mouse_modes[-1]["enabled"] is True
 
         with session_scope() as s:
             row = (
