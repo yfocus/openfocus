@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 default_install_hook_types: [pre-commit]
 fail_fast: true
 
@@ -10,6 +11,12 @@ repos:
 
   - repo: local
     hooks:
+      - id: apache-license-header
+        name: Apache-2.0 license header check
+        entry: python scripts/check_license_headers.py
+        language: system
+        pass_filenames: false
+
       - id: ruff-format-check
         name: ruff format --check
         entry: poetry run ruff format --check .

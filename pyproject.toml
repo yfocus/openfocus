@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 [project]
 name = "openfocus"
 version = "0.1.0"
 description = ""
+license = "Apache-2.0"
 authors = [
     {name = "jinglun",email = "jinglun@apache.org"}
 ]

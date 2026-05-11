@@ -1,6 +1,7 @@
 {
   "name": "openfocus-frontend",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "vite build",

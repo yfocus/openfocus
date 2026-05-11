@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
 import { createRoot } from 'react-dom/client';
 import React, { useCallback, useEffect, useRef } from 'react';
 

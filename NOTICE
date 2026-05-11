@@ -1,0 +1,16 @@
+OpenFocus
+Copyright 2026 OpenFocus contributors
+
+This product includes software developed by the OpenFocus contributors.
+
+Third-party notices:
+
+- certifi includes the Mozilla CA Certificate Bundle and is distributed under
+  the Mozilla Public License 2.0. See https://github.com/certifi/python-certifi
+  and https://www.mozilla.org/en-US/MPL/2.0/ for details.
+
+Runtime integrations:
+
+- OpenFocus can integrate with ttyd and tmux when those tools are installed by
+  the user. They are invoked as external system programs and are not bundled in
+  this repository.

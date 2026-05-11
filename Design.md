@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # OpenFocus 项目设计文档
 
 版本：`v0.1`

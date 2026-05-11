@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """兼容入口：转发到 skills/focus_report/scripts/focus_report.py。
 
 建议直接使用 skill 目录下的脚本：

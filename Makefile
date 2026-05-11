@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 .PHONY: serve fmt fmt-check lint test check
 
 HOST ?= 127.0.0.1

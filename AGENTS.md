@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # OpenFocus 开发流程（给 Agent/开发者）
 
 本文件规定在本仓库开发 feature/fix 的默认流程与质量门槛。

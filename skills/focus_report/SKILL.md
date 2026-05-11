@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 ---
 name: focus_report
 description: Report task execution results (name/prompt/response/status) from external agents back to OpenFocus, and let OpenFocus persist it as events and auto-mark tasks done when appropriate.
