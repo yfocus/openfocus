@@ -3,11 +3,10 @@
 {% block content %}
   <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
   <style>
-    .codebox { font-family: var(--mono); font-size: 12px; white-space: pre; overflow: auto; }
-    .code-line { display: flex; gap: 12px; }
-    .code-line:hover { background: rgba(0,229,255,0.05); }
-    .code-ln { width: 5ch; text-align: right; color: rgba(215,255,233,0.40); user-select: none; }
-    .code-tx { flex: 1 1 auto; min-width: 0; }
+    .agent-preview-content { height: 100%; min-height: 0; }
+    .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: 10px; background: rgba(255,255,255,0.02); }
+    .codebox.cm-preview .cm-editor { height: 100%; }
+    .codebox.cm-preview .cm-scroller { overflow: auto !important; }
 
     /* AgentSpace: resizable 3-column layout (FILES / PREVIEW / TERMINAL) */
     .agent-space-split {

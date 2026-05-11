@@ -1,6 +1,24 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { basicSetup, EditorView } from 'codemirror';
+import { type Extension, EditorState } from '@codemirror/state';
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
+import { cpp } from '@codemirror/lang-cpp';
+import { css } from '@codemirror/lang-css';
+import { go } from '@codemirror/lang-go';
+import { html } from '@codemirror/lang-html';
+import { java } from '@codemirror/lang-java';
+import { javascript } from '@codemirror/lang-javascript';
+import { json } from '@codemirror/lang-json';
+import { lezer } from '@codemirror/lang-lezer';
+import { markdown } from '@codemirror/lang-markdown';
+import { php } from '@codemirror/lang-php';
+import { python } from '@codemirror/lang-python';
+import { rust } from '@codemirror/lang-rust';
+import { sql } from '@codemirror/lang-sql';
+import { xml } from '@codemirror/lang-xml';
 
 type AgentSpaceConfig = {
   spaceId: number;
@@ -64,6 +82,52 @@ function isLikelyImage(name: string): boolean {
   const lower = name.toLowerCase();
   return ['.png', '.jpg', '.jpeg', '.gif', '.webp'].some((suffix) => lower.endsWith(suffix));
 }
+
+function fileExtension(name: string): string {
+  const cleanName = String(name || '').toLowerCase().split('?')[0] || '';
+  const idx = cleanName.lastIndexOf('.');
+  return idx >= 0 ? cleanName.slice(idx + 1) : '';
+}
+
+function languageExtension(name: string): Extension[] {
+  const lower = String(name || '').toLowerCase();
+  const ext = fileExtension(lower);
+  if (['js', 'jsx', 'mjs', 'cjs'].includes(ext)) return [javascript({ jsx: ext === 'jsx' })];
+  if (['ts', 'tsx', 'mts', 'cts'].includes(ext)) return [javascript({ typescript: true, jsx: ext === 'tsx' })];
+  if (['py', 'pyw'].includes(ext)) return [python()];
+  if (['html', 'htm', 'jinja', 'jinja2'].includes(ext)) return [html()];
+  if (['css'].includes(ext)) return [css()];
+  if (['json', 'jsonc', 'map'].includes(ext)) return [json()];
+  if (['md', 'markdown'].includes(ext)) return [markdown()];
+  if (['xml', 'svg'].includes(ext)) return [xml()];
+  if (['rs'].includes(ext)) return [rust()];
+  if (['java'].includes(ext)) return [java()];
+  if (['c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh'].includes(ext)) return [cpp()];
+  if (['go'].includes(ext)) return [go()];
+  if (['php'].includes(ext)) return [php()];
+  if (['sql'].includes(ext)) return [sql()];
+  if (['grammar'].includes(ext) || lower.endsWith('.grammar.terms')) return [lezer()];
+  return [];
+}
+
+const openFocusHighlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: '#7c4dff' },
+  { tag: [tags.name, tags.deleted, tags.character, tags.macroName], color: '#d7ffe9' },
+  { tag: [tags.propertyName, tags.function(tags.variableName), tags.labelName], color: '#00e5ff' },
+  { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: '#2bffb7' },
+  { tag: [tags.definition(tags.name), tags.separator], color: '#ffd166' },
+  { tag: [tags.typeName, tags.className, tags.number, tags.changed, tags.annotation, tags.modifier, tags.self, tags.namespace], color: '#ff9f7a' },
+  { tag: [tags.operator, tags.operatorKeyword, tags.url, tags.escape, tags.regexp, tags.link], color: '#ff7ad9' },
+  { tag: [tags.meta, tags.comment], color: 'rgba(215,255,233,0.46)' },
+  { tag: tags.strong, fontWeight: '700' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strikethrough, textDecoration: 'line-through' },
+  { tag: tags.link, textDecoration: 'underline' },
+  { tag: tags.heading, fontWeight: '700', color: '#ffd166' },
+  { tag: [tags.atom, tags.bool, tags.special(tags.variableName)], color: '#2bffb7' },
+  { tag: [tags.processingInstruction, tags.string, tags.inserted], color: '#a5ffcf' },
+  { tag: tags.invalid, color: '#ff3b5c' },
+]);
 
 function previewStateKey(spaceId: number): string {
   return `openfocus.agent_space.preview.${String(spaceId)}`;
@@ -182,18 +246,88 @@ function FileTree({ spaceId, onOpenFile }: { spaceId: number; onOpenFile: (path:
   );
 }
 
-function CodePreview({ content }: { content: string }) {
-  const lines = useMemo(() => String(content || '').split(/\r?\n/), [content]);
-  return (
-    <div className="codebox">
-      {lines.map((line, idx) => (
-        <div className="code-line" key={idx}>
-          <span className="code-ln">{idx + 1}</span>
-          <span className="code-tx">{line}</span>
-        </div>
-      ))}
-    </div>
-  );
+function CodeMirrorPreview({ content, name, onScroll }: { content: string; name: string; onScroll: (scrollTop: number, topLine: number) => void }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const scrollTimerRef = useRef<number>(0);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: String(content || ''),
+        extensions: [
+          basicSetup,
+          syntaxHighlighting(openFocusHighlightStyle),
+          ...languageExtension(name),
+          EditorState.readOnly.of(true),
+          EditorView.editable.of(false),
+          EditorView.theme({
+            '&': {
+              height: '100%',
+              color: 'var(--text)',
+              backgroundColor: 'transparent',
+              fontSize: '12px',
+            },
+            '.cm-scroller': {
+              fontFamily: 'var(--mono)',
+              lineHeight: '1.55',
+              overflow: 'auto',
+            },
+            '.cm-content': {
+              caretColor: 'transparent',
+            },
+            '.cm-line': {
+              padding: '0 8px',
+            },
+            '.cm-gutters': {
+              backgroundColor: 'transparent',
+              color: 'rgba(215,255,233,0.40)',
+              borderRight: '1px solid rgba(0,229,255,0.14)',
+            },
+            '.cm-activeLine': {
+              backgroundColor: 'rgba(0,229,255,0.05)',
+            },
+            '.cm-activeLineGutter': {
+              backgroundColor: 'rgba(0,229,255,0.06)',
+              color: 'rgba(215,255,233,0.62)',
+            },
+            '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+              backgroundColor: 'rgba(0,229,255,0.22)',
+            },
+            '&.cm-focused': {
+              outline: 'none',
+            },
+          }),
+          EditorView.domEventHandlers({
+            scroll: (_event, currentView) => {
+              if (scrollTimerRef.current) return;
+              scrollTimerRef.current = window.setTimeout(() => {
+                scrollTimerRef.current = 0;
+                const scroller = currentView.scrollDOM;
+                const top = Number(scroller.scrollTop || 0);
+                const block = currentView.lineBlockAtHeight(top);
+                const line = currentView.state.doc.lineAt(block.from).number;
+                onScroll(top, line);
+              }, 180);
+            },
+          }),
+        ],
+      }),
+      parent: host,
+    });
+
+    viewRef.current = view;
+    return () => {
+      if (scrollTimerRef.current) window.clearTimeout(scrollTimerRef.current);
+      view.destroy();
+      viewRef.current = null;
+    };
+  }, [content, name, onScroll]);
+
+  return <div ref={hostRef} className="codebox cm-preview" />;
 }
 
 function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
@@ -247,13 +381,12 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     if (!state || String(state.path || '') !== String(preview.path || '')) return;
     const apply = () => {
       const scroller = previewScrollRef.current;
-      const box = previewContentRef.current?.querySelector('.codebox');
-      const firstLine = box?.querySelector('.code-line') as HTMLElement | null;
-      const lineHeight = firstLine ? firstLine.getBoundingClientRect().height || firstLine.offsetHeight || 0 : 0;
       if (!scroller) return;
+      const cmScroller = previewContentRef.current?.querySelector('.cm-scroller') as HTMLElement | null;
       const topLine = Number(state.topLine || 0);
-      if (lineHeight > 0 && topLine > 1) scroller.scrollTop = Math.max(0, Math.floor((topLine - 1) * lineHeight));
-      else if (typeof state.scrollTop === 'number' && state.scrollTop > 0) scroller.scrollTop = Math.max(0, Math.floor(state.scrollTop));
+      const scrollTop = Math.max(0, Math.floor(Number(state.scrollTop || 0)));
+      if (cmScroller) cmScroller.scrollTop = scrollTop;
+      else if (topLine > 1 || scrollTop > 0) scroller.scrollTop = scrollTop;
     };
     requestAnimationFrame(() => requestAnimationFrame(apply));
     const timeout = window.setTimeout(apply, 120);
@@ -266,38 +399,15 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     void openPreview(String(state.path || ''), String(state.name || '') || guessNameFromPath(String(state.path || '')));
   }, [config.spaceId, openPreview]);
 
-  useEffect(() => {
-    const scroller = previewScrollRef.current;
-    if (!scroller) return;
-    let timer = 0;
-    const handler = () => {
-      if (timer) return;
-      timer = window.setTimeout(() => {
-        timer = 0;
-        const state = loadPreviewState(config.spaceId) || {};
-        const path = String(state.path || '');
-        if (!path) return;
-        let topLine = Number(state.topLine || 1);
-        const box = previewContentRef.current?.querySelector('.codebox');
-        const firstLine = box?.querySelector('.code-line') as HTMLElement | null;
-        const lineHeight = firstLine ? firstLine.getBoundingClientRect().height || firstLine.offsetHeight || 0 : 0;
-        if (lineHeight > 0) topLine = Math.max(1, Math.floor(scroller.scrollTop / lineHeight) + 1);
-        savePreviewState(config.spaceId, { path, name: String(state.name || ''), scrollTop: Number(scroller.scrollTop || 0), topLine, ts: Date.now() });
-      }, 180);
-    };
-    scroller.addEventListener('scroll', handler, { passive: true });
-    window.addEventListener('pageshow', handler);
-    const visibilityHandler = () => {
-      if (document.visibilityState === 'hidden') handler();
-    };
-    document.addEventListener('visibilitychange', visibilityHandler);
-    return () => {
-      scroller.removeEventListener('scroll', handler);
-      window.removeEventListener('pageshow', handler);
-      document.removeEventListener('visibilitychange', visibilityHandler);
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [config.spaceId]);
+  const savePreviewScroll = useCallback(
+    (scrollTop: number, topLine: number) => {
+      const state = loadPreviewState(config.spaceId) || {};
+      const path = String(state.path || '');
+      if (!path) return;
+      savePreviewState(config.spaceId, { path, name: String(state.name || ''), scrollTop: Number(scrollTop || 0), topLine: Number(topLine || 1), ts: Date.now() });
+    },
+    [config.spaceId],
+  );
 
   useEffect(() => {
     const root = splitRef.current;
@@ -438,12 +548,12 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
               </div>
             </div>
             <div className="divider" />
-            <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12 }}>
-              <div ref={previewContentRef} className={preview.path ? '' : 'muted'}>
+            <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto' }}>
+              <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
                 {preview.loading ? <><span className="spin" /> <span className="muted">加载中…</span></> : null}
                 {preview.error ? preview.error : null}
                 {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
-                {!preview.loading && !preview.error && preview.content ? <CodePreview content={preview.content} /> : null}
+                {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} /> : null}
                 {!preview.path ? '选择一个文件预览（代码 / Markdown / 图片）。' : null}
               </div>
             </div>
