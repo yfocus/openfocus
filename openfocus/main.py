@@ -95,6 +95,15 @@ if _RESOURCES_DIR.exists() and _RESOURCES_DIR.is_dir():
         "/resources", StaticFiles(directory=str(_RESOURCES_DIR)), name="resources"
     )
 
+# 静态资源：Vite 构建产物（openfocus/static/dist/）
+_FRONTEND_DIST_DIR = (APP_DIR / "static" / "dist").resolve()
+if _FRONTEND_DIST_DIR.exists() and _FRONTEND_DIST_DIR.is_dir():
+    app.mount(
+        "/static/dist",
+        StaticFiles(directory=str(_FRONTEND_DIST_DIR)),
+        name="frontend-dist",
+    )
+
 
 # OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
 COMPANION_GRPC = CompanionGrpcServer()

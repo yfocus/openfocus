@@ -143,6 +143,7 @@
 
     const terminals = new Map(); // terminal_id -> { terminalId, name, tabEl, nameEl, viewEl, iframeEl }
     let activeId = '';
+    let initialLoadPromise = null;
 
     function setStatus(s){ if(statusEl) statusEl.textContent = String(s||'—'); }
 
@@ -460,6 +461,17 @@
       }
     }
 
+    async function ensureTerminalReady(){
+      try{
+        if(initialLoadPromise) await initialLoadPromise;
+      }catch(_){ }
+      let it = activeTerminal();
+      if(it) return it;
+      await createNew();
+      it = activeTerminal();
+      return it || null;
+    }
+
     btnNew?.addEventListener('click', createNew);
 
     agentSwitch?.addEventListener('change', ()=>{
@@ -517,17 +529,20 @@
       if(document.visibilityState === 'visible') focusActive();
     });
 
-    loadExisting();
-    applyAgentUi();
-    applyMouseUi();
-
     const api = {
       createNew,
       closeTerminal,
       activate,
-      injectPromptToTerminal: (text, options)=> injectPromptToTerminal(activeTerminal(), text, options),
+      injectPromptToTerminal: async (text, options)=> {
+        const it = await ensureTerminalReady();
+        return injectPromptToTerminal(it, text, options);
+      },
     };
     try{ rootEl.__openfocusRemoteTerminal = api; }catch(_){ }
+
+    initialLoadPromise = loadExisting();
+    applyAgentUi();
+    applyMouseUi();
     return api;
   }
 

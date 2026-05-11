@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import re
 import threading
@@ -526,7 +527,19 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
 
         detail = await client.get(f"/api/inspirations/{space_id}")
         assert detail.status_code == 200
-        resource_id = int(detail.json()["resources"][0]["id"])
+        resource_item = detail.json()["resources"][0]
+        resource_id = int(resource_item["id"])
+        resource_path = str(resource_item.get("external_path") or "").strip()
+        assert resource_path.startswith("resources/")
+        resource_send_payload = f"\x1b[200~./{resource_path}\x1b[201~".encode()
+        send_resource = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/inject",
+            json={"data_b64": base64.b64encode(resource_send_payload).decode("ascii")},
+        )
+        assert send_resource.status_code == 200
+        assert fake_conn.inputs[-1]["terminal_id"] == tid
+        assert fake_conn.inputs[-1]["data"] == resource_send_payload
+
         gen_before_close = await client.post(
             f"/api/inspirations/{space_id}/drafts/generate_from_resource",
             json={"resource_id": resource_id},
