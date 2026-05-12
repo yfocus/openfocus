@@ -73,7 +73,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
         # goals page should include the human-facing label
         r = await client.get("/goals")
         assert r.status_code == 200
-        assert "confirm done by user" in r.text
+        assert "Goal confirmed done by user" in r.text
 
         # filter: completed should include the goal
         r = await client.get("/goals?gfilter=COMPLETED")
@@ -108,7 +108,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
         # goals page should include the reopen label
         r = await client.get("/goals")
         assert r.status_code == 200
-        assert "reopen by user" in r.text
+        assert "Goal reopened by user" in r.text
 
         # dashboard detail view
         r = await client.get(f"/goals?goal={goal_id}")
@@ -672,7 +672,8 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "1")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2")
 
-    from openfocus.main import _memory_dir, _memory_maintenance, app
+    from openfocus.domains.memory import service as memory_service
+    from openfocus.main import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -700,9 +701,11 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
         )
         assert r.status_code == 303
 
-        _memory_maintenance(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=5))
+        memory_service.maintenance(
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=5)
+        )
 
-        mem_dir = _memory_dir()
+        mem_dir = memory_service.memory_dir()
         audit_files = list((mem_dir / "audit").glob("**/*.md"))
         daily_files = list((mem_dir / "daily").glob("*.md"))
         assert audit_files
@@ -726,7 +729,8 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "3600")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2000")
 
-    from openfocus.main import _memory_dir, app
+    from openfocus.domains.memory import service as memory_service
+    from openfocus.main import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -741,7 +745,7 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
         )
         assert r.status_code == 303
 
-        mem_dir = _memory_dir()
+        mem_dir = memory_service.memory_dir()
         before_files = sorted((mem_dir / "audit").glob("**/*.md"))
         assert len(before_files) == 1
 

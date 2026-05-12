@@ -510,7 +510,10 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
                 .filter(RemoteTerminalSession.terminal_id == tid)
                 .one()
             )
+            assert row.owner_type == "inspiration_space"
+            assert row.owner_id == space_id
             assert row.space_id == -space_id
+            assert row.task_public_id is None
             assert row.root_path == str(workspace)
 
         prep = await client.post(

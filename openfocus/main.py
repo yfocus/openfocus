@@ -6,6 +6,7 @@ import base64
 import contextlib
 import datetime as dt
 import json
+import logging
 import os
 import shutil
 import urllib.error
@@ -27,7 +28,6 @@ from fastapi import (
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
-    JSONResponse,
     RedirectResponse,
     Response,
     StreamingResponse,
@@ -36,9 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
-from .agent.agents.attention_scheduler import AttentionSchedulerAgent
 from .agent.llm.openai_compat import OpenAICompatibleProvider
-from .agent.storage.events import DbEventSink
 from .companion.grpc import (
     CompanionGrpcError,
     CompanionGrpcServer,
@@ -48,6 +46,7 @@ from .companion.grpc import (
 from .db import get_engine, session_scope
 from .domains.agent_spaces import terminals as terminal_service
 from .domains.companion import service as companion_service
+from .domains.events import service as event_service
 from .domains.goals import service as goal_service
 from .domains.inspirations import drafts as inspiration_drafts
 from .domains.inspirations import presenters as inspiration_presenters
@@ -69,17 +68,17 @@ from .models import (
     InspirationPublishRecord,
     InspirationResource,
     InspirationSpace,
-    NextMoveFeedback,
-    NextMoveRun,
     RemoteTerminalOutput,
     RemoteTerminalSession,
     Task,
 )
-from .schemas import (
-    AgentEventIn,
-    AgentSpaceCreateIn,
-    FocusReportIn,
-)
+from .schemas import AgentSpaceCreateIn
+from .web.routes import companions as companion_routes
+from .web.routes import events as events_routes
+from .web.routes import memory as memory_routes
+from .web.routes import recommendations as recommendation_routes
+
+_LOG = logging.getLogger(__name__)
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -111,7 +110,6 @@ if _FRONTEND_DIST_DIR.exists() and _FRONTEND_DIST_DIR.is_dir():
         StaticFiles(directory=str(_FRONTEND_DIST_DIR)),
         name="frontend-dist",
     )
-
 
 # OpenFocus(Control Plane) 内置 gRPC server：Companion(Data Plane) 以客户端方式连接进来。
 COMPANION_GRPC = CompanionGrpcServer()
@@ -441,33 +439,9 @@ def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
 # openfocus.domains.memory.service; main.py keeps only routing/glue aliases while
 # the rest of the god module is incrementally split by domain.
 _utcnow = memory_service.utcnow
-_memory_dir = memory_service.memory_dir
-_memory_audit_root = memory_service.audit_root
-_memory_daily_root = memory_service.daily_root
-_memory_long_term_path = memory_service.long_term_path
-_memory_load_state_unlocked = memory_service.load_state_unlocked
-_memory_read_text = memory_service.read_text
-_memory_iso = memory_service.iso
 _memory_decode_terminal_bytes = memory_service.decode_terminal_bytes
-_memory_collect_file_items = memory_service.collect_file_items
-_memory_read_selected_file = memory_service.read_selected_file
 _memory_maintenance = memory_service.maintenance
 _try_audit_memory = memory_service.try_audit_memory
-
-
-def _memory_force_audit_summary(now: dt.datetime) -> None:
-    cfg = memory_service.config_from_env()
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=dt.timezone.utc)
-    with memory_service._LOCK:
-        state = memory_service.load_state_unlocked()
-        memory_service.rotate_current_audit_unlocked(
-            state, now, cfg=cfg, force=True, create_next=True
-        )
-        memory_service.finalize_due_days_unlocked(state, now)
-        memory_service.cleanup_audit_files_unlocked(now, cfg)
-        state["last_maintenance_at"] = memory_service.iso(now)
-        memory_service.save_state_unlocked(state)
 
 
 def _human_duration_seconds(seconds: int) -> str:
@@ -508,8 +482,8 @@ def _startup() -> None:
 
     try:
         _memory_maintenance()
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.warning("startup memory maintenance failed: %s", exc)
 
 
 @app.on_event("startup")
@@ -624,6 +598,18 @@ def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str |
             "You can also place a `.env` file in the startup directory (see `.env-default` at the repo root), or point to one with OPENFOCUS_ENV_FILE.\n"
             f"Error: {e}"
         )
+
+
+app.include_router(events_routes.router)
+app.include_router(memory_routes.create_router(templates=templates))
+app.include_router(
+    companion_routes.create_router(grpc_server=COMPANION_GRPC, templates=templates)
+)
+app.include_router(
+    recommendation_routes.create_router(
+        provider_factory=lambda: _get_llm_provider_or_error()
+    )
+)
 
 
 def _truncate_zh(text: str, n: int = 20) -> str:
@@ -1463,328 +1449,6 @@ def goals_list(request: Request) -> HTMLResponse:
             "goal_filter": goal_filter,
             "goal_sort": goal_sort,
         },
-    )
-
-
-_NEXT_MOVE_TASK_TYPE_LABELS = {
-    "deep_work": "Deep Work",
-    "communication": "Communication",
-    "review": "Review",
-    "execution": "Execution",
-    "admin": "Admin",
-}
-
-
-def _next_move_task_type_label(task_type: str | None) -> str:
-    return _NEXT_MOVE_TASK_TYPE_LABELS.get(
-        str(task_type or "").strip().lower(), "Execution"
-    )
-
-
-_infer_task_type = goal_service.infer_task_type
-_infer_estimated_minutes = goal_service.infer_estimated_minutes
-_infer_context_key = goal_service.infer_context_key
-
-
-def _next_move_feedback_meta(raw: str | None) -> dict:
-    text_value = str(raw or "").strip()
-    if not text_value:
-        return {}
-    try:
-        data = json.loads(text_value)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _next_move_sentence(items: list[dict]) -> str | None:
-    if not items:
-        return None
-    titles = [
-        str((it.get("title") or "")).strip()
-        for it in items[:3]
-        if str((it.get("title") or "")).strip()
-    ]
-    if not titles:
-        return None
-    if len(titles) == 1:
-        return "Recommended next: " + titles[0] + "."
-    return "Recommended next: " + ", ".join(titles[:2]) + "."
-
-
-def _next_move_ts(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, dt.datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
-        return value.isoformat() + "Z"
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
-
-
-def _next_move_response_payload(run: NextMoveRun | None) -> dict:
-    if run is None:
-        return {
-            "generated_at": None,
-            "run_id": None,
-            "item": None,
-            "items": [],
-            "context_summary": {},
-            "last_event_id": 0,
-            "sentence": None,
-        }
-    recommendations = run.recommendations or {}
-    items = recommendations.get("items") if isinstance(recommendations, dict) else []
-    if not isinstance(items, list):
-        items = []
-    items = [it for it in items if isinstance(it, dict)][:2]
-    context_summary = run.context_summary or {}
-    if not isinstance(context_summary, dict):
-        context_summary = {}
-    try:
-        last_event_id = int(context_summary.get("latest_event_id") or 0)
-    except Exception:
-        last_event_id = 0
-    return {
-        "generated_at": _next_move_ts(run.generated_at),
-        "run_id": int(run.id or 0),
-        "item": items[0] if items else None,
-        "items": items,
-        "context_summary": context_summary,
-        "last_event_id": last_event_id,
-        "sentence": _next_move_sentence(items),
-    }
-
-
-def _next_move_learning_note(
-    *,
-    task_title: str,
-    task_type: str,
-    reason_code: str,
-    reason_text: str,
-    estimated_minutes: int,
-) -> str:
-    type_label = _next_move_task_type_label(task_type)
-    reason_map = {
-        "not_for_now": "user explicitly said not for now and this task should be avoided in the immediate next recommendation",
-        "too_much_context_switch": "user wants less context switching",
-        "too_long": "user wants a shorter task block right now",
-        "wrong_type": "this work type does not fit the current mode",
-        "not_important_now": "this task is not important right now",
-        "lacking_context": "user needs more context first",
-        "waiting_on_someone": "the task is blocked on someone else",
-    }
-    reason_label = reason_map.get(reason_code, "the recommendation was dismissed")
-    note = f"- Next Move feedback: `{task_title}` ({type_label}, ~{estimated_minutes}m) was dismissed because {reason_label}."
-    if reason_text:
-        note += f" Note: {reason_text.strip()}"
-    return note
-
-
-def _next_move_persist_feedback_learning(
-    *, note: str, memory_note: str | None = None
-) -> None:
-    memory_service.persist_feedback_learning(note=note, memory_note=memory_note)
-
-
-@app.get("/api/recommendations/next")
-def recommendations_next(
-    limit: int = 2, trigger: str = "manual_refresh"
-) -> JSONResponse:
-    provider, provider_error = _get_llm_provider_or_error()
-    if provider is None:
-        items: list[dict] = []
-        context_summary = {
-            "error": provider_error,
-            "agent_loop": "unavailable",
-            "recommendation_count": 0,
-            "latest_event_id": 0,
-        }
-        no_recommendation_reason = provider_error
-    else:
-        agent = AttentionSchedulerAgent(provider=provider)
-        data = agent.run(sink=DbEventSink())
-        items = (data.get("items") or [])[:2] if isinstance(data, dict) else []
-        context_summary = (
-            dict(data.get("context_summary") or {}) if isinstance(data, dict) else {}
-        )
-        context_summary["agent_loop"] = "attention_scheduler"
-        context_summary["recommendation_count"] = len(items)
-        no_recommendation_reason = (
-            str(data.get("no_recommendation_reason") or "")
-            if isinstance(data, dict)
-            else ""
-        )
-
-    with session_scope() as s:
-        run = NextMoveRun(
-            trigger_kind=str(trigger or "manual_refresh")[:64],
-            context_summary=context_summary,
-            recommendations={"items": items},
-        )
-        s.add(run)
-        s.flush()
-        payload = _next_move_response_payload(run)
-
-    payload["no_recommendation_reason"] = no_recommendation_reason or None
-    return JSONResponse(
-        payload,
-        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
-    )
-
-
-@app.get("/api/recommendations/latest")
-def recommendations_latest() -> JSONResponse:
-    with session_scope() as s:
-        run = s.query(NextMoveRun).order_by(NextMoveRun.id.desc()).first()
-        payload = _next_move_response_payload(run)
-    return JSONResponse(
-        payload,
-        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
-    )
-
-
-@app.post("/api/recommendations/feedback")
-def recommendations_feedback(payload: dict) -> JSONResponse:
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-
-    task_public_id = str(payload.get("task_public_id") or "").strip()
-    if not task_public_id:
-        raise HTTPException(status_code=400, detail="task_public_id is required")
-
-    feedback_type = (
-        str(payload.get("feedback_type") or "dismiss").strip().lower() or "dismiss"
-    )
-    reason_code = str(payload.get("reason_code") or "not_for_now").strip().lower()
-    reason_text = str(payload.get("reason_text") or "").strip()
-    try:
-        run_id = int(payload.get("run_id") or 0) or None
-    except Exception:
-        run_id = None
-
-    with session_scope() as s:
-        task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
-        if task is None:
-            raise HTTPException(status_code=404, detail="Task not found")
-        space = (
-            s.query(AgentSpace)
-            .filter(AgentSpace.task_public_id == task_public_id)
-            .one_or_none()
-        )
-
-        task_type = str(
-            getattr(task, "task_type", "") or ""
-        ).strip().lower() or _infer_task_type(task.title, task.content)
-        estimated_minutes = int(
-            getattr(task, "estimated_minutes", 0) or 0
-        ) or _infer_estimated_minutes(task_type, task.title, task.content)
-        context_key = str(
-            getattr(task, "context_key", "") or ""
-        ).strip() or _infer_context_key(
-            task.title,
-            task.content,
-            goal_id=int(task.goal_id),
-            root_path=getattr(space, "root_path", None),
-        )
-        learned_summary = json.dumps(
-            {
-                "feedback_type": feedback_type,
-                "reason_code": reason_code,
-                "task_type": task_type,
-                "estimated_minutes": estimated_minutes,
-                "context_key": context_key,
-                "goal_id": int(task.goal_id),
-            },
-            ensure_ascii=False,
-        )
-        row = NextMoveFeedback(
-            run_id=run_id,
-            task_public_id=task_public_id,
-            feedback_type=feedback_type,
-            reason_code=reason_code,
-            reason_text=reason_text[:2000],
-            learned_summary=learned_summary,
-        )
-        s.add(row)
-        s.flush()
-        feedback_id = int(row.id or 0)
-        s.add(
-            Event(
-                kind="next_move.not_for_now"
-                if feedback_type == "dismiss"
-                else "next_move.feedback",
-                agent="web",
-                task_id=task_public_id,
-                payload={
-                    "run_id": run_id,
-                    "feedback_id": feedback_id,
-                    "feedback_type": feedback_type,
-                    "reason_code": reason_code,
-                    "reason_text": reason_text,
-                    "task_title": task.title,
-                    "goal_id": int(task.goal_id),
-                },
-            )
-        )
-        similar_rows = (
-            s.query(NextMoveFeedback)
-            .filter(NextMoveFeedback.feedback_type == feedback_type)
-            .filter(NextMoveFeedback.reason_code == reason_code)
-            .order_by(NextMoveFeedback.id.desc())
-            .limit(50)
-            .all()
-        )
-
-    daily_note = _next_move_learning_note(
-        task_title=str(task.title or task_public_id),
-        task_type=task_type,
-        reason_code=reason_code,
-        reason_text=reason_text,
-        estimated_minutes=estimated_minutes,
-    )
-    memory_note = None
-    if (
-        reason_code
-        and sum(
-            1
-            for row in similar_rows
-            if _next_move_feedback_meta(getattr(row, "learned_summary", "")).get(
-                "task_type"
-            )
-            == task_type
-        )
-        >= 2
-    ):
-        if reason_code == "too_long":
-            memory_note = f"- Prefer shorter tasks over ~{estimated_minutes}m when dismissing {_next_move_task_type_label(task_type)} work."
-        elif reason_code == "too_much_context_switch":
-            memory_note = f"- Prefer recommendations that continue the current context before suggesting new {_next_move_task_type_label(task_type)} work."
-        elif reason_code == "wrong_type":
-            memory_note = f"- Avoid prioritizing {_next_move_task_type_label(task_type)} tasks when the user says the work type is wrong for now."
-        elif reason_code == "not_important_now":
-            memory_note = "- When the user dismisses a recommendation as not important now, reduce near-term priority for similar work."
-        elif reason_code == "not_for_now":
-            memory_note = "- When the user says Not for now, avoid immediately recommending the same task again and use the reason text to infer the next best alternative."
-    _next_move_persist_feedback_learning(note=daily_note, memory_note=memory_note)
-
-    _try_audit_memory(
-        kind="next_move.feedback",
-        source="web",
-        summary=f"Next Move feedback for task: {task_public_id}",
-        detail=f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
-        goal_id=int(task.goal_id),
-        task_public_id=task_public_id,
-        metadata={
-            "run_id": run_id,
-            "reason_code": reason_code,
-            "learned_summary": learned_summary,
-        },
-    )
-    return JSONResponse(
-        {"ok": True, "feedback_id": feedback_id, "task_public_id": task_public_id}
     )
 
 
@@ -2801,13 +2465,8 @@ def _inspiration_detail_page_context(space_id: int | None) -> dict:
                 .all()
             )
             resources = _inspiration_non_deleted_resources(s, int(space_id))
-            owner_sid = _inspiration_terminal_space_id(int(space_id))
-            terminals = (
-                s.query(RemoteTerminalSession)
-                .filter(RemoteTerminalSession.space_id == owner_sid)
-                .filter(RemoteTerminalSession.status != "closed")
-                .order_by(RemoteTerminalSession.id.asc())
-                .all()
+            terminals = terminal_service.list_terminals(
+                s, terminal_service.owner_for_inspiration_space(int(space_id))
             )
             if terminals:
                 inspiration_terminal = _inspiration_terminal_payload(
@@ -2854,475 +2513,24 @@ def inspiration_detail_page(request: Request, space_id: int) -> HTMLResponse:
     )
 
 
-def _memory_dir() -> Path:
-    env = os.environ.get("OPENFOCUS_MEMORY_DIR")
-    if env:
-        p = Path(env).expanduser().resolve()
-    else:
-        p = (Path(__file__).resolve().parent.parent / ".data" / "memory").resolve()
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _read_text(p: Path) -> str:
-    try:
-        return p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
-
-
-@app.get("/memory", response_class=HTMLResponse)
-def memory_view(request: Request) -> HTMLResponse:
-    _memory_maintenance()
-    mem_dir = _memory_dir()
-    state = _memory_load_state_unlocked()
-    audit_files = _memory_collect_file_items(_memory_audit_root(), "**/*.md")
-    daily_files = _memory_collect_file_items(_memory_daily_root(), "*.md")
-    selected_tab = str(request.query_params.get("tab") or "audit").strip().lower()
-    if selected_tab not in {"audit", "daily", "long_term"}:
-        selected_tab = "audit"
-    selected_audit = str(request.query_params.get("audit_file") or "").strip()
-    selected_daily = str(request.query_params.get("daily_file") or "").strip()
-    if not selected_audit and audit_files:
-        selected_audit = str(audit_files[0].get("rel_path") or "")
-    if not selected_daily and daily_files:
-        selected_daily = str(daily_files[0].get("rel_path") or "")
-    audit_content = _memory_read_selected_file(selected_audit)
-    daily_content = _memory_read_selected_file(selected_daily)
-    long_term_path = _memory_long_term_path()
-    long_term_memory = _memory_read_text(long_term_path)
-    if not long_term_memory:
-        long_term_memory = _read_text(mem_dir / "user_memory.md")
-    return templates.TemplateResponse(
-        request,
-        "memory.html",
-        {
-            "selected_tab": selected_tab,
-            "audit_files": audit_files,
-            "daily_files": daily_files,
-            "selected_audit": selected_audit,
-            "selected_daily": selected_daily,
-            "audit_content": audit_content,
-            "daily_content": daily_content,
-            "long_term_memory": long_term_memory,
-            "state": state,
-        },
-    )
-
-
-@app.post("/memory/audit/summary", include_in_schema=False)
-def memory_audit_summary() -> RedirectResponse:
-    now = _utcnow()
-    _memory_force_audit_summary(now)
-    return RedirectResponse(url="/memory?tab=audit", status_code=303)
-
-
-@app.get("/companions", response_class=HTMLResponse)
-def companions_view(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "companions.html", {})
-
-
 def _companion_display_status(c: Companion, *, now: dt.datetime | None = None) -> str:
     return str(companion_service.display_status(c, COMPANION_GRPC, now=now) or "")
 
 
-@app.post("/api/companions/register")
-def companion_register(payload: dict) -> dict:
-    return companion_service.register_companion(payload)
-
-
-@app.get("/api/companions")
-def companions_list(limit: int = 50) -> dict:
-    return companion_service.list_companions(COMPANION_GRPC, limit=limit)
-
-
-@app.delete("/api/companions/{companion_id:int}")
-def companion_delete(companion_id: int) -> dict:
-    return companion_service.delete_companion(COMPANION_GRPC, companion_id)
-
-
-@app.post("/api/companions/{companion_id:int}/pair")
-async def companion_pair(companion_id: int, payload: dict) -> dict:
-    return await companion_service.pair_companion(COMPANION_GRPC, companion_id, payload)
-
-
-@app.post("/api/companions/{companion_id:int}/pairing_code")
-async def companion_pairing_code(companion_id: int) -> dict:
-    return await companion_service.request_pairing_code(COMPANION_GRPC, companion_id)
-
-
-@app.post("/api/companions/{companion_id:int}/choose_directory")
-async def companion_choose_directory_proxy(companion_id: int) -> dict:
-    return await companion_service.choose_directory(COMPANION_GRPC, companion_id)
-
-
-@app.post("/memory/save", include_in_schema=False)
-def memory_save(
-    long_term_memory: str = Form(""),
-    user_memory: str = Form(""),
-    user_card: str = Form(""),
-) -> RedirectResponse:
-    mem_dir = _memory_dir()
-    if user_card:
-        (mem_dir / "user_card.md").write_text(user_card or "", encoding="utf-8")
-    content = long_term_memory if str(long_term_memory or "").strip() else user_memory
-    _memory_long_term_path().write_text(content or "", encoding="utf-8")
-    if user_memory:
-        (mem_dir / "user_memory.md").write_text(user_memory or "", encoding="utf-8")
-    return RedirectResponse(url="/memory?tab=long_term", status_code=303)
-
-
-@app.post("/api/agent/events")
-def agent_report_event(payload: AgentEventIn) -> dict:
-    """Agent 上报任务进度/状态。
-
-    每次调用都会落一条 event 到数据库，便于后续做历史、指标与推荐。
-    """
-    with session_scope() as s:
-        ev = Event(
-            kind=payload.kind,
-            agent=payload.agent,
-            task_id=payload.task_id,
-            payload=payload.payload,
-        )
-        s.add(ev)
-
-        s.flush()  # 获取自增 id
-        event_id = ev.id
-        created_at = ev.created_at
-    _try_audit_memory(
-        kind=f"event.{payload.kind}",
-        source=f"agent:{payload.agent}",
-        summary=f"Agent reported event `{payload.kind}`.",
-        detail=json.dumps(payload.payload or {}, ensure_ascii=False, indent=2),
-        task_public_id=payload.task_id,
-        metadata={"event_id": event_id, "created_at": _memory_iso(created_at)},
-        occurred_at=created_at,
-    )
-    return {"id": event_id, "created_at": created_at}
-
-
-@app.get("/api/events/recent")
-def recent_events(limit: int = 30) -> dict:
-    """近期事件（用于 Dashboard 事件流）。"""
-
-    limit = max(1, min(int(limit or 30), 200))
-    with session_scope() as s:
-        # 过滤噪声事件：Companion 的连接/断连不展示
-        exclude = {"companion.connected", "companion.disconnected"}
-        evs_raw = s.query(Event).order_by(Event.id.desc()).limit(limit * 3).all()
-        evs = [ev for ev in evs_raw if (ev.kind or "") not in exclude][:limit]
-
-        # 只对真实存在的任务提供“打开”能力，避免 UI 出现能点但打不开的事件。
-        cand_task_ids = [ev.task_id for ev in evs if ev.task_id]
-        existing_task_ids: set[str] = set()
-        if cand_task_ids:
-            existing_task_ids = {
-                r[0]
-                for r in s.query(Task.public_id)
-                .filter(Task.public_id.in_(cand_task_ids))
-                .all()
-            }
-
-    items: list[dict] = []
-    for ev in evs:
-        payload = ev.payload or {}
-        task_public_id = (
-            ev.task_id if (ev.task_id and ev.task_id in existing_task_ids) else None
-        )
-        items.append(
-            {
-                "id": ev.id,
-                "kind": ev.kind,
-                "kind_label": _event_kind_label(ev.kind, payload),
-                "source_label": _event_source_label(ev.agent),
-                "task_id": ev.task_id,
-                "task_public_id": task_public_id,
-                "created_at": ev.created_at.isoformat()
-                if hasattr(ev.created_at, "isoformat")
-                else str(ev.created_at),
-                "summary": _event_summary(ev.kind, payload),
-            }
-        )
-    return {"items": items}
-
-
-@app.get("/api/calendar/month")
-def calendar_month(ym: str | None = None) -> dict:
-    """Calendar by month.
-
-    - Grid view: show tasks completed per day (based on Task.completed_at)
-    - Swimlane view: show goals timeline within the month (created_at -> due_date)
-    """
-
-    today = dt.date.today()
-    raw = str(ym or "").strip()
-    try:
-        if raw:
-            parts = raw.split("-")
-            if len(parts) != 2:
-                raise ValueError("ym must be YYYY-MM")
-            y = int(parts[0])
-            m = int(parts[1])
-        else:
-            y, m = int(today.year), int(today.month)
-        if not (1 <= m <= 12):
-            raise ValueError("month out of range")
-        # Keep a reasonable bound to avoid accidental giant queries.
-        if y < 1970 or y > 2100:
-            raise ValueError("year out of range")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    month_start = dt.date(y, m, 1)
-    if m == 12:
-        month_end = dt.date(y + 1, 1, 1)
-    else:
-        month_end = dt.date(y, m + 1, 1)
-
-    start_dt = dt.datetime(
-        month_start.year, month_start.month, month_start.day, tzinfo=dt.timezone.utc
-    )
-    end_dt = dt.datetime(
-        month_end.year, month_end.month, month_end.day, tzinfo=dt.timezone.utc
-    )
-
-    with session_scope() as s:
-        done_tasks = (
-            s.query(Task)
-            .filter(Task.completed_at.isnot(None))
-            .filter(Task.completed_at >= start_dt)
-            .filter(Task.completed_at < end_dt)
-            .all()
-        )
-
-        # Goals for swimlane + goal tasks view.
-        goals = s.query(Goal).order_by(Goal.id.asc()).all()
-        all_tasks = s.query(Task).order_by(Task.id.asc()).all()
-
-    goal_by_id: dict[int, Goal] = {int(g.id): g for g in goals}
-    tasks_by_goal: dict[int, list[Task]] = {}
-    for t in all_tasks:
-        tasks_by_goal.setdefault(int(t.goal_id), []).append(t)
-
-    days: dict[str, list[dict]] = {}
-    for t in done_tasks:
-        if not t.completed_at:
-            continue
-        d = t.completed_at.astimezone(dt.timezone.utc).date().isoformat()
-        g = goal_by_id.get(int(t.goal_id))
-        days.setdefault(d, []).append(
-            {
-                "task_public_id": t.public_id,
-                "task_title": t.title,
-                "goal_id": int(t.goal_id),
-                "goal_title": (g.title if g is not None else ""),
-                "completed_at": t.completed_at.isoformat()
-                if hasattr(t.completed_at, "isoformat")
-                else str(t.completed_at),
-            }
-        )
-
-    goals_out: list[dict] = []
-    for g in goals:
-        gid = int(g.id)
-        ts = tasks_by_goal.get(gid, [])
-        done_n = sum(1 for t in ts if (t.status or "").strip() == "done")
-        goals_out.append(
-            {
-                "id": gid,
-                "title": g.title,
-                "status": g.status,
-                "created_at": g.created_at.isoformat()
-                if hasattr(g.created_at, "isoformat")
-                else str(g.created_at),
-                "due_date": g.due_date.isoformat()
-                if hasattr(g.due_date, "isoformat")
-                else str(g.due_date),
-                "total_tasks": len(ts),
-                "done_tasks": done_n,
-                "tasks": [
-                    {
-                        "id": int(t.id),
-                        "public_id": t.public_id,
-                        "title": t.title,
-                        "status": t.status,
-                        "completed_at": t.completed_at.isoformat()
-                        if (t.completed_at and hasattr(t.completed_at, "isoformat"))
-                        else (str(t.completed_at) if t.completed_at else None),
-                    }
-                    for t in ts
-                ],
-            }
-        )
-
-    return {
-        "ok": True,
-        "ym": f"{y:04d}-{m:02d}",
-        "month_start": month_start.isoformat(),
-        "month_end": month_end.isoformat(),
-        "days": days,
-        "goals": goals_out,
-    }
-
-
-@app.post("/api/skills/focus_report")
-def focus_report(report: FocusReportIn) -> dict:
-    """Skill: focus_report
-
-    用于外部 agent 上报任务执行情况。
-    - 每次上报都会作为 Event 持久化（kind=skill.focus_report）
-    - 注意：上报“完成”不等于真实完成，是否完成必须由人确认（详情页按钮）。
-    """
-    payload = {
-        "task_name": report.task_name,
-        "status": report.status,
-        "goal_id": report.goal_id,
-        "task_public_id": report.task_public_id,
-        "user_prompt": report.user_prompt,
-        "assistant_response": report.assistant_response,
-        "metadata": report.metadata,
-    }
-
-    with session_scope() as s:
-        s.add(
-            Event(
-                kind="skill.focus_report",
-                agent=report.agent,
-                task_id=report.task_public_id,
-                payload=payload,
-            )
-        )
-        s.flush()
-    _try_audit_memory(
-        kind="skill.focus_report",
-        source=f"agent:{report.agent}",
-        summary=f"Focus report for task `{report.task_name}` with status `{report.status}`.",
-        detail=json.dumps(payload, ensure_ascii=False, indent=2),
-        goal_id=report.goal_id,
-        task_public_id=report.task_public_id,
-        metadata={"status": report.status},
-    )
-    return {"ok": True, "task_updated": None}
-
-
 def _event_summary(kind: str, payload: object) -> str:
-    """将 Event 转成用于 UI 展示的短摘要。"""
-
-    if kind == "task.confirmed_done":
-        return "已人工确认完成"
-    if kind == "goal.confirmed_done_by_user":
-        return "confirm done by user"
-    if kind == "goal.reopened_by_user":
-        return "reopen by user"
-    if kind == "task.reopened":
-        return "已重新打开（从完成状态恢复）"
-    if kind == "next_move.not_for_now":
-        return "Not for now"
-    if kind == "next_move.feedback":
-        return "Next Move feedback"
-
-    if kind == "companion.pairing_code.requested":
-        return "申请配对码"
-    if kind == "companion.pair.attempted":
-        return "提交认证码"
-    if kind == "companion.paired":
-        return "配对成功"
-    if kind == "companion.disconnected":
-        return "失去连接"
-    if kind == "companion.deleted":
-        return "已删除 Companion"
-
-    if isinstance(payload, dict):
-        msg = payload.get("message")
-        if isinstance(msg, str) and msg.strip():
-            return msg.strip()
-
-        # focus_report 的 status 需要做可读化
-        if kind == "skill.focus_report":
-            tn = payload.get("task_name")
-            st = payload.get("status")
-            st_label = _status_label(st)
-            if tn and st_label:
-                return f"{tn} · {st_label}（待确认）"
-            if st_label:
-                return f"{st_label}（待确认）"
-
-        # 常见上报：percent 进度
-        # 产品约束：进度仅二元（完成/未完成），不要展示 80% 等百分比。
-        if kind in {"task.progress", "task.started", "task.completed"}:
-            if kind == "task.started":
-                return "开始执行"
-            if kind == "task.completed":
-                return "上报完成（待确认）"
-            return "有新进展（待确认）"
-
-        # 避免直接暴露 status=... 这种调试风格
-        st2 = payload.get("status")
-        if isinstance(st2, str) and st2.strip():
-            st_label2 = _status_label(st2)
-            if st_label2:
-                return st_label2
-
-    # 兜底：返回可读 kind_label
-    return _event_kind_label(kind, payload)
+    return event_service.event_summary(kind, payload)
 
 
 def _status_label(status: object) -> str:
-    x = str(status or "").strip().lower()
-    if not x:
-        return ""
-    if x in {"succeeded", "success", "ok", "done", "completed"}:
-        return "已完成"
-    if x in {"failed", "fail", "error"}:
-        return "失败"
-    if x in {"running", "in_progress", "progress"}:
-        return "进行中"
-    return str(status).strip()
+    return event_service.status_label(status)
 
 
 def _event_source_label(agent: str | None) -> str:
-    a = (agent or "").strip()
-    if not a:
-        return "来源：未知"
-    if a.lower() in {"ui", "web", "webui"} or a.lower().endswith("/ui"):
-        return "来源：Web 操作"
-    return f"来源：Agent（{a}）"
+    return event_service.event_source_label(agent)
 
 
 def _event_kind_label(kind: str, payload: object) -> str:
-    # 面向人：把内部事件类型翻译成更容易理解的短标题
-    if kind == "skill.focus_report":
-        return "执行结果上报"
-    if kind == "task.completed":
-        return "上报完成"
-    if kind == "task.progress":
-        return "进度上报"
-    if kind == "task.started":
-        return "开始执行"
-    if kind == "task.reopened":
-        return "重新打开"
-    if kind == "task.confirmed_done":
-        return "人工确认完成"
-    if kind == "next_move.not_for_now":
-        return "Next Move"
-    if kind == "next_move.feedback":
-        return "Next Move"
-    if kind == "goal.confirmed_done_by_user":
-        return "confirm done by user"
-    if kind == "goal.reopened_by_user":
-        return "reopen by user"
-    if kind == "companion.pairing_code.requested":
-        return "Companion 配对"
-    if kind == "companion.pair.attempted":
-        return "Companion 配对"
-    if kind == "companion.paired":
-        return "Companion 配对"
-    if kind == "companion.disconnected":
-        return "Companion 连接"
-    if kind == "companion.deleted":
-        return "Companion 管理"
-    return kind
+    return event_service.event_kind_label(kind, payload)
 
 
 @app.get("/tasks/{task_public_id}/agent_space", response_class=HTMLResponse)
@@ -3378,7 +2586,7 @@ def get_agent_space(task_public_id: str) -> dict:
 def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict:
     root_path = str((payload.root_path or "").strip())
     if not root_path:
-        raise HTTPException(status_code=400, detail="root_path 不能为空")
+        raise HTTPException(status_code=400, detail="root_path is required")
 
     with session_scope() as s:
         task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
@@ -3387,9 +2595,11 @@ def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict
 
         comp = s.get(Companion, int(payload.companion_id))
         if comp is None:
-            raise HTTPException(status_code=400, detail="Companion 不存在")
+            raise HTTPException(status_code=400, detail="Companion not found")
         if comp.status != "active" or not (comp.auth_token or "").strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+            raise HTTPException(
+                status_code=400, detail="Companion is not paired or unavailable"
+            )
 
         existing = (
             s.query(AgentSpace)
@@ -3436,10 +2646,8 @@ async def delete_agent_space(task_public_id: str) -> dict:
         sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
         sess_ids = [ss.session_id for ss in sessions]
 
-        terms = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == space.id)
-            .all()
+        terms = terminal_service.list_terminals(
+            s, terminal_service.owner_for_agent_space(int(space.id))
         )
         term_ids = [t.terminal_id for t in terms]
 
@@ -3478,13 +2686,9 @@ async def delete_agent_space(task_public_id: str) -> dict:
                 synchronize_session=False
             )
 
-        # 先清理终端输出日志，再清理 session 元信息
-        s.query(RemoteTerminalOutput).filter(
-            RemoteTerminalOutput.space_id == space.id
-        ).delete(synchronize_session=False)
-        s.query(RemoteTerminalSession).filter(
-            RemoteTerminalSession.space_id == space.id
-        ).delete(synchronize_session=False)
+        terminal_service.delete_owner_terminal_records(
+            s, owner=terminal_service.owner_for_agent_space(int(space.id))
+        )
         s.delete(space)
 
     return {"ok": True}
@@ -3542,10 +2746,6 @@ def _load_space_and_optional_companion(
 
 def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
     return companion_service.require_online(COMPANION_GRPC, companion=comp)
-
-
-def _inspiration_terminal_space_id(space_id: int) -> int:
-    return inspiration_terminal_bridge.terminal_space_id(int(space_id))
 
 
 def _select_online_companion(
@@ -3660,15 +2860,20 @@ async def inspiration_terminals_new(space_id: int, request: Request) -> dict:
             timeout_seconds=10.0,
         )
     except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion terminal failed to start: {e}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion terminal failed to start: {e}"
+        )
     real_tid = (res.terminal_id or "").strip() or terminal_id
     backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
     connect_url = str(getattr(res, "connect_url", "") or "").strip()
     if backend == "ttyd" and not connect_url:
         raise HTTPException(
-            status_code=502, detail="Companion Terminal 启动失败：missing connect_url"
+            status_code=502,
+            detail="Companion terminal failed to start: missing connect_url",
         )
     with session_scope() as s:
         owner = terminal_service.owner_for_inspiration_space(int(space_id))
@@ -3698,18 +2903,15 @@ async def inspiration_terminals_new(space_id: int, request: Request) -> dict:
 async def inspiration_terminals_inject(
     space_id: int, terminal_id: str, payload: dict
 ) -> dict:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            t = terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         comp_id = int(t.companion_id or 0)
     conn = _inspiration_terminal_conn(comp_id)
@@ -3747,9 +2949,9 @@ async def inspiration_terminals_rename(
         raise HTTPException(status_code=400, detail="terminal_id is required")
     raw_name = str((payload or {}).get("name") or "").strip()
     if not raw_name:
-        raise HTTPException(status_code=400, detail="name 不能为空")
+        raise HTTPException(status_code=400, detail="name is required")
     if len(raw_name) > 128:
-        raise HTTPException(status_code=400, detail="name 过长（<=128）")
+        raise HTTPException(status_code=400, detail="name is too long (<=128)")
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
         owner = terminal_service.owner_for_inspiration_space(int(space_id))
@@ -3760,7 +2962,7 @@ async def inspiration_terminals_rename(
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         except terminal_service.TerminalNameConflict:
-            raise HTTPException(status_code=400, detail="name 已存在")
+            raise HTTPException(status_code=400, detail="name already exists")
     return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
 
@@ -3768,18 +2970,15 @@ async def inspiration_terminals_rename(
 async def inspiration_terminals_agent_mode(
     space_id: int, terminal_id: str, payload: dict
 ) -> dict:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
     enabled = bool((payload or {}).get("enabled"))
     prefix = str((payload or {}).get("prefix") or "").strip()
@@ -3794,18 +2993,15 @@ async def inspiration_terminals_agent_mode(
 async def inspiration_terminals_mouse_mode(
     space_id: int, terminal_id: str, payload: dict
 ) -> dict:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            t = terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         comp_id = int(t.companion_id or 0)
     conn = _inspiration_terminal_conn(comp_id)
@@ -3853,7 +3049,11 @@ async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
         conn = _inspiration_terminal_conn(comp_id)
         await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
     with session_scope() as s:
-        terminal_service.delete_terminal_record(s, terminal_id=tid)
+        terminal_service.delete_terminal_record(
+            s,
+            owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+            terminal_id=tid,
+        )
     _TTYD_AGENT_MODE.pop(tid, None)
     return {"ok": True}
 
@@ -3861,18 +3061,15 @@ async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
 def _load_inspiration_ttyd_terminal(
     space_id: int, terminal_id: str
 ) -> tuple[InspirationSpace, str]:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
         space = _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            t = terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         backend = str(getattr(t, "backend", "") or "ttyd").strip()
         connect_url = str(getattr(t, "connect_url", "") or "").strip()
@@ -3926,7 +3123,9 @@ async def terminals_new(space_id: int) -> dict:
             timeout_seconds=10.0,
         )
     except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion Terminal 启动失败：{e}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion terminal failed to start: {e}"
+        )
 
     real_tid = (res.terminal_id or "").strip() or terminal_id
     backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
@@ -3971,9 +3170,9 @@ async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> di
 
     raw_name = str((payload or {}).get("name") or "").strip()
     if not raw_name:
-        raise HTTPException(status_code=400, detail="name 不能为空")
+        raise HTTPException(status_code=400, detail="name is required")
     if len(raw_name) > 128:
-        raise HTTPException(status_code=400, detail="name 过长（<=128）")
+        raise HTTPException(status_code=400, detail="name is too long (<=128)")
 
     with session_scope() as s:
         owner = terminal_service.owner_for_agent_space(int(sp.id))
@@ -3984,7 +3183,7 @@ async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> di
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         except terminal_service.TerminalNameConflict:
-            raise HTTPException(status_code=400, detail="name 已存在")
+            raise HTTPException(status_code=400, detail="name already exists")
 
     return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
@@ -4042,12 +3241,10 @@ async def terminals_agent_mode(space_id: int, terminal_id: str, payload: dict) -
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
     enabled = bool((payload or {}).get("enabled"))
     prefix = str((payload or {}).get("prefix") or "").strip()
@@ -4066,12 +3263,10 @@ async def terminals_mouse_mode(space_id: int, terminal_id: str, payload: dict) -
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
     enabled = bool((payload or {}).get("enabled"))
     try:
@@ -4092,12 +3287,10 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
         raise HTTPException(status_code=400, detail="terminal_id is required")
 
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
 
     # best-effort stop on Companion (offline 也允许 close：只保证 OpenFocus 侧不再展示)
@@ -4111,7 +3304,11 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
 
     with session_scope() as s:
         # 关闭即删除记录（避免刷新后重新出现 tab）
-        terminal_service.delete_terminal_record(s, terminal_id=tid)
+        terminal_service.delete_terminal_record(
+            s,
+            owner=terminal_service.owner_for_agent_space(int(sp.id)),
+            terminal_id=tid,
+        )
     _TTYD_AGENT_MODE.pop(tid, None)
 
     _try_audit_memory(
@@ -4132,12 +3329,10 @@ def _load_ttyd_terminal(space_id: int, terminal_id: str) -> tuple[object, str]:
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            t = terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         backend = str(getattr(t, "backend", "") or "ttyd").strip()
         connect_url = str(getattr(t, "connect_url", "") or "").strip()
@@ -4461,12 +3656,10 @@ def terminals_history(
     max_bytes = max(1024, min(int(max_bytes or 0), _TERM_HISTORY_PUBLIC_MAX_BYTES))
 
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
 
         rows = (
@@ -4609,7 +3802,9 @@ async def agent_sessions_new(space_id: int) -> dict:
             timeout_seconds=10.0,
         )
     except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion Agent 启动失败：{e}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion agent failed to start: {e}"
+        )
 
     real_sid = (res.session_id or "").strip() or session_id
     with session_scope() as s:
@@ -4693,7 +3888,9 @@ async def agent_session_terminate(space_id: int, session_id: str) -> dict:
     try:
         await conn.request_agent_terminate(session_id=sid, timeout_seconds=10.0)
     except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion Agent 终止失败：{e}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion agent failed to terminate: {e}"
+        )
 
     with session_scope() as s:
         sess = (
@@ -4799,7 +3996,7 @@ async def agent_session_send(request: Request, space_id: int, session_id: str) -
                 "error": str(e),
             },
         )
-        raise HTTPException(status_code=502, detail=f"Companion Agent 发送失败：{e}")
+        raise HTTPException(status_code=502, detail=f"Companion agent send failed: {e}")
 
     return {"ok": True, "request_id": rid}
 

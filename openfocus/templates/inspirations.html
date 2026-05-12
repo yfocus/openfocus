@@ -81,7 +81,7 @@
         const title = String(document.getElementById('insp-title')?.value || '').trim();
         const initialMessage = String(document.getElementById('insp-message')?.value || '').trim();
         if(!title && !initialMessage){
-          toast('请填写 Title 或 First Note');
+          toast('Enter a Title or First Note');
           return;
         }
         btn.disabled = true;

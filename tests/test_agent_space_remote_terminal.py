@@ -49,7 +49,7 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
             _term_unsubscribe,
             app,
         )
-        from openfocus.models import Base, Goal, Task
+        from openfocus.models import Base, Goal, RemoteTerminalSession, Task
 
         reset_engine()
         Base.metadata.create_all(bind=get_engine())
@@ -101,6 +101,17 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                 assert tid
                 name = r.json()["terminal"]["name"]
                 assert name
+
+                with session_scope() as s:
+                    row = (
+                        s.query(RemoteTerminalSession)
+                        .filter(RemoteTerminalSession.terminal_id == tid)
+                        .one()
+                    )
+                    assert row.owner_type == "agent_space"
+                    assert row.owner_id == space_id
+                    assert row.space_id == space_id
+                    assert row.task_public_id == task_pid
 
                 r = await client.get(f"/api/agent_spaces/{space_id}/terminals")
                 assert r.status_code == 200

@@ -82,3 +82,31 @@ def test_memory_service_rejects_path_traversal(monkeypatch, tmp_path):
         assert "invalid memory path" in str(exc)
     else:
         raise AssertionError("path traversal should be rejected")
+
+
+def test_memory_service_force_summary_and_long_term_no_placeholder(
+    monkeypatch, tmp_path
+):
+    from openfocus.domains.memory import service
+
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+    cfg = service.MemoryConfig(
+        audit_window_seconds=3600, audit_max_entries=2000, audit_ttl_days=7
+    )
+    now = dt.datetime(2026, 5, 12, 9, 0, 0, tzinfo=dt.timezone.utc)
+    service.append_audit_entry(
+        kind="goal.created",
+        source="web",
+        summary="Created a focused goal",
+        occurred_at=now,
+        cfg=cfg,
+    )
+
+    service.force_audit_summary(now + dt.timedelta(minutes=1), cfg=cfg)
+
+    daily_files = sorted((tmp_path / "memory" / "daily").glob("*.md"))
+    assert daily_files
+    assert "Created a focused goal" in daily_files[0].read_text(encoding="utf-8")
+    state = service.load_state_unlocked()
+    assert int((state.get("current_audit") or {}).get("entries") or 0) == 0
+    assert service.extract_long_term_items("2026-05-12", "ordinary day") == []

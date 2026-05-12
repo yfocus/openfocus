@@ -9,6 +9,18 @@ from fastapi import HTTPException, Response
 from ...companion.grpc import CompanionGrpcError
 from ...db import session_scope
 from ...models import AgentSpace, Companion, Event
+from .repository import CompanionAgentSpaceRepository, CompanionRepository
+
+COMPANION_STATUS_PENDING_CERTIFICATION = "pending_certification"
+COMPANION_STATUS_ACTIVE = "active"
+COMPANION_STATUS_OFFLINE = "offline"
+COMPANION_STATUSES = frozenset(
+    {
+        COMPANION_STATUS_PENDING_CERTIFICATION,
+        COMPANION_STATUS_ACTIVE,
+        COMPANION_STATUS_OFFLINE,
+    }
+)
 
 
 def utcnow() -> dt.datetime:
@@ -27,14 +39,16 @@ def display_status(
 
     if companion is None:
         return None
-    if (companion.status or "").strip() == "pending_certification" or not (
+    if (
+        companion.status or ""
+    ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
         companion.auth_token or ""
     ).strip():
-        return "pending_certification"
+        return COMPANION_STATUS_PENDING_CERTIFICATION
 
     companion_id = int(getattr(companion, "id", 0) or 0)
     online = bool(companion_id and (grpc_server.registry.get(companion_id) is not None))
-    return "active" if online else "offline"
+    return COMPANION_STATUS_ACTIVE if online else COMPANION_STATUS_OFFLINE
 
 
 def register_companion(payload: dict) -> dict:
@@ -50,24 +64,20 @@ def register_companion(payload: dict) -> dict:
 
     now = utcnow()
     with session_scope() as session:
-        companion = (
-            session.query(Companion)
-            .filter(Companion.device_id == device_id)
-            .one_or_none()
-        )
+        repo = CompanionRepository(session)
+        companion = repo.get_by_device_id(device_id)
         if companion is None:
             companion = Companion(device_id=device_id, base_url=base_url, name=name)
-            session.add(companion)
-            session.flush()
+            repo.add(companion)
         else:
             companion.base_url = base_url
             if name:
                 companion.name = name
         companion.last_seen_at = now
         companion.status = (
-            "active"
+            COMPANION_STATUS_ACTIVE
             if (companion.auth_token or "").strip()
-            else "pending_certification"
+            else COMPANION_STATUS_PENDING_CERTIFICATION
         )
         session.add(companion)
         companion_id = companion.id
@@ -79,26 +89,20 @@ def register_companion(payload: dict) -> dict:
 def list_companions(grpc_server: Any, *, limit: int = 50) -> dict:
     limit = max(1, min(int(limit or 50), 200))
     with session_scope() as session:
-        companions = (
-            session.query(Companion).order_by(Companion.id.desc()).limit(limit).all()
-        )
+        companions = CompanionRepository(session).list_recent(limit=limit)
         companion_ids = [companion.id for companion in companions]
         spaces_by_companion: dict[int, list[dict]] = {
             int(companion_id): [] for companion_id in companion_ids
         }
-        if companion_ids:
-            spaces = (
-                session.query(AgentSpace)
-                .filter(AgentSpace.companion_id.in_(companion_ids))
-                .order_by(AgentSpace.id.desc())
-                .all()
-            )
-            for space in spaces:
-                companion_id = int(getattr(space, "companion_id", 0) or 0)
-                if companion_id in spaces_by_companion:
-                    spaces_by_companion[companion_id].append(
-                        {"id": space.id, "task_public_id": space.task_public_id}
-                    )
+        spaces = CompanionAgentSpaceRepository(session).list_by_companion_ids(
+            companion_ids
+        )
+        for space in spaces:
+            companion_id = int(getattr(space, "companion_id", 0) or 0)
+            if companion_id in spaces_by_companion:
+                spaces_by_companion[companion_id].append(
+                    {"id": space.id, "task_public_id": space.task_public_id}
+                )
 
     items: list[dict] = []
     for companion in companions:
@@ -134,22 +138,21 @@ def delete_companion(grpc_server: Any, companion_id: int) -> dict:
         pass
 
     with session_scope() as session:
-        companion = session.get(Companion, companion_id)
+        companion_repo = CompanionRepository(session)
+        companion = companion_repo.get(companion_id)
         if companion is None:
             raise HTTPException(status_code=404, detail="Companion not found")
         device_id = str(companion.device_id or "")
 
-        spaces = (
-            session.query(AgentSpace)
-            .filter(AgentSpace.companion_id == companion_id)
-            .all()
+        spaces = CompanionAgentSpaceRepository(session).list_by_companion_id(
+            companion_id
         )
         unbound = len(spaces)
         for space in spaces:
             space.companion_id = None
             session.add(space)
 
-        session.delete(companion)
+        companion_repo.delete(companion)
         session.add(
             Event(
                 kind="companion.deleted",
@@ -171,13 +174,15 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
     if not code:
         raise HTTPException(status_code=400, detail="code is required")
     if len(code) != 10:
-        raise HTTPException(status_code=400, detail="认证码必须为 10 位")
+        raise HTTPException(
+            status_code=400, detail="Pairing code must be 10 characters"
+        )
 
     now = utcnow()
     minute_start = now.replace(second=0, microsecond=0)
 
     with session_scope() as session:
-        companion = session.get(Companion, int(companion_id))
+        companion = CompanionRepository(session).get(int(companion_id))
         if companion is None:
             raise HTTPException(status_code=404, detail="Companion not found")
 
@@ -195,7 +200,8 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
             companion.pair_attempt_count = 0
         if companion.pair_attempt_count >= 10:
             raise HTTPException(
-                status_code=429, detail="本分钟认证尝试次数已达上限（10 次）"
+                status_code=429,
+                detail="Pairing attempt limit reached for this minute (10 attempts)",
             )
         companion.pair_attempt_count += 1
         session.add(companion)
@@ -213,19 +219,19 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
     conn = grpc_server.registry.get(int(companion_id))
     if conn is None:
         raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+            status_code=502, detail="Companion is not online (no gRPC connection)"
         )
     try:
         token = await conn.request_pair(code, timeout_seconds=10.0)
     except CompanionGrpcError as exc:
-        raise HTTPException(status_code=502, detail=f"Companion 配对失败：{exc}")
+        raise HTTPException(status_code=502, detail=f"Companion pairing failed: {exc}")
 
     with session_scope() as session:
-        companion = session.get(Companion, int(companion_id))
+        companion = CompanionRepository(session).get(int(companion_id))
         if companion is None:
             raise HTTPException(status_code=404, detail="Companion not found")
         companion.auth_token = token
-        companion.status = "active"
+        companion.status = COMPANION_STATUS_ACTIVE
         companion.last_seen_at = now
         session.add(companion)
         session.add(
@@ -241,7 +247,7 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
 
 async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
     with session_scope() as session:
-        companion = session.get(Companion, int(companion_id))
+        companion = CompanionRepository(session).get(int(companion_id))
         if companion is None:
             raise HTTPException(status_code=404, detail="Companion not found")
         device_id = companion.device_id
@@ -255,13 +261,13 @@ async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
             )
         )
 
-        if display_status(companion, grpc_server) == "offline":
+        if display_status(companion, grpc_server) == COMPANION_STATUS_OFFLINE:
             raise HTTPException(status_code=400, detail="Companion offline")
 
     conn = grpc_server.registry.get(int(companion_id))
     if conn is None:
         raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+            status_code=502, detail="Companion is not online (no gRPC connection)"
         )
 
     try:
@@ -269,30 +275,38 @@ async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
             force_new=True, timeout_seconds=10.0
         )
     except CompanionGrpcError as exc:
-        raise HTTPException(status_code=502, detail=f"Companion 获取配对码失败：{exc}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion failed to get pairing code: {exc}"
+        )
 
     return {"ok": True, "expires_at": expires_at}
 
 
 async def choose_directory(grpc_server: Any, companion_id: int) -> dict:
     with session_scope() as session:
-        companion = session.get(Companion, int(companion_id))
+        companion = CompanionRepository(session).get(int(companion_id))
         if companion is None:
             raise HTTPException(status_code=404, detail="Companion not found")
-        if (companion.status or "").strip() == "pending_certification" or not (
+        if (
+            companion.status or ""
+        ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
             companion.auth_token or ""
         ).strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+            raise HTTPException(
+                status_code=400, detail="Companion is not paired or unavailable"
+            )
 
     conn = grpc_server.registry.get(int(companion_id))
     if conn is None:
         raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+            status_code=502, detail="Companion is not online (no gRPC connection)"
         )
     try:
         path = await conn.request_choose_directory(timeout_seconds=30.0)
     except CompanionGrpcError as exc:
-        raise HTTPException(status_code=502, detail=f"Companion 目录选择失败：{exc}")
+        raise HTTPException(
+            status_code=502, detail=f"Companion directory selection failed: {exc}"
+        )
     return {"ok": True, "path": path}
 
 
@@ -311,15 +325,21 @@ def load_space_and_optional_companion(
 
 def require_online(grpc_server: Any, *, companion: Companion | None):
     if companion is None:
-        raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-    if (companion.status or "").strip() == "pending_certification" or not (
+        raise HTTPException(
+            status_code=400, detail="AgentSpace is not bound to a Companion"
+        )
+    if (
+        companion.status or ""
+    ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
         companion.auth_token or ""
     ).strip():
-        raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
+        raise HTTPException(
+            status_code=400, detail="Companion is not paired or unavailable"
+        )
     conn = grpc_server.registry.get(int(companion.id))
     if conn is None:
         raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
+            status_code=502, detail="Companion is not online (no gRPC connection)"
         )
     return conn
 
@@ -328,12 +348,16 @@ def select_online(
     grpc_server: Any, companion_id: int | None = None
 ) -> tuple[Companion, Any]:
     with session_scope() as session:
-        query = session.query(Companion)
+        repo = CompanionRepository(session)
         if companion_id:
-            query = query.filter(Companion.id == int(companion_id))
-        companions = query.order_by(Companion.id.desc()).all()
+            companion = repo.get(int(companion_id))
+            companions = [companion] if companion is not None else []
+        else:
+            companions = repo.list_all_recent()
         for companion in companions:
-            if (companion.status or "").strip() == "pending_certification" or not (
+            if (
+                companion.status or ""
+            ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
                 companion.auth_token or ""
             ).strip():
                 continue
@@ -346,9 +370,11 @@ def select_online(
 
 def has_online(grpc_server: Any) -> bool:
     with session_scope() as session:
-        companions = session.query(Companion).order_by(Companion.id.desc()).all()
+        companions = CompanionRepository(session).list_all_recent()
         for companion in companions:
-            if (companion.status or "").strip() == "pending_certification" or not (
+            if (
+                companion.status or ""
+            ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
                 companion.auth_token or ""
             ).strip():
                 continue
@@ -372,7 +398,7 @@ def map_files_error(exc: CompanionGrpcError) -> HTTPException:
         or ("root_path" in low)
     ):
         return HTTPException(status_code=400, detail=msg or "bad request")
-    return HTTPException(status_code=502, detail=f"Companion 文件服务错误：{msg}")
+    return HTTPException(status_code=502, detail=f"Companion file service error: {msg}")
 
 
 async def list_space_files(grpc_server: Any, *, space_id: int, path: str = "") -> dict:

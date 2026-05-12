@@ -180,7 +180,7 @@ function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry;
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(`加载失败：${err instanceof Error ? err.message : String(err)}`);
+        setError(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -195,7 +195,7 @@ function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry;
     return (
       <details style={{ marginLeft }} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
         <summary style={{ cursor: 'pointer' }}>📁 {entry.name}</summary>
-        {loading ? <div className="muted">加载中…</div> : null}
+        {loading ? <div className="muted">Loading…</div> : null}
         {error ? <div className="muted">{error}</div> : null}
         {loaded && !entries.length ? <div className="muted">—</div> : null}
         {entries.map((child) => (
@@ -354,7 +354,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         const data = await readFile(config.spaceId, relPath);
         setPreview({ path: relPath, name: displayName, content: String(data.content || ''), imageUrl: '', loading: false, error: '' });
       } catch (err) {
-        setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `预览失败：${err instanceof Error ? err.message : String(err)}` });
+        setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `Preview failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     },
     [config.spaceId],
@@ -465,7 +465,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);
-      window.alert(`终端初始化失败：${err instanceof Error ? err.message : String(err)}`);
+      window.alert(`Terminal initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [config.spaceId, config.taskPublicId]);
 
@@ -475,20 +475,20 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const copyTaskId = async () => {
       try {
         await navigator.clipboard.writeText(config.taskPublicId);
-        toast('已复制');
+        toast('Copied');
       } catch (_) {
-        toast('复制失败');
+        toast('Copy failed');
       }
     };
     const releaseSpace = async () => {
-      if (!window.confirm('确认释放该 AgentSpace？（只会删除 OpenFocus 侧记录，不会删除你的本地文件）')) return;
+      if (!window.confirm('Release this AgentSpace? This only deletes OpenFocus records and will not delete local files.')) return;
       try {
         await releaseTaskAgentSpace(config.taskPublicId);
-        toast('已释放');
+        toast('Released');
         window.location.href = `/goals?task=${encodeURIComponent(config.taskPublicId)}`;
       } catch (err) {
-        toast('释放失败');
-        window.alert(`释放失败：${err instanceof Error ? err.message : String(err)}`);
+        toast('Release failed');
+        window.alert(`Release failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
     copyButton?.addEventListener('click', copyTaskId);
@@ -516,7 +516,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
           </div>
         </div>
 
-        <div className="agent-space-splitter" data-split="left" title="拖拽调整 FILES / PREVIEW 宽度" onMouseDown={(event) => startDrag('left', event)} onTouchStart={(event) => startDrag('left', event)} onDoubleClick={() => {
+        <div className="agent-space-splitter" data-split="left" title="Drag to resize FILES / PREVIEW" onMouseDown={(event) => startDrag('left', event)} onTouchStart={(event) => startDrag('left', event)} onDoubleClick={() => {
           const root = splitRef.current;
           if (!root) return;
           root.style.setProperty('--files-w', '340px');
@@ -534,17 +534,17 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
             <div className="divider" />
             <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto' }}>
               <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
-                {preview.loading ? <><span className="spin" /> <span className="muted">加载中…</span></> : null}
+                {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
                 {preview.error ? preview.error : null}
                 {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
                 {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} /> : null}
-                {!preview.path ? '选择一个文件预览（代码 / Markdown / 图片）。' : null}
+                {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="agent-space-splitter" data-split="right" title="拖拽调整 PREVIEW / TERMINAL 宽度" onMouseDown={(event) => startDrag('right', event)} onTouchStart={(event) => startDrag('right', event)} onDoubleClick={() => {
+        <div className="agent-space-splitter" data-split="right" title="Drag to resize PREVIEW / TERMINAL" onMouseDown={(event) => startDrag('right', event)} onTouchStart={(event) => startDrag('right', event)} onDoubleClick={() => {
           const root = splitRef.current;
           if (!root) return;
           root.style.setProperty('--files-w', '340px');

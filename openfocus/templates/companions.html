@@ -155,7 +155,7 @@
     async function deleteCompanion(id){
       const cid = String(id||'').trim();
       if(!cid) return;
-      if(!confirm('确认删除 Companion #' + cid + '？\n\n- 会解绑关联的 AgentSpaces\n- 删除后需要 Companion 重新注册/重新配对')) return;
+      if(!confirm('Delete Companion #' + cid + '?\n\n- Related AgentSpaces will be unbound.\n- The Companion must register and pair again after deletion.')) return;
       const r = await fetch('/api/companions/' + encodeURIComponent(cid), { method: 'DELETE' });
       if(!r.ok){
         const t = await r.text().catch(()=> '');
@@ -245,10 +245,10 @@
       const errEl = item ? item.querySelector('.js-pair-err') : null;
       if(errEl) errEl.textContent = '';
       const code = String((codeEl && codeEl.value) ? codeEl.value : '').trim();
-      if(!id){ if(errEl) errEl.textContent = '缺少 companion_id'; return; }
-      if(!code){ if(errEl) errEl.textContent = '请输入配对码'; return; }
+      if(!id){ if(errEl) errEl.textContent = 'Missing companion_id'; return; }
+      if(!code){ if(errEl) errEl.textContent = 'Enter the pairing code'; return; }
       if(!/^[A-Za-z0-9]{10}$/.test(code)){
-        if(errEl) errEl.textContent = '配对码需为 10 位字母或数字';
+        if(errEl) errEl.textContent = 'Pairing code must be 10 letters or digits';
         return;
       }
 

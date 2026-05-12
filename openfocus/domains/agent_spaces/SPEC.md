@@ -17,7 +17,8 @@ The Agent Spaces domain owns terminal ownership and local terminal lifecycle sta
 
 ## Invariants
 
-- AgentSpace terminal owner maps to `RemoteTerminalSession.space_id = AgentSpace.id`.
-- Inspiration terminal owner maps to `RemoteTerminalSession.space_id = -InspirationSpace.id` until the explicit DB owner migration lands.
+- AgentSpace terminal owner maps to `owner_type = "agent_space"` and `owner_id = AgentSpace.id`.
+- Inspiration terminal owner maps to `owner_type = "inspiration_space"` and `owner_id = InspirationSpace.id`.
+- `RemoteTerminalSession.space_id` is a legacy compatibility column only; new code must not use it for ownership checks.
 - Terminal names are unique per owner.
 - Closing/releasing a terminal removes its output rows as well as its session row.

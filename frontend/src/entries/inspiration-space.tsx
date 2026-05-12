@@ -386,7 +386,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       const title = String((document.getElementById('insp-title') as HTMLTextAreaElement | null)?.value || '').trim();
       const initialMessage = String((document.getElementById('insp-message') as HTMLTextAreaElement | null)?.value || '').trim();
       const mode = String((document.getElementById('insp-mode') as HTMLSelectElement | null)?.value || 'built_in');
-      if (!title && !initialMessage) { toast('请填写 Title 或 First Note'); return; }
+      if (!title && !initialMessage) { toast('Enter a Title or First Note'); return; }
       const btn = document.getElementById('insp-create-btn') as HTMLButtonElement | null;
       const hint = document.getElementById('insp-create-hint') as HTMLElement | null;
       if (btn) btn.disabled = true;
@@ -446,7 +446,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       if (stateRef.current.waiting || stateRef.current.publishing) return;
       const input = document.getElementById('insp-message-input') as HTMLTextAreaElement | null;
       const content = String(input?.value || '').trim();
-      if (!content) { toast('请输入消息'); return; }
+      if (!content) { toast('Enter a message'); return; }
       if (input) input.value = '';
       await submitTurn(content);
     });

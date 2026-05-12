@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import re
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 from .filesystem import append_text, read_text, write_text_atomic
 
 _LOCK = threading.RLock()
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -300,8 +302,6 @@ def extract_long_term_items(day: str, daily_text: str) -> list[str]:
         items.append(
             f"- {day}: Works through AgentSpace terminal / web shell interactions."
         )
-    if not items:
-        return [f"- {day}: No stable preference or fact extracted yet."]
     return items
 
 
@@ -502,6 +502,22 @@ def maintenance(
         save_state_unlocked(state)
 
 
+def force_audit_summary(
+    now: dt.datetime | None = None, *, cfg: MemoryConfig | None = None
+) -> None:
+    now = now or _utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    cfg = cfg or config_from_env()
+    with _LOCK:
+        state = load_state_unlocked()
+        rotate_current_audit_unlocked(state, now, cfg=cfg, force=True, create_next=True)
+        finalize_due_days_unlocked(state, now)
+        cleanup_audit_files_unlocked(now, cfg)
+        state["last_maintenance_at"] = iso(now)
+        save_state_unlocked(state)
+
+
 def append_audit_entry(
     *,
     kind: str,
@@ -554,8 +570,8 @@ def append_audit_entry(
 def try_audit_memory(**kwargs) -> None:
     try:
         append_audit_entry(**kwargs)
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.warning("failed to append audit memory: %s", exc)
 
 
 def file_display_name(path: Path) -> str:

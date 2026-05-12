@@ -7,10 +7,6 @@ from ...models import InspirationSpace, RemoteTerminalSession
 from ..agent_spaces import terminals as terminal_service
 
 
-def terminal_space_id(space_id: int) -> int:
-    return terminal_service.owner_for_inspiration_space(int(space_id)).db_space_id
-
-
 def terminal_payload(
     space_id: int,
     terminal: RemoteTerminalSession,

@@ -18,6 +18,33 @@ def test_migration_service_records_baseline_on_current_schema(tmp_path):
         assert migrations.STARTUP_SCHEMA_MIGRATION_ID in ids
 
 
+def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
+    from alembic import command
+    from alembic.config import Config
+
+    db_path = tmp_path / "alembic.db"
+    monkeypatch.setenv("OPENFOCUS_DB_PATH", str(db_path))
+    cfg = Config("alembic.ini")
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table'")
+            )
+        }
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+
+    assert "goals" in tables
+    assert "tasks" in tables
+    assert "remote_terminal_sessions" in tables
+    assert "companions" in tables
+    assert version == "20260512_0001"
+
+
 def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     from openfocus.infrastructure import migrations
 
@@ -41,7 +68,20 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         )
         conn.execute(text("CREATE TABLE agent_spaces (id INTEGER PRIMARY KEY)"))
         conn.execute(
-            text("CREATE TABLE remote_terminal_sessions (id INTEGER PRIMARY KEY)")
+            text(
+                "CREATE TABLE remote_terminal_sessions ("
+                "id INTEGER PRIMARY KEY, "
+                "space_id INTEGER NOT NULL DEFAULT 0, "
+                "task_public_id VARCHAR(36) NOT NULL DEFAULT ''"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO remote_terminal_sessions "
+                "(id, space_id, task_public_id) VALUES "
+                "(1, 12, 'task-public-id'), (2, -34, '')"
+            )
         )
 
     migrations.initialize_database(engine, LegacyBase)
@@ -63,6 +103,12 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         migration_ids = {
             str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
         }
+        terminal_rows = conn.execute(
+            text(
+                "SELECT id, owner_type, owner_id, task_public_id "
+                "FROM remote_terminal_sessions ORDER BY id"
+            )
+        ).fetchall()
 
     assert {"title", "status", "priority", "importance"}.issubset(goal_cols)
     assert {"content", "task_type", "estimated_minutes", "context_key"}.issubset(
@@ -70,5 +116,22 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     )
     assert {"mode", "workspace_path"}.issubset(insp_space_cols)
     assert {"external_path", "source"}.issubset(insp_res_cols)
-    assert {"name", "backend", "connect_url"}.issubset(terminal_cols)
+    assert {
+        "owner_type",
+        "owner_id",
+        "space_id",
+        "task_public_id",
+        "companion_id",
+        "root_path",
+        "name",
+        "terminal_id",
+        "backend",
+        "connect_url",
+        "status",
+        "created_at",
+        "updated_at",
+    }.issubset(terminal_cols)
+    assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
+    assert terminal_rows[1][1:] == ("inspiration_space", 34, "")
     assert migrations.STARTUP_SCHEMA_MIGRATION_ID in migration_ids
+    assert migrations.REMOTE_TERMINAL_OWNER_MIGRATION_ID in migration_ids

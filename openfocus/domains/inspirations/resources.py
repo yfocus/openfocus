@@ -11,6 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ...models import InspirationResource, InspirationSpace
+from .repository import InspirationResourceRepository
 
 
 class InspirationResourceError(Exception):
@@ -88,16 +89,7 @@ def resource_file_path(
 
 
 def next_resource_seq(s: Session, space_id: int) -> int:
-    rows = (
-        s.query(InspirationResource.resource_seq_id)
-        .filter(InspirationResource.space_id == int(space_id))
-        .order_by(InspirationResource.resource_seq_id.desc())
-        .first()
-    )
-    try:
-        return int((rows[0] if rows else 0) or 0) + 1
-    except Exception:
-        return 1
+    return InspirationResourceRepository(s).next_seq(int(space_id))
 
 
 def write_resource_file(
@@ -364,16 +356,9 @@ def sync_resources_dir(
 def non_deleted_resources(
     s: Session, space_id: int, *, include_summary: bool = True
 ) -> list[InspirationResource]:
-    query = (
-        s.query(InspirationResource)
-        .filter(InspirationResource.space_id == int(space_id))
-        .filter(InspirationResource.deleted_at.is_(None))
+    return InspirationResourceRepository(s).list_active(
+        int(space_id), include_summary=include_summary
     )
-    if not include_summary:
-        query = query.filter(InspirationResource.type != "summary")
-    return query.order_by(
-        InspirationResource.updated_at.desc(), InspirationResource.id.desc()
-    ).all()
 
 
 def clone_resource(

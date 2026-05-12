@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 STARTUP_SCHEMA_MIGRATION_ID = "20260511_startup_schema_baseline"
+REMOTE_TERMINAL_OWNER_MIGRATION_ID = "20260512_remote_terminal_owner_fields"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -14,6 +15,13 @@ def _table_columns(conn: Any, table_name: str) -> list[str]:
         r[1]
         for r in conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()
     ]
+
+
+def _table_column(conn: Any, table_name: str, column_name: str) -> Any | None:
+    for row in conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall():
+        if str(row[1]) == str(column_name):
+            return row
+    return None
 
 
 def _ensure_schema_migrations_table(conn: Any) -> None:
@@ -34,6 +42,21 @@ def _mark_applied(conn: Any, migration_id: str) -> None:
     )
 
 
+def _is_applied(conn: Any, migration_id: str) -> bool:
+    row = conn.execute(
+        text("SELECT 1 FROM schema_migrations WHERE id = :id"),
+        {"id": str(migration_id)},
+    ).one_or_none()
+    return row is not None
+
+
+def _apply_migration(conn: Any, migration_id: str, migrate_fn: Any) -> None:
+    if _is_applied(conn, migration_id):
+        return
+    migrate_fn(conn)
+    _mark_applied(conn, migration_id)
+
+
 def initialize_database(engine: Engine, base: Any) -> None:
     """Create the current schema and run OpenFocus startup migrations.
 
@@ -45,11 +68,16 @@ def initialize_database(engine: Engine, base: Any) -> None:
     base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
         _ensure_schema_migrations_table(conn)
-        run_startup_schema_migrations(conn)
-        _mark_applied(conn, STARTUP_SCHEMA_MIGRATION_ID)
+        for migration_id, migrate_fn in STARTUP_MIGRATIONS:
+            _apply_migration(conn, migration_id, migrate_fn)
 
 
 def run_startup_schema_migrations(conn: Any) -> None:
+    for _migration_id, migrate_fn in STARTUP_MIGRATIONS:
+        migrate_fn(conn)
+
+
+def _migrate_startup_schema_baseline(conn: Any) -> None:
     goals_cols = _table_columns(conn, "goals")
     if "title" not in goals_cols:
         conn.execute(
@@ -163,7 +191,53 @@ def run_startup_schema_migrations(conn: Any) -> None:
     if "companion_id" not in space_cols:
         conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
 
+
+def _migrate_remote_terminal_owner_fields(conn: Any) -> None:
+
     term_cols = _table_columns(conn, "remote_terminal_sessions")
+    if "owner_type" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions "
+                "ADD COLUMN owner_type VARCHAR(32) NOT NULL DEFAULT 'agent_space'"
+            )
+        )
+        term_cols.append("owner_type")
+    if "owner_id" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions "
+                "ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        term_cols.append("owner_id")
+    if "space_id" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions ADD COLUMN space_id INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        term_cols.append("space_id")
+    if "task_public_id" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions ADD COLUMN task_public_id VARCHAR(36)"
+            )
+        )
+        term_cols.append("task_public_id")
+    if "companion_id" not in term_cols:
+        conn.execute(
+            text("ALTER TABLE remote_terminal_sessions ADD COLUMN companion_id INTEGER")
+        )
+        term_cols.append("companion_id")
+    if "root_path" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions "
+                "ADD COLUMN root_path VARCHAR(4000) NOT NULL DEFAULT ''"
+            )
+        )
+        term_cols.append("root_path")
     if "name" not in term_cols:
         conn.execute(
             text(
@@ -171,15 +245,74 @@ def run_startup_schema_migrations(conn: Any) -> None:
             )
         )
         term_cols.append("name")
+    if "terminal_id" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions "
+                "ADD COLUMN terminal_id VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+        term_cols.append("terminal_id")
     if "backend" not in term_cols:
         conn.execute(
             text(
                 "ALTER TABLE remote_terminal_sessions ADD COLUMN backend VARCHAR(32) NOT NULL DEFAULT 'ttyd'"
             )
         )
+        term_cols.append("backend")
     if "connect_url" not in term_cols:
         conn.execute(
             text(
                 "ALTER TABLE remote_terminal_sessions ADD COLUMN connect_url VARCHAR(1024) NOT NULL DEFAULT ''"
             )
         )
+        term_cols.append("connect_url")
+    if "status" not in term_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE remote_terminal_sessions "
+                "ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"
+            )
+        )
+        term_cols.append("status")
+    if "created_at" not in term_cols:
+        conn.execute(
+            text("ALTER TABLE remote_terminal_sessions ADD COLUMN created_at DATETIME")
+        )
+        term_cols.append("created_at")
+    if "updated_at" not in term_cols:
+        conn.execute(
+            text("ALTER TABLE remote_terminal_sessions ADD COLUMN updated_at DATETIME")
+        )
+        term_cols.append("updated_at")
+
+    conn.execute(
+        text(
+            "UPDATE remote_terminal_sessions "
+            "SET owner_type = CASE WHEN space_id < 0 THEN 'inspiration_space' ELSE 'agent_space' END "
+            "WHERE owner_type IS NULL OR owner_type = '' OR owner_id = 0"
+        )
+    )
+    conn.execute(
+        text(
+            "UPDATE remote_terminal_sessions "
+            "SET owner_id = CASE WHEN space_id < 0 THEN -space_id ELSE space_id END "
+            "WHERE owner_id IS NULL OR owner_id = 0"
+        )
+    )
+    task_public_id_col = _table_column(
+        conn, "remote_terminal_sessions", "task_public_id"
+    )
+    if task_public_id_col is not None and not bool(task_public_id_col[3]):
+        conn.execute(
+            text(
+                "UPDATE remote_terminal_sessions "
+                "SET task_public_id = NULL WHERE task_public_id = ''"
+            )
+        )
+
+
+STARTUP_MIGRATIONS = [
+    (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
+    (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
+]

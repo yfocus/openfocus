@@ -81,7 +81,7 @@
           {% endif %}
           | <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button" style="padding: 0;">{{ task.title }}</a>
           | <span id="space-task-id">{{ task.public_id }}</span>
-          <button type="button" class="btn-ghost" id="space-copy-task" title="复制 Task ID" style="padding: 2px 8px;">copy</button>
+          <button type="button" class="btn-ghost" id="space-copy-task" title="Copy Task ID" style="padding: 2px 8px;">copy</button>
           | {{ _companion_name }}
         </div>
       </div>
@@ -95,7 +95,7 @@
     <div class="divider"></div>
 
     {% if not space %}
-      <div class="muted">尚未创建工作区。请回到任务详情点击“创建工作区”。</div>
+      <div class="muted">No workspace has been created yet. Go back to the task detail and click “Create Workspace”.</div>
     {% endif %}
   </div>
 

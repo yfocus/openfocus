@@ -383,13 +383,19 @@ class AgentMessage(Base):
 
 
 class RemoteTerminalSession(Base):
-    """AgentSpace 下的远程终端会话（仅存元信息，用于 tab 管理与释放清理）。"""
+    """远程终端会话元信息（用于 tab 管理与 owner 生命周期清理）。"""
 
     __tablename__ = "remote_terminal_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="agent_space"
+    )
+    owner_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Legacy compatibility column: new code must query owner_type/owner_id instead.
     space_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    task_public_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     root_path: Mapped[str] = mapped_column(String(4000), nullable=False)
 

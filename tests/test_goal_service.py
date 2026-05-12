@@ -89,3 +89,68 @@ def test_goal_service_missing_goal_or_task_raises_domain_error(monkeypatch, tmp_
             assert "Task not found" in str(exc)
         else:
             raise AssertionError("missing task should raise domain error")
+
+
+def test_goal_service_delete_cleans_agent_space_terminals(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import terminals as terminal_service
+    from openfocus.domains.goals import service
+    from openfocus.models import (
+        AgentSpace,
+        Goal,
+        RemoteTerminalOutput,
+        RemoteTerminalSession,
+        Task,
+    )
+
+    with session_scope() as s:
+        goal = service.create_goal(
+            s,
+            title="delete cleanup goal",
+            content="cleanup",
+            due_date=dt.date.today(),
+        )
+        task = service.create_task(
+            s, goal_id=int(goal.id), title="cleanup task", content="cleanup"
+        )
+        space = AgentSpace(
+            task_public_id=str(task.public_id),
+            companion_id=None,
+            root_path=str(tmp_path),
+        )
+        s.add(space)
+        s.flush()
+        owner = terminal_service.owner_for_agent_space(int(space.id))
+        terminal = terminal_service.create_terminal_record(
+            s,
+            owner=owner,
+            task_public_id=str(task.public_id),
+            companion_id=None,
+            root_path=str(tmp_path),
+            terminal_id="cleanup-terminal",
+            backend="ttyd",
+            connect_url="http://127.0.0.1:12345",
+        )
+        s.add(
+            RemoteTerminalOutput(
+                space_id=int(space.id),
+                terminal_id=str(terminal.terminal_id),
+                data_b64="YQ==",
+                nbytes=1,
+            )
+        )
+        goal_id = int(goal.id)
+        task_id = int(task.id)
+        space_id = int(space.id)
+
+    with session_scope() as s:
+        service.delete_goal(s, goal_id=goal_id)
+
+    with session_scope() as s:
+        assert s.get(Goal, goal_id) is None
+        assert s.get(Task, task_id) is None
+        assert s.get(AgentSpace, space_id) is None
+        assert s.query(RemoteTerminalSession).count() == 0
+        assert s.query(RemoteTerminalOutput).count() == 0

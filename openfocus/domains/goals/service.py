@@ -7,8 +7,18 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from ...models import AgentMessage, AgentSession, AgentSpace, Event, Goal, Task
+from ...models import AgentMessage, AgentSession, Event, Goal, Task
+from ..agent_spaces import terminals as terminal_service
 from ..memory import service as memory_service
+from .repository import AgentSpaceRepository, GoalRepository, TaskRepository
+
+GOAL_STATUS_ACTIVE = "active"
+GOAL_STATUS_DONE = "done"
+TASK_STATUS_TODO = "todo"
+TASK_STATUS_DONE = "done"
+
+GOAL_STATUSES = frozenset({GOAL_STATUS_ACTIVE, GOAL_STATUS_DONE})
+TASK_STATUSES = frozenset({TASK_STATUS_TODO, TASK_STATUS_DONE})
 
 
 class GoalTaskNotFound(LookupError):
@@ -199,20 +209,20 @@ def create_goal(
     source_inspiration_draft_id: int | None = None,
     audit: bool = True,
 ) -> Goal:
+    goals = GoalRepository(s)
     title_text = str(title or "").strip()
     content_text = str(content or "").strip()
     goal = Goal(
         title=title_text,
         content=content_text,
         due_date=due_date,
-        status=str(status or "active").strip() or "active",
+        status=str(status or GOAL_STATUS_ACTIVE).strip() or GOAL_STATUS_ACTIVE,
         priority=str(priority or "normal").strip() or "normal",
         importance=str(importance or "normal").strip() or "normal",
         source_inspiration_space_id=source_inspiration_space_id,
         source_inspiration_draft_id=source_inspiration_draft_id,
     )
-    s.add(goal)
-    s.flush()
+    goals.add(goal)
     _add_goal_created_event(s, goal, agent=agent)
     if audit:
         memory_service.try_audit_memory(
@@ -237,14 +247,14 @@ def update_goal(
     priority: str = "normal",
     importance: str = "normal",
 ) -> GoalResult:
-    goal = s.get(Goal, int(goal_id))
+    goal = GoalRepository(s).get(int(goal_id))
     if goal is None:
         raise GoalTaskNotFound("Goal not found")
     old_title = str(goal.title or "")
     old_content = str(goal.content or "")
     title_text = str(title or "").strip()
     content_text = str(content or "").strip()
-    status_text = str(status or "active").strip() or "active"
+    status_text = str(status or GOAL_STATUS_ACTIVE).strip() or GOAL_STATUS_ACTIVE
     priority_text = str(priority or "normal").strip() or "normal"
     importance_text = str(importance or "normal").strip() or "normal"
 
@@ -276,12 +286,12 @@ def update_goal(
 
 
 def mark_goal_done(s: Session, *, goal_id: int) -> GoalResult:
-    goal = s.get(Goal, int(goal_id))
+    goal = GoalRepository(s).get(int(goal_id))
     if goal is None:
         raise GoalTaskNotFound("Goal not found")
-    if (goal.status or "").strip() != "done":
-        old = (goal.status or "").strip() or "active"
-        goal.status = "done"
+    if (goal.status or "").strip() != GOAL_STATUS_DONE:
+        old = (goal.status or "").strip() or GOAL_STATUS_ACTIVE
+        goal.status = GOAL_STATUS_DONE
         s.add(
             Event(
                 kind="goal.confirmed_done_by_user",
@@ -294,19 +304,19 @@ def mark_goal_done(s: Session, *, goal_id: int) -> GoalResult:
             kind="goal.finished",
             source="web",
             summary=f"Finished goal: {goal.title}",
-            detail=f"Goal moved from `{old}` to `done`.",
+            detail=f"Goal moved from `{old}` to `{GOAL_STATUS_DONE}`.",
             goal_id=int(goal_id),
-            metadata={"from": old, "to": "done"},
+            metadata={"from": old, "to": GOAL_STATUS_DONE},
         )
     return GoalResult(goal_id=int(goal.id), title=str(goal.title or ""))
 
 
 def reopen_goal(s: Session, *, goal_id: int) -> GoalResult:
-    goal = s.get(Goal, int(goal_id))
+    goal = GoalRepository(s).get(int(goal_id))
     if goal is None:
         raise GoalTaskNotFound("Goal not found")
-    if (goal.status or "").strip() == "done":
-        goal.status = "active"
+    if (goal.status or "").strip() == GOAL_STATUS_DONE:
+        goal.status = GOAL_STATUS_ACTIVE
         s.add(
             Event(
                 kind="goal.reopened_by_user",
@@ -319,20 +329,26 @@ def reopen_goal(s: Session, *, goal_id: int) -> GoalResult:
             kind="goal.reopened",
             source="web",
             summary=f"Reopened goal: {goal.title}",
-            detail="Goal moved from `done` back to `active`.",
+            detail=(
+                f"Goal moved from `{GOAL_STATUS_DONE}` back to `{GOAL_STATUS_ACTIVE}`."
+            ),
             goal_id=int(goal_id),
-            metadata={"to": "active"},
+            metadata={"to": GOAL_STATUS_ACTIVE},
         )
     return GoalResult(goal_id=int(goal.id), title=str(goal.title or ""))
 
 
 def delete_goal(s: Session, *, goal_id: int) -> GoalResult:
-    goal = s.get(Goal, int(goal_id))
+    goals = GoalRepository(s)
+    tasks_repo = TaskRepository(s)
+    goal = goals.get(int(goal_id))
     if goal is None:
         raise GoalTaskNotFound("Goal not found")
     deleted_title = str(goal.title or "")
-    s.query(Task).filter(Task.goal_id == int(goal_id)).delete()
-    s.delete(goal)
+    tasks = tasks_repo.list_by_goal(int(goal_id))
+    for task in tasks:
+        delete_task(s, task_id=int(task.id), audit=False)
+    goals.delete(goal)
     memory_service.try_audit_memory(
         kind="goal.deleted",
         source="web",
@@ -356,7 +372,8 @@ def create_task(
     source_inspiration_draft_id: int | None = None,
     audit: bool = True,
 ) -> Task:
-    goal = s.get(Goal, int(goal_id))
+    tasks = TaskRepository(s)
+    goal = GoalRepository(s).get(int(goal_id))
     if goal is None:
         raise GoalTaskNotFound("Goal not found")
     title_text = str(title or "").strip()
@@ -368,15 +385,14 @@ def create_task(
         goal_id=int(goal_id),
         title=title_text,
         content=content_text,
-        status="todo",
+        status=TASK_STATUS_TODO,
         task_type=task_type,
         estimated_minutes=estimated_minutes,
         context_key=context_key,
         source_inspiration_space_id=source_inspiration_space_id,
         source_inspiration_draft_id=source_inspiration_draft_id,
     )
-    s.add(task)
-    s.flush()
+    tasks.add(task)
     _add_task_created_event(s, task, agent=agent)
     if audit:
         memory_service.try_audit_memory(
@@ -396,7 +412,7 @@ def create_task(
 
 
 def update_task(s: Session, *, task_id: int, title: str, content: str) -> TaskResult:
-    task = s.get(Task, int(task_id))
+    task = TaskRepository(s).get(int(task_id))
     if task is None:
         raise GoalTaskNotFound("Task not found")
     old_title = str(task.title or "")
@@ -440,12 +456,12 @@ def update_task(s: Session, *, task_id: int, title: str, content: str) -> TaskRe
 def mark_task_done(
     s: Session, *, task_id: int, now: dt.datetime | None = None
 ) -> TaskResult:
-    task = s.get(Task, int(task_id))
+    task = TaskRepository(s).get(int(task_id))
     if task is None:
         raise GoalTaskNotFound("Task not found")
-    if task.status != "done":
+    if task.status != TASK_STATUS_DONE:
         old = task.status
-        task.status = "done"
+        task.status = TASK_STATUS_DONE
         task.completed_at = now or memory_service.utcnow()
         s.add(
             Event(
@@ -459,10 +475,10 @@ def mark_task_done(
             kind="task.finished",
             source="web",
             summary=f"Finished task: {task.title}",
-            detail=f"Task moved from `{old}` to `done`.",
+            detail=f"Task moved from `{old}` to `{TASK_STATUS_DONE}`.",
             goal_id=int(task.goal_id),
             task_public_id=task.public_id,
-            metadata={"from": old, "to": "done"},
+            metadata={"from": old, "to": TASK_STATUS_DONE},
         )
     return TaskResult(
         task_id=int(task.id),
@@ -473,11 +489,11 @@ def mark_task_done(
 
 
 def reopen_task(s: Session, *, task_id: int) -> TaskResult:
-    task = s.get(Task, int(task_id))
+    task = TaskRepository(s).get(int(task_id))
     if task is None:
         raise GoalTaskNotFound("Task not found")
-    if task.status == "done":
-        task.status = "todo"
+    if task.status == TASK_STATUS_DONE:
+        task.status = TASK_STATUS_TODO
         task.completed_at = None
         s.add(
             Event(
@@ -491,10 +507,12 @@ def reopen_task(s: Session, *, task_id: int) -> TaskResult:
             kind="task.reopened",
             source="web",
             summary=f"Reopened task: {task.title}",
-            detail="Task moved from `done` back to `todo`.",
+            detail=(
+                f"Task moved from `{TASK_STATUS_DONE}` back to `{TASK_STATUS_TODO}`."
+            ),
             goal_id=int(task.goal_id),
             task_public_id=task.public_id,
-            metadata={"to": "todo"},
+            metadata={"to": TASK_STATUS_TODO},
         )
     return TaskResult(
         task_id=int(task.id),
@@ -504,18 +522,16 @@ def reopen_task(s: Session, *, task_id: int) -> TaskResult:
     )
 
 
-def delete_task(s: Session, *, task_id: int) -> TaskResult:
-    task = s.get(Task, int(task_id))
+def delete_task(s: Session, *, task_id: int, audit: bool = True) -> TaskResult:
+    tasks = TaskRepository(s)
+    spaces = AgentSpaceRepository(s)
+    task = tasks.get(int(task_id))
     if task is None:
         raise GoalTaskNotFound("Task not found")
     goal_id = int(task.goal_id)
     deleted_title = str(task.title or "")
     deleted_public_id = str(task.public_id or "")
-    space = (
-        s.query(AgentSpace)
-        .filter(AgentSpace.task_public_id == task.public_id)
-        .one_or_none()
-    )
+    space = spaces.get_by_task_public_id(str(task.public_id or ""))
     if space is not None:
         sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
         sess_ids = [ss.session_id for ss in sessions]
@@ -526,17 +542,21 @@ def delete_task(s: Session, *, task_id: int) -> TaskResult:
             s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(
                 synchronize_session=False
             )
-        s.delete(space)
-    s.delete(task)
-    memory_service.try_audit_memory(
-        kind="task.deleted",
-        source="web",
-        summary=f"Deleted task: {deleted_title}",
-        detail="Task and related AgentSpace resources were deleted.",
-        goal_id=goal_id,
-        task_public_id=deleted_public_id or None,
-        metadata={},
-    )
+        terminal_service.delete_owner_terminal_records(
+            s, owner=terminal_service.owner_for_agent_space(int(space.id))
+        )
+        spaces.delete(space)
+    tasks.delete(task)
+    if audit:
+        memory_service.try_audit_memory(
+            kind="task.deleted",
+            source="web",
+            summary=f"Deleted task: {deleted_title}",
+            detail="Task and related AgentSpace resources were deleted.",
+            goal_id=goal_id,
+            task_public_id=deleted_public_id or None,
+            metadata={},
+        )
     return TaskResult(
         task_id=int(task_id),
         task_public_id=deleted_public_id,

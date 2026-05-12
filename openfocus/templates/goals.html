@@ -243,7 +243,7 @@
       <div class="col-scroll" id="left-col">
 
         {% if goals|length == 0 %}
-          <div class="muted">还没有目标。</div>
+          <div class="muted">No goals yet.</div>
         {% endif %}
 
         <div class="goal-controls" style="margin-bottom: 12px;"
@@ -275,7 +275,7 @@
             {% set done_tasks = tasks|selectattr('status','equalto','done')|list %}
             {% set done_n = done_tasks|length %}
             {% set total_n = tasks|length %}
-            {% set goal_status = '已完成' if g.status == 'done' else ('已过期' if (today and g.due_date < today) else ('暂停' if g.status == 'paused' else '进行中')) %}
+            {% set goal_status = 'Done' if g.status == 'done' else ('Expired' if (today and g.due_date < today) else ('Paused' if g.status == 'paused' else 'In progress')) %}
 
             {% set ns = namespace(has_ip=false) %}
             {% for t0 in tasks %}
@@ -322,7 +322,7 @@
                     <div class="wb-title" title="{{ g.title }}" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if g.status == 'done' else 'rgba(255,209,102,0.92)' }};">{{ g.title }}</div>
                     <div class="detail-meta">
                       <span>DDL {{ g.due_date }}</span>
-                      <span>已进行 {{ g.created_at|human_since(now=now) }}</span>
+                      <span>elapsed {{ g.created_at|human_since(now=now) }}</span>
                       <span>{{ done_n }}/{{ total_n }}</span>
                       {% if g.source_inspiration_space_id %}
                         <a href="/inspirations/{{ g.source_inspiration_space_id }}" class="detail-meta-link">inspiration</a>
@@ -350,7 +350,7 @@
                         data-due="{{ g.due_date }}"
                       >Edit</button>
                     {% endif %}
-                    <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('确认删除该目标？')">
+                    <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('Delete this goal?')">
                       <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
                     </form>
                   </div>
@@ -369,10 +369,10 @@
                         <table class="wb-table js-task-table" aria-label="Tasks">
                           <thead>
                             <tr>
-                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="title">任务名称<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="title">Task<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="ddl">DDL<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
-                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="created-at">创建时间<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
-                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="status">状态<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="created-at">Created<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th><button type="button" class="sort-th js-task-sort" data-sort-key="status">Status<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="task-id">taskId<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="agent">Agent<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="token">Token<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
@@ -382,7 +382,7 @@
                             {% for t in tasks %}
                               {% set m = task_meta.get(t.public_id, {}) %}
                               {% set ui = m.get('ui_status','todo') %}
-                              {% set st = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
+                              {% set st = 'Done' if ui == 'done' else ('In progress' if ui == 'in_progress' else 'Not started') %}
                               <tr class="js-open-task"
                                 data-task="{{ t.public_id }}"
                                 data-goal="{{ g.id }}"
@@ -446,7 +446,7 @@
             {% for t in tasks %}
               {% set m = task_meta.get(t.public_id, {}) %}
               {% set ui = m.get('ui_status','todo') %}
-              {% set task_status = '已完成' if ui == 'done' else ('进行中' if ui == 'in_progress' else '待启动') %}
+              {% set task_status = 'Done' if ui == 'done' else ('In progress' if ui == 'in_progress' else 'Not started') %}
               <template id="detail-task-{{ t.public_id }}">
                 <div class="pad detail-wrap" data-detail-root>
                   <div class="detail-head">
@@ -454,7 +454,7 @@
                       <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if t.status == 'done' else 'rgba(255,255,255,0.92)' }};">{{ t.title }}</div>
                       <div class="detail-meta">
                         <span>DDL {{ g.due_date }}</span>
-                        <span>已进行 {{ m.get('elapsed','-') }}</span>
+                        <span>elapsed {{ m.get('elapsed','-') }}</span>
                         <span>taskId {{ t.public_id }}</span>
                         <button type="button" class="btn-ghost js-copy-text" data-text="{{ t.public_id }}" style="padding: 2px 6px; font-size: 12px;">copy ⎘</button>
                       </div>
@@ -491,7 +491,7 @@
                       >Edit</button>
                     {% endif %}
 
-                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('确认删除该任务？')">
+                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('Delete this task?')">
                       <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
                     </form>
                   </div>
@@ -555,7 +555,7 @@
         <div id="detail">
           <div class="pad">
             <div class="k">DETAIL</div>
-            <div class="muted" style="margin-top: 8px;">从左侧选择一个目标或任务。</div>
+            <div class="muted" style="margin-top: 8px;">Select a goal or task from the left.</div>
           </div>
         </div>
       </div>
@@ -718,8 +718,8 @@
     <form method="dialog" style="margin:0;">
       <div class="pad" style="padding: 14px;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">编辑目标</div>
-          <button type="submit" class="btn-ghost">关闭</button>
+          <div class="k">Edit Goal</div>
+          <button type="submit" class="btn-ghost">Close</button>
         </div>
       </div>
     </form>
@@ -728,12 +728,12 @@
       <form method="post" action="" id="edit-goal-form">
         <div style="margin-bottom: 10px;">
           <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <label class="muted">Title（必填）</label>
+            <label class="muted">Title (required)</label>
           </div>
           <textarea name="title" rows="3" required maxlength="2000" id="goal-edit-title"></textarea>
         </div>
         <div style="margin-bottom: 10px;">
-          <label class="muted">Content（必填）</label>
+          <label class="muted">Content (required)</label>
           <textarea name="content" rows="4" required maxlength="4000" id="goal-edit-content"></textarea>
         </div>
         <div class="row">
@@ -742,7 +742,7 @@
             <input type="date" name="due_date" required id="goal-edit-due" />
           </div>
           <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
-            <button type="submit">保存</button>
+            <button type="submit">Save</button>
           </div>
         </div>
         <input type="hidden" name="status" value="active" id="goal-edit-status" />
@@ -757,8 +757,8 @@
     <form method="dialog" style="margin:0;">
       <div class="pad" style="padding: 14px;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">编辑任务</div>
-          <button type="submit" class="btn-ghost">关闭</button>
+          <div class="k">Edit Task</div>
+          <button type="submit" class="btn-ghost">Close</button>
         </div>
       </div>
     </form>
@@ -766,15 +766,15 @@
     <div class="pad" style="padding: 14px;">
       <form method="post" action="" id="edit-task-form">
         <div style="margin-bottom: 10px;">
-          <label class="muted" for="task-edit-title">Title（必填）</label>
+          <label class="muted" for="task-edit-title">Title (required)</label>
           <textarea name="title" rows="2" required maxlength="512" id="task-edit-title"></textarea>
         </div>
         <div style="margin-bottom: 10px;">
-          <label class="muted" for="task-edit-content">Content（必填）</label>
+          <label class="muted" for="task-edit-content">Content (required)</label>
           <textarea name="content" rows="6" required maxlength="4000" id="task-edit-content"></textarea>
         </div>
         <div style="display:flex; align-items:center; justify-content:flex-end; gap: 10px;">
-          <button type="submit">保存</button>
+          <button type="submit">Save</button>
         </div>
       </form>
     </div>
@@ -918,7 +918,7 @@
 
     function _openNewTaskDialog(goalId){
       const gid = String(goalId || '').trim();
-      if(!gid){ toast('请先选择一个目标'); return; }
+      if(!gid){ toast('Select a goal first'); return; }
       const dlg = document.getElementById('new-task-dialog');
       const form = document.getElementById('new-task-form');
       const hint = document.getElementById('task-goal-hint');
@@ -936,7 +936,7 @@
       const dlg = document.getElementById('edit-goal-dialog');
       const form = document.getElementById('edit-goal-form');
       const gid = String(fromEl?.getAttribute('data-goal') || '').trim();
-      if(!gid){ toast('goalId 缺失'); return; }
+      if(!gid){ toast('Missing goalId'); return; }
       if(form) form.action = '/goals/' + encodeURIComponent(gid) + '/edit';
 
       const title = String(fromEl?.getAttribute('data-title') || '');
@@ -958,7 +958,7 @@
       const dlg = document.getElementById('edit-task-dialog');
       const form = document.getElementById('edit-task-form');
       const id = String(fromEl?.getAttribute('data-task-id') || '').trim();
-      if(!id){ toast('taskId 缺失'); return; }
+      if(!id){ toast('Missing taskId'); return; }
       if(form) form.action = '/tasks/' + encodeURIComponent(id) + '/edit';
 
       const title = String(fromEl?.getAttribute('data-title') || '');
@@ -1434,8 +1434,8 @@
           if(item) item.remove();
           // remove task row(s) in goal table if visible
           document.querySelectorAll('.js-open-task[data-task="' + pid + '"]').forEach((tr)=>{ try{ tr.remove(); }catch(_){ } });
-          toast('已删除');
-          setDetail('<div class="pad"><div class="k">DETAIL</div><div class="muted" style="margin-top:8px;">已删除该任务。</div></div>');
+          toast('Deleted');
+          setDetail('<div class="pad"><div class="k">DETAIL</div><div class="muted" style="margin-top:8px;">This task was deleted.</div></div>');
           // 保持 UI 一致：跳回 Goal（避免残留模板/缓存数据）
           const nav = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
           const gid2 = (gid || (nav ? (nav.getAttribute('data-goal') || '') : '') || (STATE?.selected?.goalId || ''));
@@ -1447,7 +1447,7 @@
         }else if(action==='done'){
           const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
           if(item){ item.setAttribute('data-status','done'); }
-          toast('已完成');
+          toast('Done');
           // 任务详情模板需要反映“已完成/隐藏 prompt/出现 reopen”，直接刷新页面保持一致。
           const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
           const gid = btn ? (btn.getAttribute('data-goal') || '') : '';
@@ -1456,24 +1456,24 @@
         }else if(action==='reopen'){
           const item = document.querySelector('[data-task-item][data-task="' + pid + '"]');
           if(item){ item.setAttribute('data-status','todo'); }
-          toast('已重新打开');
+          toast('Reopened');
           const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
           const gid = btn ? (btn.getAttribute('data-goal') || '') : '';
           setTimeout(()=>{ location.href = '/goals?task=' + encodeURIComponent(pid || '') + (gid ? ('&goal=' + encodeURIComponent(gid)) : ''); }, 30);
           return;
         }else if(action==='goal_done'){
-          toast('已完成');
+          toast('Done');
           setTimeout(()=>{ location.href = '/goals?goal=' + encodeURIComponent(gid || ''); }, 30);
           return;
         }else if(action==='goal_reopen'){
-          toast('已重新打开');
+          toast('Reopened');
           setTimeout(()=>{ location.href = '/goals?goal=' + encodeURIComponent(gid || ''); }, 30);
           return;
         }
         refreshNext('state_changed');
         refreshEvents();
       }catch(err){
-        toast('操作失败');
+        toast('Action failed');
       }finally{
         const btn = form.querySelector('button[type="submit"]');
         if(btn) btn.disabled = false;
@@ -1800,7 +1800,7 @@
     const AGENT_SPACE_LAST_COMPANION_KEY = 'openfocus:last_companion_id';
     function _openAgentSpaceDialog(taskPid){
       const pid = String(taskPid || '').trim();
-      if(!pid){ toast('taskId 缺失'); return; }
+      if(!pid){ toast('Missing taskId'); return; }
       AGENT_SPACE_STATE.taskPid = pid;
       const dlg = document.getElementById('agent-space-dialog');
       const hint = document.getElementById('agent-space-task-hint');
@@ -1843,7 +1843,7 @@
           if(s === 'active') return 'active';
           if(s === 'pending_certification') return 'pending';
           if(s === 'offline') return 'offline';
-          return s || '未知';
+          return s || 'unknown';
         };
 
         sel.innerHTML = all.map(it => {
@@ -1851,7 +1851,7 @@
           const st = String(it.status || '');
           const disabled = (st !== 'active');
           return '<option value="' + String(it.id) + '"' + (disabled ? ' disabled' : '') + '>'
-            + escapeHtml(label) + '（' + escapeHtml(statusLabel(st)) + '）'
+            + escapeHtml(label) + ' (' + escapeHtml(statusLabel(st)) + ')'
             + '</option>';
         }).join('');
 
@@ -1889,7 +1889,7 @@
         }
         const data = await r.json();
         const p = (data && data.path) ? String(data.path) : '';
-        if(!p.trim()) throw new Error('返回为空');
+        if(!p.trim()) throw new Error('Empty response');
         const root = document.getElementById('agent-space-root');
         if(root) root.value = p;
       }catch(e){
@@ -1906,7 +1906,7 @@
       const err = document.getElementById('agent-space-err');
       const hint = document.getElementById('agent-space-hint');
       if(err) err.textContent = '';
-      if(!pid){ toast('taskId 缺失'); return; }
+      if(!pid){ toast('Missing taskId'); return; }
       if(!cid){ if(err) err.textContent = 'select companion first'; return; }
       if(!root){ if(err) err.textContent = 'workdir required'; return; }
       if(hint) hint.style.display = 'block';
@@ -2081,7 +2081,7 @@
 
         if(!title || !content || !due){
           e.preventDefault();
-          toast('请先把表单填完整');
+          toast('Complete the form first');
           return;
         }
 
