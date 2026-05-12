@@ -6,11 +6,8 @@ import base64
 import contextlib
 import datetime as dt
 import json
-import mimetypes
 import os
-import re
 import shutil
-import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,13 +37,23 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
 from .agent.llm.openai_compat import OpenAICompatibleProvider
-from .companion_grpc import (
+from .companion.grpc import (
     CompanionGrpcError,
     CompanionGrpcServer,
     add_agent_chunk_listener,
     add_terminal_output_listener,
 )
 from .db import get_engine, session_scope
+from .domains.agent_spaces import terminals as terminal_service
+from .domains.companion import service as companion_service
+from .domains.goals import service as goal_service
+from .domains.inspirations import drafts as inspiration_drafts
+from .domains.inspirations import presenters as inspiration_presenters
+from .domains.inspirations import publishing as inspiration_publishing
+from .domains.inspirations import resources as inspiration_resources
+from .domains.inspirations import terminal_bridge as inspiration_terminal_bridge
+from .domains.memory import service as memory_service
+from .infrastructure import migrations as migration_service
 from .models import (
     AgentMessage,
     AgentSession,
@@ -55,8 +62,6 @@ from .models import (
     Companion,
     Event,
     Goal,
-    GoalPlanMessage,
-    GoalPlanSession,
     InspirationDraft,
     InspirationMessage,
     InspirationPublishRecord,
@@ -80,13 +85,13 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 app = FastAPI(title="OpenFocus", version="0.1.0")
 
 
-# 静态资源：远程终端前端（remote-terminal/）
-_REMOTE_TERMINAL_DIR = (APP_DIR.parent / "remote-terminal").resolve()
-if _REMOTE_TERMINAL_DIR.exists() and _REMOTE_TERMINAL_DIR.is_dir():
+# 静态资源：OpenFocus 终端面板前端（ttyd iframe 宿主 / tab 控制层）
+_TERMINAL_PANEL_DIR = (APP_DIR / "static" / "terminal-panel").resolve()
+if _TERMINAL_PANEL_DIR.exists() and _TERMINAL_PANEL_DIR.is_dir():
     app.mount(
-        "/remote-terminal",
-        StaticFiles(directory=str(_REMOTE_TERMINAL_DIR)),
-        name="remote-terminal",
+        "/static/terminal-panel",
+        StaticFiles(directory=str(_TERMINAL_PANEL_DIR)),
+        name="terminal-panel",
     )
 
 # 静态资源：内置资源（resources/，例如 icons）
@@ -430,603 +435,37 @@ def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
     return f"/api/inspirations/{int(space_id)}/terminals/{tid}/ttyd/"
 
 
-_MEMORY_LOCK = threading.RLock()
-
-
-def _utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
-
-
-def _memory_audit_window_seconds() -> int:
-    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS") or "").strip()
-    try:
-        return max(60, int(raw or 3600))
-    except Exception:
-        return 3600
-
-
-def _memory_audit_max_entries() -> int:
-    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES") or "").strip()
-    try:
-        return max(1, int(raw or 2000))
-    except Exception:
-        return 2000
-
-
-def _memory_audit_ttl_days() -> int:
-    raw = str(os.environ.get("OPENFOCUS_MEMORY_AUDIT_TTL_DAYS") or "").strip()
-    try:
-        return max(1, int(raw or 7))
-    except Exception:
-        return 7
-
-
-def _memory_state_path() -> Path:
-    return _memory_dir() / ".memory_state.json"
-
-
-def _memory_audit_root() -> Path:
-    p = _memory_dir() / "audit"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _memory_daily_root() -> Path:
-    p = _memory_dir() / "daily"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _memory_long_term_path() -> Path:
-    return _memory_dir() / "MEMORY.md"
-
-
-def _memory_path_from_rel(rel_path: str) -> Path:
-    rel = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
-    p = (_memory_dir() / rel).resolve()
-    base = _memory_dir().resolve()
-    if p != base and base not in p.parents:
-        raise ValueError("invalid memory path")
-    return p
-
-
-def _memory_rel_path(path: Path) -> str:
-    try:
-        return path.resolve().relative_to(_memory_dir().resolve()).as_posix()
-    except Exception:
-        return path.name
-
-
-def _memory_read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
-
-
-def _memory_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _memory_append_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(content)
-
-
-def _memory_load_state_unlocked() -> dict:
-    raw = _memory_read_text(_memory_state_path()).strip()
-    if not raw:
-        return {
-            "current_audit": None,
-            "summarized_audits": [],
-            "finalized_days": [],
-            "last_maintenance_at": None,
-        }
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {
-            "current_audit": None,
-            "summarized_audits": [],
-            "finalized_days": [],
-            "last_maintenance_at": None,
-        }
-    if not isinstance(data, dict):
-        data = {}
-    summarized = data.get("summarized_audits")
-    data["summarized_audits"] = [
-        str(x)
-        for x in (summarized if isinstance(summarized, list) else [])
-        if str(x).strip()
-    ]
-    finalized = data.get("finalized_days")
-    data["finalized_days"] = [
-        str(x)
-        for x in (finalized if isinstance(finalized, list) else [])
-        if str(x).strip()
-    ]
-    if not isinstance(data.get("current_audit"), dict):
-        data["current_audit"] = None
-    return data
-
-
-def _memory_save_state_unlocked(state: dict) -> None:
-    payload = {
-        "current_audit": state.get("current_audit"),
-        "summarized_audits": list(
-            dict.fromkeys(
-                [str(x) for x in state.get("summarized_audits") or [] if str(x).strip()]
-            )
-        ),
-        "finalized_days": list(
-            dict.fromkeys(
-                [str(x) for x in state.get("finalized_days") or [] if str(x).strip()]
-            )
-        ),
-        "last_maintenance_at": state.get("last_maintenance_at"),
-    }
-    _memory_write_text(
-        _memory_state_path(), json.dumps(payload, ensure_ascii=False, indent=2)
-    )
-
-
-def _memory_parse_ts(value: object) -> dt.datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        raw = raw.replace("Z", "+00:00")
-        parsed = dt.datetime.fromisoformat(raw)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
-        return parsed.astimezone(dt.timezone.utc)
-    except Exception:
-        return None
-
-
-def _memory_iso(ts: dt.datetime | None) -> str:
-    if ts is None:
-        ts = _utcnow()
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=dt.timezone.utc)
-    return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _memory_decode_terminal_bytes(raw: bytes) -> str:
-    if not raw:
-        return ""
-    try:
-        return raw.decode("utf-8")
-    except Exception:
-        return raw.decode("utf-8", errors="replace")
-
-
-def _memory_extract_json_blocks(text: str) -> list[dict]:
-    out: list[dict] = []
-    for m in re.finditer(r"```json\n(.*?)\n```", text or "", flags=re.DOTALL):
-        try:
-            data = json.loads(m.group(1))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            out.append(data)
-    return out
-
-
-def _memory_entry_markdown(entry: dict) -> str:
-    ts = str(entry.get("timestamp") or _memory_iso(None))
-    kind = str(entry.get("kind") or "memory.event")
-    source = str(entry.get("source") or "system")
-    summary = str(entry.get("summary") or kind).strip()
-    detail = str(entry.get("detail") or "").strip()
-    task_id = str(entry.get("task_public_id") or "").strip()
-    goal_id = entry.get("goal_id")
-    lines = [f"## {ts} · {kind}", f"- Source: {source}", f"- Summary: {summary}"]
-    if task_id:
-        lines.append(f"- Task: {task_id}")
-    if goal_id not in (None, ""):
-        lines.append(f"- Goal: {goal_id}")
-    if detail:
-        lines.append("")
-        lines.append(detail)
-    lines.extend(
-        ["", "```json", json.dumps(entry, ensure_ascii=False, indent=2), "```", ""]
-    )
-    return "\n".join(lines)
-
-
-def _memory_render_audit_header(*, started_at: dt.datetime) -> str:
-    return (
-        "# Audit Memory\n\n"
-        f"- Started At: {_memory_iso(started_at)}\n"
-        f"- Rotation: {int(_memory_audit_window_seconds() / 60)} minutes or {_memory_audit_max_entries()} entries\n"
-        f"- TTL: {_memory_audit_ttl_days()} days\n\n"
-        "---\n\n"
-    )
-
-
-def _memory_render_daily_summary(
-    *, day: str, file_label: str, started_at: str, ended_at: str, entries: list[dict]
-) -> str:
-    counts: dict[str, int] = {}
-    source_counts: dict[str, int] = {}
-    highlights: list[str] = []
-    for entry in entries:
-        kind = str(entry.get("kind") or "memory.event")
-        counts[kind] = counts.get(kind, 0) + 1
-        source = str(entry.get("source") or "system")
-        source_counts[source] = source_counts.get(source, 0) + 1
-        summary = str(entry.get("summary") or "").strip()
-        if summary and summary not in highlights:
-            highlights.append(summary)
-    top_kinds = sorted(counts.items(), key=lambda it: (-it[1], it[0]))[:5]
-    top_sources = sorted(source_counts.items(), key=lambda it: (-it[1], it[0]))[:5]
-    lines = [
-        f"## Audit Window · {file_label}",
-        f"- Start: {started_at}",
-        f"- End: {ended_at}",
-        f"- Entries: {len(entries)}",
-    ]
-    if top_sources:
-        lines.append(
-            "- Sources: "
-            + ", ".join(f"{name} ({count})" for name, count in top_sources)
-        )
-    if top_kinds:
-        lines.append(
-            "- Top Kinds: "
-            + ", ".join(f"{name} ({count})" for name, count in top_kinds)
-        )
-    if highlights:
-        lines.append("")
-        lines.append("### Highlights")
-        for item in highlights[:8]:
-            lines.append(f"- {item}")
-    lines.extend(["", "---", ""])
-    return "\n".join(lines)
-
-
-def _memory_render_daily_final(day: str, content: str) -> str:
-    lines = [ln.rstrip() for ln in (content or "").splitlines()]
-    cleaned = [ln for ln in lines if ln.strip()]
-    highlights: list[str] = []
-    for ln in cleaned:
-        if ln.startswith("- "):
-            bullet = ln[2:].strip()
-            if bullet and bullet not in highlights:
-                highlights.append(bullet)
-        if len(highlights) >= 12:
-            break
-    out = [f"# Daily Memory · {day}", "", f"- Finalized At: {_memory_iso(None)}", ""]
-    if highlights:
-        out.append("## Final Highlights")
-        for item in highlights[:12]:
-            out.append(f"- {item}")
-        out.append("")
-    out.append("## Source Material")
-    out.append("")
-    out.append(content.strip() or "No daily material.")
-    out.append("")
-    return "\n".join(out)
-
-
-def _memory_extract_long_term_items(day: str, daily_text: str) -> list[str]:
-    items: list[str] = []
-    text = daily_text or ""
-    lower = text.lower()
-    if "trae-cli" in lower:
-        items.append(f"- {day}: Uses `trae-cli` in AgentSpace workflows.")
-    if "plan mode" in lower:
-        items.append(f"- {day}: Uses Plan Mode for task decomposition.")
-    if "terminal" in lower or "web shell" in lower:
-        items.append(
-            f"- {day}: Works through AgentSpace terminal / web shell interactions."
-        )
-    if not items:
-        return [f"- {day}: No stable preference or fact extracted yet."]
-    return items
-
-
-def _memory_write_long_term_unlocked(*, day: str, items: list[str]) -> None:
-    path = _memory_long_term_path()
-    existing = _memory_read_text(path).strip()
-    kept: list[str] = []
-    if existing:
-        for ln in existing.splitlines():
-            stripped = ln.rstrip()
-            if stripped.startswith(f"- {day}:"):
-                continue
-            kept.append(stripped)
-    else:
-        kept = ["# Long-term Memory", "", "## Stable Facts", ""]
-    if not any((ln.strip() == "## Stable Facts") for ln in kept):
-        if kept and kept[-1] != "":
-            kept.append("")
-        kept.extend(["## Stable Facts", ""])
-    if kept and kept[-1] != "":
-        kept.append("")
-    kept.extend(items)
-    kept.append("")
-    _memory_write_text(path, "\n".join(kept).rstrip() + "\n")
-
-
-def _memory_cleanup_audit_files_unlocked(now: dt.datetime) -> None:
-    cutoff = now - dt.timedelta(days=_memory_audit_ttl_days())
-    for path in sorted(_memory_audit_root().glob("**/*.md")):
-        try:
-            mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
-        except Exception:
-            continue
-        if mtime >= cutoff:
-            continue
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
-    for day_dir in sorted(_memory_audit_root().glob("*")):
-        try:
-            if day_dir.is_dir() and not any(day_dir.iterdir()):
-                day_dir.rmdir()
-        except Exception:
-            pass
-
-
-def _memory_ensure_daily_file(day: str) -> Path:
-    path = _memory_daily_root() / f"{day}.md"
-    if not path.exists():
-        _memory_write_text(path, f"# Daily Memory · {day}\n\n")
-    return path
-
-
-def _memory_start_audit_file_unlocked(state: dict, now: dt.datetime) -> dict:
-    day = now.date().isoformat()
-    day_dir = _memory_audit_root() / day
-    day_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.md"
-    path = day_dir / filename
-    counter = 1
-    while path.exists():
-        filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_{counter}.md"
-        path = day_dir / filename
-        counter += 1
-    _memory_write_text(path, _memory_render_audit_header(started_at=now))
-    current = {
-        "rel_path": _memory_rel_path(path),
-        "started_at": _memory_iso(now),
-        "entries": 0,
-        "day": day,
-    }
-    state["current_audit"] = current
-    return current
-
-
-def _memory_mark_summarized_audit_unlocked(state: dict, rel_path: str) -> None:
-    rel = str(rel_path or "").strip()
-    if not rel:
-        return
-    items = [
-        str(x)
-        for x in state.get("summarized_audits") or []
-        if str(x).strip() and str(x).strip() != rel
-    ]
-    items.append(rel)
-    state["summarized_audits"] = items[-2000:]
-
-
-def _memory_finalize_day_unlocked(day: str, state: dict) -> None:
-    path = _memory_daily_root() / f"{day}.md"
-    if not path.exists():
-        return
-    current = _memory_read_text(path)
-    finalized = _memory_render_daily_final(day, current)
-    _memory_write_text(path, finalized)
-    _memory_write_long_term_unlocked(
-        day=day, items=_memory_extract_long_term_items(day, finalized)
-    )
-    finalized_days = [
-        str(x)
-        for x in state.get("finalized_days") or []
-        if str(x).strip() and str(x) != day
-    ]
-    finalized_days.append(day)
-    state["finalized_days"] = finalized_days
-
-
-def _memory_rotate_current_audit_unlocked(
-    state: dict,
-    now: dt.datetime,
-    *,
-    force: bool = False,
-    create_next: bool = True,
-) -> tuple[str | None, str | None]:
-    current = (
-        state.get("current_audit")
-        if isinstance(state.get("current_audit"), dict)
-        else None
-    )
-    if not current:
-        return None, None
-    started_at = _memory_parse_ts(current.get("started_at")) or now
-    entries = int(current.get("entries") or 0)
-    age_seconds = max(0, int((now - started_at).total_seconds()))
-    if (
-        (not force)
-        and entries < _memory_audit_max_entries()
-        and age_seconds < _memory_audit_window_seconds()
-    ):
-        return None, None
-    rel_path = str(current.get("rel_path") or "").strip()
-    if not rel_path:
-        state["current_audit"] = None
-        return None, None
-    if entries <= 0:
-        return None, None
-    path = _memory_path_from_rel(rel_path)
-    if path.exists():
-        entries_data = _memory_extract_json_blocks(_memory_read_text(path))
-        day = str(current.get("day") or started_at.date().isoformat())
-        daily_path = _memory_ensure_daily_file(day)
-        label = path.name
-        started_iso = _memory_iso(started_at)
-        ended_iso = _memory_iso(now)
-        summary = _memory_render_daily_summary(
-            day=day,
-            file_label=label,
-            started_at=started_iso,
-            ended_at=ended_iso,
-            entries=entries_data,
-        )
-        _memory_append_text(daily_path, summary)
-        _memory_mark_summarized_audit_unlocked(state, rel_path)
-        state["finalized_days"] = [
-            str(x) for x in state.get("finalized_days") or [] if str(x) != day
-        ]
-    state["current_audit"] = None
-    next_rel: str | None = None
-    if create_next:
-        next_rel = (
-            str(
-                _memory_start_audit_file_unlocked(state, now).get("rel_path") or ""
-            ).strip()
-            or None
-        )
-    return rel_path, next_rel
-
-
-def _memory_finalize_due_days_unlocked(state: dict, now: dt.datetime) -> None:
-    today = now.date().isoformat()
-    finalized = {str(x) for x in state.get("finalized_days") or [] if str(x).strip()}
-    for path in sorted(_memory_daily_root().glob("*.md")):
-        day = path.stem
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
-            continue
-        if day >= today or day in finalized:
-            continue
-        _memory_finalize_day_unlocked(day, state)
-
-
-def _memory_maintenance(now: dt.datetime | None = None) -> None:
-    now = now or _utcnow()
+# Memory domain facade. Business rules and filesystem persistence live in
+# openfocus.domains.memory.service; main.py keeps only routing/glue aliases while
+# the rest of the god module is incrementally split by domain.
+_utcnow = memory_service.utcnow
+_memory_dir = memory_service.memory_dir
+_memory_audit_root = memory_service.audit_root
+_memory_daily_root = memory_service.daily_root
+_memory_long_term_path = memory_service.long_term_path
+_memory_load_state_unlocked = memory_service.load_state_unlocked
+_memory_read_text = memory_service.read_text
+_memory_iso = memory_service.iso
+_memory_decode_terminal_bytes = memory_service.decode_terminal_bytes
+_memory_collect_file_items = memory_service.collect_file_items
+_memory_read_selected_file = memory_service.read_selected_file
+_memory_maintenance = memory_service.maintenance
+_try_audit_memory = memory_service.try_audit_memory
+
+
+def _memory_force_audit_summary(now: dt.datetime) -> None:
+    cfg = memory_service.config_from_env()
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.timezone.utc)
-    with _MEMORY_LOCK:
-        state = _memory_load_state_unlocked()
-        _memory_rotate_current_audit_unlocked(state, now, force=False, create_next=True)
-        _memory_finalize_due_days_unlocked(state, now)
-        _memory_cleanup_audit_files_unlocked(now)
-        state["last_maintenance_at"] = _memory_iso(now)
-        _memory_save_state_unlocked(state)
-
-
-def _memory_append_audit_entry(
-    *,
-    kind: str,
-    source: str,
-    summary: str,
-    detail: str = "",
-    task_public_id: str | None = None,
-    goal_id: int | None = None,
-    metadata: dict | None = None,
-    occurred_at: dt.datetime | None = None,
-) -> None:
-    now = occurred_at or _utcnow()
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=dt.timezone.utc)
-    entry = {
-        "timestamp": _memory_iso(now),
-        "kind": str(kind or "memory.event"),
-        "source": str(source or "system"),
-        "summary": str(summary or kind or "memory event").strip(),
-        "detail": str(detail or "").strip(),
-        "task_public_id": str(task_public_id or "").strip() or None,
-        "goal_id": goal_id,
-        "metadata": metadata or {},
-    }
-    with _MEMORY_LOCK:
-        state = _memory_load_state_unlocked()
-        _memory_rotate_current_audit_unlocked(state, now, force=False, create_next=True)
-        current = (
-            state.get("current_audit")
-            if isinstance(state.get("current_audit"), dict)
-            else None
+    with memory_service._LOCK:
+        state = memory_service.load_state_unlocked()
+        memory_service.rotate_current_audit_unlocked(
+            state, now, cfg=cfg, force=True, create_next=True
         )
-        if current is None:
-            current = _memory_start_audit_file_unlocked(state, now)
-        path = _memory_path_from_rel(str(current.get("rel_path") or ""))
-        _memory_append_text(path, _memory_entry_markdown(entry))
-        current["entries"] = int(current.get("entries") or 0) + 1
-        state["current_audit"] = current
-        _memory_finalize_due_days_unlocked(state, now)
-        _memory_cleanup_audit_files_unlocked(now)
-        state["last_maintenance_at"] = _memory_iso(now)
-        _memory_save_state_unlocked(state)
-
-
-def _memory_file_display_name(path: Path) -> str:
-    if path.suffix.lower() == ".md":
-        stem = path.stem
-        if re.fullmatch(r"\d{2}-\d{2}-\d{2}", stem):
-            day = path.parent.name
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
-                return f"{day} {stem.replace('-', ':')}"
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", stem):
-            day, tm = stem.split("_", 1)
-            return f"{day} {tm.replace('-', ':')}"
-    return path.name
-
-
-def _memory_collect_file_items(root: Path, pattern: str) -> list[dict]:
-    state = _memory_load_state_unlocked()
-    summarized = {
-        str(x) for x in state.get("summarized_audits") or [] if str(x).strip()
-    }
-    current_rel = ""
-    if isinstance(state.get("current_audit"), dict):
-        current_rel = str(
-            (state.get("current_audit") or {}).get("rel_path") or ""
-        ).strip()
-    items: list[dict] = []
-    for path in sorted(root.glob(pattern), reverse=True):
-        if not path.is_file():
-            continue
-        try:
-            stat = path.stat()
-            updated_at = dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc)
-        except Exception:
-            updated_at = _utcnow()
-        rel_path = _memory_rel_path(path)
-        items.append(
-            {
-                "name": _memory_file_display_name(path),
-                "rel_path": rel_path,
-                "updated_at": _memory_iso(updated_at),
-                "size": int(getattr(stat, "st_size", 0) if "stat" in locals() else 0),
-                "summarized": rel_path in summarized,
-                "current": rel_path == current_rel,
-            }
-        )
-    return items
-
-
-def _memory_read_selected_file(rel_path: str | None) -> str:
-    raw = str(rel_path or "").strip()
-    if not raw:
-        return ""
-    try:
-        return _memory_read_text(_memory_path_from_rel(raw))
-    except Exception:
-        return ""
-
-
-def _try_audit_memory(**kwargs) -> None:
-    try:
-        _memory_append_audit_entry(**kwargs)
-    except Exception:
-        pass
+        memory_service.finalize_due_days_unlocked(state, now)
+        memory_service.cleanup_audit_files_unlocked(now, cfg)
+        state["last_maintenance_at"] = memory_service.iso(now)
+        memory_service.save_state_unlocked(state)
 
 
 def _human_duration_seconds(seconds: int) -> str:
@@ -1060,223 +499,10 @@ def _human_since(ts: dt.datetime | None, *, now: dt.datetime | None = None) -> s
 templates.env.filters["human_since"] = _human_since
 
 
-def _map_companion_files_error(e: CompanionGrpcError) -> HTTPException:
-    msg = str(e or "").strip()
-    low = msg.lower()
-    if ("not found" in low) or ("no such file" in low):
-        return HTTPException(status_code=404, detail=msg or "not found")
-    if ("too large" in low) or ("file too large" in low):
-        return HTTPException(status_code=413, detail=msg or "file too large")
-    if (
-        ("traversal" in low)
-        or ("invalid path" in low)
-        or ("must be absolute" in low)
-        or ("not a directory" in low)
-        or ("root_path" in low)
-    ):
-        return HTTPException(status_code=400, detail=msg or "bad request")
-    return HTTPException(status_code=502, detail=f"Companion 文件服务错误：{msg}")
-
-
 @app.on_event("startup")
 def _startup() -> None:
     engine = get_engine()
-    Base.metadata.create_all(bind=engine)
-
-    # 轻量 SQLite 迁移：给 goals 表补齐新增字段（避免引入 alembic 的复杂度）
-    with engine.begin() as conn:
-        cols = [
-            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(goals)").fetchall()
-        ]
-        if "title" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE goals ADD COLUMN title VARCHAR(2000) NOT NULL DEFAULT ''"
-                )
-            )
-            # Older schemas stored the goal title in `content`.
-            conn.execute(text("UPDATE goals SET title = content WHERE title = ''"))
-            if "description" in cols:
-                # Older schemas stored the goal body/content in `description`.
-                # Only run while adding `title` so future startups do not overwrite
-                # user-edited content from the legacy physical column.
-                conn.execute(
-                    text(
-                        "UPDATE goals SET content = description "
-                        "WHERE COALESCE(description, '') != ''"
-                    )
-                )
-        if "status" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE goals ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"
-                )
-            )
-        if "priority" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE goals ADD COLUMN priority VARCHAR(32) NOT NULL DEFAULT 'normal'"
-                )
-            )
-        if "importance" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE goals ADD COLUMN importance VARCHAR(32) NOT NULL DEFAULT 'normal'"
-                )
-            )
-        if "source_inspiration_space_id" not in cols:
-            conn.execute(
-                text("ALTER TABLE goals ADD COLUMN source_inspiration_space_id INTEGER")
-            )
-        if "source_inspiration_draft_id" not in cols:
-            conn.execute(
-                text("ALTER TABLE goals ADD COLUMN source_inspiration_draft_id INTEGER")
-            )
-
-        task_cols = [
-            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(tasks)").fetchall()
-        ]
-        if "content" not in task_cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE tasks ADD COLUMN content VARCHAR(4000) NOT NULL DEFAULT ''"
-                )
-            )
-            if "description" in task_cols:
-                conn.execute(
-                    text(
-                        "UPDATE tasks SET content = description "
-                        "WHERE COALESCE(description, '') != ''"
-                    )
-                )
-
-        if "task_type" not in task_cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) NOT NULL DEFAULT ''"
-                )
-            )
-
-        if "estimated_minutes" not in task_cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER NOT NULL DEFAULT 0"
-                )
-            )
-
-        if "context_key" not in task_cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE tasks ADD COLUMN context_key VARCHAR(256) NOT NULL DEFAULT ''"
-                )
-            )
-        if "source_inspiration_space_id" not in task_cols:
-            conn.execute(
-                text("ALTER TABLE tasks ADD COLUMN source_inspiration_space_id INTEGER")
-            )
-        if "source_inspiration_draft_id" not in task_cols:
-            conn.execute(
-                text("ALTER TABLE tasks ADD COLUMN source_inspiration_draft_id INTEGER")
-            )
-
-        # inspiration_spaces 补字段（workspace + BYO Agent terminal）
-        try:
-            insp_space_cols = [
-                r[1]
-                for r in conn.exec_driver_sql(
-                    "PRAGMA table_info(inspiration_spaces)"
-                ).fetchall()
-            ]
-            if "mode" not in insp_space_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE inspiration_spaces ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT 'built_in'"
-                    )
-                )
-            if "workspace_path" not in insp_space_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE inspiration_spaces ADD COLUMN workspace_path VARCHAR(4000) NOT NULL DEFAULT ''"
-                    )
-                )
-        except Exception:
-            pass
-
-        # inspiration_resources 补字段（文件桥接来源）
-        try:
-            insp_res_cols = [
-                r[1]
-                for r in conn.exec_driver_sql(
-                    "PRAGMA table_info(inspiration_resources)"
-                ).fetchall()
-            ]
-            if "external_path" not in insp_res_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE inspiration_resources ADD COLUMN external_path VARCHAR(4000) NOT NULL DEFAULT ''"
-                    )
-                )
-            if "source" not in insp_res_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE inspiration_resources ADD COLUMN source VARCHAR(64) NOT NULL DEFAULT 'user'"
-                    )
-                )
-        except Exception:
-            pass
-
-        # goal_plan_sessions 补字段（用于“已有 goal 进入 plan”）
-        sess_cols = [
-            r[1]
-            for r in conn.exec_driver_sql(
-                "PRAGMA table_info(goal_plan_sessions)"
-            ).fetchall()
-        ]
-        if "source_goal_id" not in sess_cols:
-            conn.execute(
-                text("ALTER TABLE goal_plan_sessions ADD COLUMN source_goal_id INTEGER")
-            )
-
-        # agent_spaces 补字段（Companion 架构升级）
-        space_cols = [
-            r[1]
-            for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)").fetchall()
-        ]
-        if "companion_id" not in space_cols:
-            conn.execute(
-                text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER")
-            )
-
-        # remote_terminal_sessions 补字段（terminal tab rename）
-        try:
-            term_cols = [
-                r[1]
-                for r in conn.exec_driver_sql(
-                    "PRAGMA table_info(remote_terminal_sessions)"
-                ).fetchall()
-            ]
-            if "name" not in term_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE remote_terminal_sessions ADD COLUMN name VARCHAR(128) NOT NULL DEFAULT ''"
-                    )
-                )
-                term_cols.append("name")
-            if "backend" not in term_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE remote_terminal_sessions ADD COLUMN backend VARCHAR(32) NOT NULL DEFAULT 'ttyd'"
-                    )
-                )
-            if "connect_url" not in term_cols:
-                conn.execute(
-                    text(
-                        "ALTER TABLE remote_terminal_sessions ADD COLUMN connect_url VARCHAR(1024) NOT NULL DEFAULT ''"
-                    )
-                )
-        except Exception:
-            # 表不存在时忽略（首次启动由 create_all 创建）
-            pass
+    migration_service.initialize_database(engine, Base)
 
     try:
         _memory_maintenance()
@@ -1389,7 +615,7 @@ def _get_llm_provider_or_error() -> tuple[OpenAICompatibleProvider | None, str |
         return OpenAICompatibleProvider.from_env(), None
     except Exception as e:
         return None, (
-            "Missing LLM configuration. Plan Mode is unavailable.\n"
+            "Missing LLM configuration. LLM-powered features are unavailable.\n"
             "Set one of the following environment variable groups:\n"
             "- OpenAI-compatible: OPENFOCUS_OPENAI_API_KEY (optionally OPENFOCUS_OPENAI_BASE_URL / OPENFOCUS_OPENAI_MODEL)\n"
             "- Ark: OPENFOCUS_ARK_API_KEY (or ARK_API_KEY), plus OPENFOCUS_ARK_BASE_URL / OPENFOCUS_ARK_MODEL (or ARK_BASE_URL / ARK_MODEL)\n"
@@ -1405,372 +631,53 @@ def _truncate_zh(text: str, n: int = 20) -> str:
     return s[:n].rstrip() + "…"
 
 
-def _add_goal_created_event(s, goal: Goal, *, agent: str = "ui") -> None:
-    s.add(
-        Event(
-            kind="goal.created",
-            agent=agent,
-            task_id=None,
-            payload={"goal_id": int(goal.id), "title": str(goal.title or "")},
-        )
-    )
-
-
-def _add_task_created_event(s, task: Task, *, agent: str = "ui") -> None:
-    s.add(
-        Event(
-            kind="task.created",
-            agent=agent,
-            task_id=str(task.public_id or ""),
-            payload={
-                "goal_id": int(task.goal_id),
-                "task_public_id": str(task.public_id or ""),
-                "title": str(task.title or ""),
-            },
-        )
-    )
-
-
-def _openfocus_data_root() -> Path:
-    env_path = str(os.environ.get("OPENFOCUS_DB_PATH") or "").strip()
-    if env_path:
-        try:
-            return Path(env_path).expanduser().resolve().parent
-        except Exception:
-            pass
-    return APP_DIR.parent / ".data"
-
-
-def _inspiration_files_root() -> Path:
-    root = _openfocus_data_root() / "inspirations"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _inspiration_space_files_dir(space_id: int) -> Path:
-    path = _inspiration_files_root() / f"space_{int(space_id)}"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _inspiration_workspace_path(space: InspirationSpace | None, space_id: int) -> Path:
-    raw = str(getattr(space, "workspace_path", "") or "").strip()
-    if raw:
-        p = Path(raw).expanduser()
-    else:
-        p = _inspiration_space_files_dir(int(space_id))
-    p.mkdir(parents=True, exist_ok=True)
-    (p / "resources").mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _inspiration_resources_dir(space: InspirationSpace | None, space_id: int) -> Path:
-    p = _inspiration_workspace_path(space, int(space_id)) / "resources"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _safe_resource_filename(name: str, fallback: str) -> str:
-    raw = str(name or "").strip() or str(fallback or "resource")
-    raw = re.sub(r"[\\/\x00-\x1f]+", "-", raw)
-    raw = re.sub(r"\s+", " ", raw).strip().strip(".")
-    if not raw:
-        raw = str(fallback or "resource")
-    return raw[:160]
-
-
-def _inspiration_resource_file_path(
-    *, space: InspirationSpace | None, space_id: int, seq_id: int, name: str, ext: str
-) -> Path:
-    suffix = ext if str(ext or "").startswith(".") else f".{str(ext or 'txt')}"
-    stem = _safe_resource_filename(name, f"resource_{int(seq_id)}")
-    return (
-        _inspiration_resources_dir(space, int(space_id))
-        / f"resource_{int(seq_id)}_{stem}{suffix}"
-    )
-
-
-def _inspiration_write_resource_file(
-    resource: InspirationResource, space: InspirationSpace | None = None
-) -> None:
-    kind = str(getattr(resource, "type", "") or "text").strip().lower()
-    sid = int(getattr(resource, "space_id", 0) or 0)
-    seq = int(getattr(resource, "resource_seq_id", 0) or 0)
-    if sid <= 0 or seq <= 0 or kind == "image":
-        return
-    name = str(getattr(resource, "name", "") or f"resource-{seq}")
-    if kind == "url":
-        path = _inspiration_resource_file_path(
-            space=space, space_id=sid, seq_id=seq, name=name, ext=".url.md"
-        )
-        url = str(getattr(resource, "url_content", "") or "").strip()
-        body = f"# {name}\n\nURL: {url}\n"
-    else:
-        path = _inspiration_resource_file_path(
-            space=space, space_id=sid, seq_id=seq, name=name, ext=".md"
-        )
-        body = str(getattr(resource, "text_content", "") or "")
-    path.write_text(body, encoding="utf-8")
-    resource.file_path = str(path)
-    resource.external_path = str(
-        path.relative_to(_inspiration_workspace_path(space, sid))
-    )
-
-
-def _inspiration_create_initial_note_resource(
-    s, space: InspirationSpace, *, title: str, first_note: str
-) -> InspirationResource:
-    sid = int(space.id)
-    clean_title = str(title or "Inspiration").strip() or "Inspiration"
-    clean_note = str(first_note or "").strip()
-    body = f"# {clean_title}\n"
-    if clean_note:
-        body += f"\n{clean_note}\n"
-    resource = InspirationResource(
-        space_id=sid,
-        resource_seq_id=_inspiration_next_resource_seq(s, sid),
-        type="text",
-        name="First Note",
-        text_content=body[:20000],
-        source="create_space",
-        is_system_generated=True,
-    )
-    s.add(resource)
-    s.flush()
-    _inspiration_write_resource_file(resource, space)
-    s.add(resource)
-    return resource
+# Active Inspiration resource/workspace implementation lives in the domain module.
+# These bindings keep route call sites stable while preventing new business logic
+# from accumulating in main.py.
+_openfocus_data_root = inspiration_resources.openfocus_data_root
+_inspiration_files_root = inspiration_resources.files_root
+_inspiration_space_files_dir = inspiration_resources.space_files_dir
+_inspiration_workspace_path = inspiration_resources.workspace_path
+_inspiration_resources_dir = inspiration_resources.resources_dir
+_safe_resource_filename = inspiration_resources.safe_resource_filename
+_inspiration_resource_file_path = inspiration_resources.resource_file_path
+_inspiration_write_resource_file = inspiration_resources.write_resource_file
+_inspiration_create_initial_note_resource = (
+    inspiration_resources.create_initial_note_resource
+)
+_guess_media_type = inspiration_resources.guess_media_type
+_inspiration_resource_reference = inspiration_resources.resource_reference
+_inspiration_resource_preview = inspiration_resources.resource_preview
+_inspiration_resource_name_from_path = inspiration_resources.resource_name_from_path
+_inspiration_parse_url_resource_file = inspiration_resources.parse_url_resource_file
+_inspiration_sync_resources_dir = inspiration_resources.sync_resources_dir
+_inspiration_non_deleted_resources = inspiration_resources.non_deleted_resources
 
 
 async def _inspiration_store_uploaded_resource_file(
     *, space_id: int, seq_id: int, file: UploadFile
 ) -> tuple[Path, str]:
-    original_name = str(file.filename or "image")
-    ext = Path(original_name).suffix or ".bin"
-    target_dir = _inspiration_resources_dir(None, int(space_id))
-    target_path = target_dir / f"resource_{int(seq_id)}{ext}"
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="uploaded file is empty")
-    target_path.write_bytes(content)
-    return target_path, original_name[:512]
-
-
-def _guess_media_type(path: Path) -> str:
-    guessed, _enc = mimetypes.guess_type(str(path))
-    return guessed or "application/octet-stream"
-
-
-def _inspiration_resource_reference(res: InspirationResource) -> str:
-    rid = int(getattr(res, "resource_seq_id", 0) or 0)
-    name = str(getattr(res, "name", "") or f"resource-{rid}")
-    kind = str(getattr(res, "type", "") or "resource")
-    hint = ""
-    if kind == "url":
-        hint = str(getattr(res, "url_content", "") or "").strip()
-    elif kind == "text":
-        body = str(getattr(res, "text_content", "") or "").strip()
-        hint = body[:160] + ("…" if len(body) > 160 else "")
-    elif kind == "summary":
-        body = str(getattr(res, "text_content", "") or "").strip()
-        hint = body[:160] + ("…" if len(body) > 160 else "")
-    else:
-        hint = "Use this image as supporting context."
-    return (f"[Resource #{rid}]\nName: {name}\nType: {kind}\nHint: {hint}").strip()
-
-
-def _inspiration_resource_preview(res: InspirationResource) -> str:
-    kind = str(getattr(res, "type", "") or "")
-    if kind == "url":
-        return str(getattr(res, "url_content", "") or "").strip()
-    return str(getattr(res, "text_content", "") or "").strip()
+    try:
+        return inspiration_resources.store_uploaded_resource_bytes(
+            space_id=int(space_id),
+            seq_id=int(seq_id),
+            original_name=str(file.filename or "image"),
+            content=content,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _inspiration_sync_draft_summary_file(
     s, space: InspirationSpace
 ) -> InspirationResource | None:
-    """Sync resources/draft_summary.md into a Summary resource.
-
-    terminal agent 是“不受信协作者”：这里只把文件作为资源导入，不创建 Goal/Task。
-    """
-
-    sid = int(space.id)
-    path = _inspiration_resources_dir(space, sid) / "draft_summary.md"
-    if not path.exists() or not path.is_file():
-        return None
     try:
-        text_body = path.read_text(encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"failed to read draft_summary.md: {e}"
-        )
-    text_body = str(text_body or "").strip()
-    if not text_body:
-        raise HTTPException(status_code=400, detail="draft_summary.md is empty")
-
-    existing = (
-        s.query(InspirationResource)
-        .filter(InspirationResource.space_id == sid)
-        .filter(InspirationResource.deleted_at.is_(None))
-        .filter(InspirationResource.type == "summary")
-        .filter(InspirationResource.name.in_(["Summary", "Draft Summary"]))
-        .order_by(InspirationResource.id.desc())
-        .first()
-    )
-    if existing is None:
-        existing = InspirationResource(
-            space_id=sid,
-            resource_seq_id=_inspiration_next_resource_seq(s, sid),
-            type="summary",
-            name="Summary",
-            source="terminal_agent",
-            is_system_generated=True,
-        )
-        s.add(existing)
-    existing.name = "Summary"
-    existing.text_content = text_body[:20000]
-    existing.file_path = str(path)
-    existing.external_path = "resources/draft_summary.md"
-    existing.source = "terminal_agent"
-    existing.is_system_generated = True
-    existing.updated_at = _utcnow()
-    space.last_activity_at = _utcnow()
-    s.flush()
-    return existing
-
-
-def _inspiration_resource_name_from_path(path: Path) -> str:
-    name = path.name
-    if name == "draft_summary.md":
-        return "Summary"
-    if name.endswith(".url.md"):
-        name = name[: -len(".url.md")]
-    else:
-        name = path.stem
-    name = re.sub(r"^resource_\d+_?", "", name).strip() or path.stem
-    return name[:512]
-
-
-def _inspiration_parse_url_resource_file(path: Path) -> str:
-    try:
-        body = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
-    for line in body.splitlines():
-        cleaned = str(line or "").strip()
-        if cleaned.lower().startswith("url:"):
-            return cleaned.split(":", 1)[1].strip()[:4000]
-        if cleaned.startswith("http://") or cleaned.startswith("https://"):
-            return cleaned[:4000]
-    return ""
-
-
-def _inspiration_sync_resources_dir(
-    s, space: InspirationSpace
-) -> list[InspirationResource]:
-    """Refresh InspirationResource rows from files under workspace/resources/."""
-
-    sid = int(space.id)
-    workspace = _inspiration_workspace_path(space, sid)
-    resources_dir = _inspiration_resources_dir(space, sid)
-    synced: list[InspirationResource] = []
-    paths = sorted(p for p in resources_dir.rglob("*") if p.is_file())
-    for path in paths:
-        try:
-            external_path = str(path.relative_to(workspace))
-        except Exception:
-            continue
-        if not external_path.startswith("resources/"):
-            continue
-        is_draft_summary = external_path == "resources/draft_summary.md"
-        media_type = _guess_media_type(path)
-        if is_draft_summary:
-            kind = "summary"
-        elif str(media_type or "").startswith("image/"):
-            kind = "image"
-        elif path.name.endswith(".url.md"):
-            kind = "url"
-        else:
-            kind = "text"
-
-        body = ""
-        url = ""
-        if kind in {"text", "summary"}:
-            try:
-                body = path.read_text(encoding="utf-8", errors="replace")[:20000]
-            except Exception:
-                continue
-            if is_draft_summary and not str(body or "").strip():
-                continue
-        elif kind == "url":
-            url = _inspiration_parse_url_resource_file(path)
-
-        existing = (
-            s.query(InspirationResource)
-            .filter(InspirationResource.space_id == sid)
-            .filter(InspirationResource.external_path == external_path)
-            .order_by(InspirationResource.id.desc())
-            .first()
-        )
-        if existing is None and is_draft_summary:
-            existing = (
-                s.query(InspirationResource)
-                .filter(InspirationResource.space_id == sid)
-                .filter(InspirationResource.type == "summary")
-                .filter(InspirationResource.name.in_(["Summary", "Draft Summary"]))
-                .order_by(InspirationResource.id.desc())
-                .first()
-            )
-        if existing is None:
-            existing = InspirationResource(
-                space_id=sid,
-                resource_seq_id=_inspiration_next_resource_seq(s, sid),
-                type=kind,
-                name=_inspiration_resource_name_from_path(path),
-                source="terminal_agent",
-                is_system_generated=is_draft_summary,
-            )
-            s.add(existing)
-        existing.type = kind
-        existing.file_path = str(path)
-        existing.external_path = external_path
-        existing.deleted_at = None
-        existing.updated_at = _utcnow()
-        if is_draft_summary:
-            existing.name = "Summary"
-            existing.source = "terminal_agent"
-            existing.is_system_generated = True
-        elif not str(existing.source or "").strip():
-            existing.source = "terminal_agent"
-        if kind in {"text", "summary"}:
-            existing.text_content = body
-            existing.url_content = ""
-        elif kind == "url":
-            existing.url_content = url
-            existing.text_content = ""
-        else:
-            existing.text_content = ""
-            existing.url_content = ""
-        synced.append(existing)
-    if synced:
-        space.last_activity_at = _utcnow()
-    s.flush()
-    return synced
-
-
-def _inspiration_non_deleted_resources(
-    s, space_id: int, *, include_summary: bool = True
-) -> list[InspirationResource]:
-    q = (
-        s.query(InspirationResource)
-        .filter(InspirationResource.space_id == int(space_id))
-        .filter(InspirationResource.deleted_at.is_(None))
-    )
-    if not include_summary:
-        q = q.filter(InspirationResource.type != "summary")
-    return q.order_by(
-        InspirationResource.updated_at.desc(), InspirationResource.id.desc()
-    ).all()
+        return inspiration_resources.sync_draft_summary_file(s, space)
+    except inspiration_resources.EmptyDraftSummary as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except inspiration_resources.DraftSummaryReadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _inspiration_messages_page(
@@ -1787,249 +694,14 @@ def _inspiration_messages_page(
     return rows, next_before
 
 
-def _inspiration_context_lines(
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-    *,
-    max_messages: int = 18,
-) -> str:
-    lines = [f"Space title: {space.title}"]
-    if resources:
-        lines.append("Resources:")
-        for res in resources[:20]:
-            lines.append(
-                f"- {_inspiration_resource_reference(res).replace(chr(10), ' | ')}"
-            )
-    if messages:
-        lines.append("Conversation:")
-        for msg in messages[-max_messages:]:
-            role = str(getattr(msg, "role", "assistant") or "assistant")
-            body = str(getattr(msg, "content", "") or "").strip()
-            if not body:
-                continue
-            lines.append(f"{role}: {body}")
-    return "\n".join(lines)[:16000]
-
-
-def _inspiration_fallback_reply(space: InspirationSpace, user_text: str) -> str:
-    body = str(user_text or "").strip()
-    if body.startswith("/draft_goal_tasks"):
-        return "I created a fallback draft from the current discussion. Review it and refine in chat if needed."
-    if body.startswith("/summary_title"):
-        return "I suggested a few title options based on the current discussion."
-    return (
-        f"I noted your update about '{space.title}'. "
-        "What is the most important outcome, constraint, or success signal we should clarify next?"
-    )
-
-
-def _inspiration_fallback_title_suggestions(
-    space: InspirationSpace, messages: list[InspirationMessage]
-) -> list[str]:
-    base = str(space.title or "Inspiration").strip() or "Inspiration"
-    latest = ""
-    for msg in reversed(messages):
-        if str(getattr(msg, "role", "") or "") == "user":
-            latest = str(getattr(msg, "content", "") or "").strip()
-            if latest:
-                break
-    suggestions = [base]
-    if latest:
-        suggestions.append(
-            _truncate_zh(latest.replace("/summary_title", "").strip() or base, 20)
-        )
-    suggestions.append(_truncate_zh(base + " / Refined", 20))
-    out: list[str] = []
-    for item in suggestions:
-        cleaned = str(item or "").strip()
-        if cleaned and cleaned not in out:
-            out.append(cleaned[:80])
-    return out[:3] or [base]
-
-
-def _inspiration_fallback_draft(
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-) -> dict:
-    context = _inspiration_context_lines(space, messages, resources)
-    desc = context[:1800]
-    tasks = [
-        {
-            "title": f"Clarify the scope of {space.title}",
-            "description": "Define the expected outcome, non-goals, and constraints.",
-        },
-        {
-            "title": f"Draft an execution approach for {space.title}",
-            "description": "Turn the discussion into an actionable plan with key milestones.",
-        },
-        {
-            "title": f"Review risks and open questions for {space.title}",
-            "description": "List unresolved questions and confirm the next decision points.",
-        },
-    ]
-    return {
-        "goal_title": space.title,
-        "goal_description": desc,
-        "tasks": tasks,
-        "open_questions": ["Which part should be implemented first?"],
-        "rejected_or_deferred_ideas": [],
-    }
-
-
-def _inspiration_llm_reply(
-    provider: OpenAICompatibleProvider,
-    *,
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-) -> str:
-    convo = [
-        {
-            "role": "system",
-            "content": (
-                "You are OpenFocus Inspiration assistant. "
-                "Be a proactive planning partner. Ask one clarifying question or provide one concrete synthesis. "
-                'Return strict JSON only: {"message":"..."}.'
-            ),
-        },
-        {
-            "role": "user",
-            "content": _inspiration_context_lines(space, messages, resources),
-        },
-    ]
-    data = json.loads(
-        provider.chat_completions(
-            messages=convo,
-            temperature=0.2,
-            max_tokens=500,
-            response_format={"type": "json_object"},
-        ).content
-    )
-    return str(
-        data.get("message") or "Please tell me more about the desired outcome."
-    ).strip()
-
-
-def _inspiration_llm_title_suggestions(
-    provider: OpenAICompatibleProvider,
-    *,
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-) -> list[str]:
-    convo = [
-        {
-            "role": "system",
-            "content": (
-                "You generate concise English or Chinese titles for an inspiration workspace. "
-                'Return strict JSON only: {"titles":["...","...","..."]}. '
-                "Each title should be <= 80 chars, distinct, and useful as a workspace title."
-            ),
-        },
-        {
-            "role": "user",
-            "content": _inspiration_context_lines(space, messages, resources),
-        },
-    ]
-    data = json.loads(
-        provider.chat_completions(
-            messages=convo,
-            temperature=0.3,
-            max_tokens=300,
-            response_format={"type": "json_object"},
-        ).content
-    )
-    out: list[str] = []
-    for item in data.get("titles") or []:
-        title = str(item or "").strip()
-        if title and title not in out:
-            out.append(title[:80])
-    return out[:5]
-
-
-def _inspiration_llm_draft(
-    provider: OpenAICompatibleProvider,
-    *,
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-) -> dict:
-    convo = [
-        {
-            "role": "system",
-            "content": (
-                "You are OpenFocus Inspiration planning assistant. "
-                "Generate a publish-ready draft from the discussion. "
-                "Return strict JSON only with keys: goal_title, goal_description, tasks, open_questions, rejected_or_deferred_ideas. "
-                "tasks must be an array of objects; each task object must include title and description."
-            ),
-        },
-        {
-            "role": "user",
-            "content": _inspiration_context_lines(space, messages, resources),
-        },
-    ]
-    data = json.loads(
-        provider.chat_completions(
-            messages=convo,
-            temperature=0.1,
-            max_tokens=1400,
-            response_format={"type": "json_object"},
-        ).content
-    )
-    tasks: list[dict] = []
-    for raw in data.get("tasks") or []:
-        if not isinstance(raw, dict):
-            continue
-        title = str(raw.get("title") or "").strip()
-        if not title:
-            continue
-        tasks.append(
-            {
-                "title": title[:512],
-                "description": str(raw.get("description") or "").strip()[:4000],
-            }
-        )
-    return {
-        "goal_title": str(data.get("goal_title") or space.title).strip()[:2000],
-        "goal_description": str(data.get("goal_description") or "").strip()[:4000],
-        "tasks": tasks,
-        "open_questions": [
-            str(x).strip()[:500]
-            for x in (data.get("open_questions") or [])
-            if str(x or "").strip()
-        ][:20],
-        "rejected_or_deferred_ideas": [
-            str(x).strip()[:500]
-            for x in (data.get("rejected_or_deferred_ideas") or [])
-            if str(x or "").strip()
-        ][:20],
-    }
-
-
-def _inspiration_make_phase_summary(
-    space: InspirationSpace,
-    messages: list[InspirationMessage],
-    resources: list[InspirationResource],
-) -> str:
-    recent_user = [
-        str(m.content or "").strip()
-        for m in messages[-20:]
-        if str(getattr(m, "role", "") or "") == "user" and str(m.content or "").strip()
-    ]
-    resource_names = [
-        str(r.name or f"resource-{r.resource_seq_id}") for r in resources[:8]
-    ]
-    lines = [f"Space: {space.title}"]
-    if recent_user:
-        lines.append("Recent user points:")
-        lines.extend(f"- {item[:200]}" for item in recent_user[-6:])
-    if resource_names:
-        lines.append("Resources in use:")
-        lines.extend(f"- {name}" for name in resource_names)
-    return "\n".join(lines)
+_inspiration_context_lines = inspiration_drafts.context_lines
+_inspiration_fallback_reply = inspiration_drafts.fallback_reply
+_inspiration_fallback_title_suggestions = inspiration_drafts.fallback_title_suggestions
+_inspiration_fallback_draft = inspiration_drafts.fallback_draft
+_inspiration_llm_reply = inspiration_drafts.llm_reply
+_inspiration_llm_title_suggestions = inspiration_drafts.llm_title_suggestions
+_inspiration_llm_draft = inspiration_drafts.llm_draft
+_inspiration_make_phase_summary = inspiration_drafts.make_phase_summary
 
 
 def _inspiration_maybe_emit_phase_summary(space_id: int) -> None:
@@ -2074,17 +746,7 @@ def _inspiration_maybe_emit_phase_summary(space_id: int) -> None:
         )
 
 
-def _inspiration_next_resource_seq(s, space_id: int) -> int:
-    rows = (
-        s.query(InspirationResource.resource_seq_id)
-        .filter(InspirationResource.space_id == int(space_id))
-        .order_by(InspirationResource.resource_seq_id.desc())
-        .first()
-    )
-    try:
-        return int((rows[0] if rows else 0) or 0) + 1
-    except Exception:
-        return 1
+_inspiration_next_resource_seq = inspiration_resources.next_resource_seq
 
 
 def _inspiration_latest_draft(s, space_id: int) -> InspirationDraft | None:
@@ -2101,225 +763,13 @@ def _inspiration_default_followup_title(title: str) -> str:
     return (base + " / Follow-up")[:120]
 
 
-def _inspiration_build_published_summary(
-    *,
-    space: InspirationSpace,
-    draft: InspirationDraft,
-    goal: Goal,
-    created_tasks: list[Task],
-    deferred_tasks: list[dict],
-) -> str:
-    lines = [
-        "Idea",
-        str(space.title or "").strip() or str(goal.title or "").strip(),
-        "",
-        "Why now",
-        str(goal.content or "").strip()
-        or "Captured from the latest inspiration discussion.",
-        "",
-        "Goal",
-        str(goal.title or "").strip(),
-        "",
-        "Published tasks",
-    ]
-    for task in created_tasks:
-        lines.append(f"- {str(task.title or '').strip()}")
-    if not created_tasks:
-        lines.append("- No tasks were published.")
-    lines.extend(["", "Open questions"])
-    for item in draft.open_questions or []:
-        if str(item or "").strip():
-            lines.append(f"- {str(item).strip()}")
-    if len(lines) and lines[-1] == "Open questions":
-        lines.append("- None")
-    lines.extend(["", "Rejected / deferred ideas"])
-    deferred_titles = [
-        str((it or {}).get("title") or "").strip()
-        for it in (deferred_tasks or [])
-        if isinstance(it, dict)
-    ]
-    combined = deferred_titles + [
-        str(item or "").strip()
-        for item in (draft.rejected_or_deferred_ideas or [])
-        if str(item or "").strip()
-    ]
-    seen: set[str] = set()
-    for item in combined:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        lines.append(f"- {item}")
-    if len(lines) and lines[-1] == "Rejected / deferred ideas":
-        lines.append("- None")
-    return "\n".join(lines).strip()
-
-
-def _inspiration_clone_resource(
-    *, s, source: InspirationResource, target_space_id: int, seq_id: int
-) -> InspirationResource:
-    cloned = InspirationResource(
-        space_id=int(target_space_id),
-        resource_seq_id=int(seq_id),
-        type=str(source.type or "text"),
-        name=str(source.name or f"resource-{seq_id}"),
-        text_content=str(source.text_content or ""),
-        url_content=str(source.url_content or ""),
-        file_path="",
-        external_path="",
-        source=str(getattr(source, "source", "") or "user"),
-        is_system_generated=bool(source.is_system_generated),
-    )
-    if str(source.file_path or "").strip():
-        src_path = Path(str(source.file_path or "")).expanduser()
-        if src_path.exists() and src_path.is_file():
-            target_dir = _inspiration_resources_dir(None, int(target_space_id))
-            ext = src_path.suffix or ""
-            dst = target_dir / f"resource_{int(seq_id)}{ext}"
-            shutil.copyfile(src_path, dst)
-            cloned.file_path = str(dst)
-            try:
-                cloned.external_path = str(
-                    dst.relative_to(
-                        _inspiration_workspace_path(None, int(target_space_id))
-                    )
-                )
-            except Exception:
-                cloned.external_path = str(dst)
-    elif str(cloned.type or "") in {"url", "text", "summary"}:
-        _inspiration_write_resource_file(cloned, None)
-    s.add(cloned)
-    s.flush()
-    return cloned
-
-
-def _inspiration_space_payload(
-    space: InspirationSpace,
-    *,
-    latest_draft: InspirationDraft | None = None,
-    resource_count: int | None = None,
-    draft_count: int | None = None,
-    publish_count: int | None = None,
-) -> dict:
-    return {
-        "id": int(space.id),
-        "title": str(space.title or ""),
-        "status": str(space.status or "open"),
-        "mode": str(getattr(space, "mode", "") or "built_in"),
-        "workspace_path": str(getattr(space, "workspace_path", "") or ""),
-        "published_goal_id": (
-            int(space.published_goal_id)
-            if getattr(space, "published_goal_id", None)
-            else None
-        ),
-        "forked_from_space_id": (
-            int(space.forked_from_space_id)
-            if getattr(space, "forked_from_space_id", None)
-            else None
-        ),
-        "message_turn_count": int(space.message_turn_count or 0),
-        "resource_count": int(resource_count or 0),
-        "draft_count": int(draft_count or 0),
-        "publish_count": int(publish_count or 0),
-        "latest_draft_version": (
-            int(latest_draft.version) if latest_draft is not None else None
-        ),
-        "created_at": space.created_at.isoformat() if space.created_at else None,
-        "updated_at": space.updated_at.isoformat() if space.updated_at else None,
-        "last_activity_at": (
-            space.last_activity_at.isoformat()
-            if getattr(space, "last_activity_at", None)
-            else None
-        ),
-        "closed_at": space.closed_at.isoformat()
-        if getattr(space, "closed_at", None)
-        else None,
-        "published_at": (
-            space.published_at.isoformat()
-            if getattr(space, "published_at", None)
-            else None
-        ),
-    }
-
-
-def _inspiration_message_payload(message: InspirationMessage) -> dict:
-    return {
-        "id": int(message.id),
-        "space_id": int(message.space_id),
-        "role": str(message.role or "assistant"),
-        "kind": str(message.kind or "message"),
-        "content": str(message.content or ""),
-        "payload": message.payload or {},
-        "draft_version": (
-            int(message.draft_version)
-            if getattr(message, "draft_version", None)
-            else None
-        ),
-        "created_at": message.created_at.isoformat() if message.created_at else None,
-    }
-
-
-def _inspiration_resource_payload(
-    space_id: int, resource: InspirationResource, *, include_text: bool = False
-) -> dict:
-    file_path = str(resource.file_path or "").strip()
-    return {
-        "id": int(resource.id),
-        "space_id": int(resource.space_id),
-        "resource_seq_id": int(resource.resource_seq_id),
-        "type": str(resource.type or "text"),
-        "name": str(resource.name or f"resource-{int(resource.resource_seq_id or 0)}"),
-        "preview": _inspiration_resource_preview(resource),
-        "reference": _inspiration_resource_reference(resource),
-        "url_content": str(resource.url_content or ""),
-        "text_content": str(resource.text_content or "") if include_text else "",
-        "external_path": str(getattr(resource, "external_path", "") or ""),
-        "source": str(getattr(resource, "source", "") or "user"),
-        "is_system_generated": bool(resource.is_system_generated),
-        "has_file": bool(file_path),
-        "raw_url": (
-            f"/api/inspirations/{int(space_id)}/resources/{int(resource.id)}/raw"
-            if file_path
-            else None
-        ),
-        "created_at": resource.created_at.isoformat() if resource.created_at else None,
-        "updated_at": resource.updated_at.isoformat() if resource.updated_at else None,
-    }
-
-
-def _inspiration_draft_payload(draft: InspirationDraft) -> dict:
-    return {
-        "id": int(draft.id),
-        "space_id": int(draft.space_id),
-        "version": int(draft.version),
-        "goal_title": str(draft.goal_title or ""),
-        "goal_description": str(draft.goal_description or ""),
-        "tasks": draft.tasks or [],
-        "open_questions": draft.open_questions or [],
-        "rejected_or_deferred_ideas": draft.rejected_or_deferred_ideas or [],
-        "source_message_id": (
-            int(draft.source_message_id)
-            if getattr(draft, "source_message_id", None)
-            else None
-        ),
-        "created_at": draft.created_at.isoformat() if draft.created_at else None,
-    }
-
-
-def _inspiration_publish_record_payload(record: InspirationPublishRecord) -> dict:
-    return {
-        "id": int(record.id),
-        "space_id": int(record.space_id),
-        "draft_id": int(record.draft_id),
-        "created_goal_id": int(record.created_goal_id),
-        "created_task_ids": [int(x) for x in (record.created_task_ids or [])],
-        "deferred_tasks": record.deferred_tasks or [],
-        "summary_resource_id": (
-            int(record.summary_resource_id)
-            if getattr(record, "summary_resource_id", None)
-            else None
-        ),
-        "created_at": record.created_at.isoformat() if record.created_at else None,
-    }
+_inspiration_build_published_summary = inspiration_publishing.build_published_summary
+_inspiration_clone_resource = inspiration_resources.clone_resource
+_inspiration_space_payload = inspiration_presenters.space_payload
+_inspiration_message_payload = inspiration_presenters.message_payload
+_inspiration_resource_payload = inspiration_presenters.resource_payload
+_inspiration_draft_payload = inspiration_presenters.draft_payload
+_inspiration_publish_record_payload = inspiration_presenters.publish_record_payload
 
 
 def _inspiration_space_or_404(s, space_id: int) -> InspirationSpace:
@@ -2593,79 +1043,18 @@ async def _kickoff_inspiration_followup(
 def _inspiration_prepare_publish(
     space_id: int, draft_id: int | None, due_date: dt.date
 ) -> dict:
-    with session_scope() as s:
-        space = _inspiration_space_or_404(s, int(space_id))
-        current_status = str(space.status or "open")
-        if current_status not in {"open", "closed"}:
-            raise HTTPException(
-                status_code=400, detail="This space cannot be published"
-            )
-        if _inspiration_is_waiting(s, int(space_id)):
-            raise HTTPException(status_code=409, detail="Agent is still responding")
-        draft: InspirationDraft | None
-        if draft_id is None:
-            draft = _inspiration_latest_draft(s, int(space_id))
-        else:
-            draft = s.get(InspirationDraft, int(draft_id))
-            if draft is not None and int(draft.space_id) != int(space_id):
-                draft = None
-        if draft is None:
-            raise HTTPException(
-                status_code=400, detail="No draft is available for publishing"
-            )
-        picked_tasks: list[dict] = []
-        for raw in draft.tasks or []:
-            if not isinstance(raw, dict):
-                continue
-            item = {
-                "title": str(raw.get("title") or "").strip()[:512],
-                "description": str(raw.get("description") or "").strip()[:4000],
-            }
-            if item["title"]:
-                picked_tasks.append(item)
-        if not picked_tasks:
-            raise HTTPException(
-                status_code=400, detail="The draft does not contain publishable tasks"
-            )
-        space.status = "publishing"
-        space.last_activity_at = _utcnow()
-        return {
-            "draft_id": int(draft.id),
-            "previous_status": current_status,
-            "due_date": due_date.isoformat(),
-        }
+    try:
+        return inspiration_publishing.prepare_publish(int(space_id), draft_id, due_date)
+    except inspiration_publishing.PublishConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except inspiration_publishing.PublishUnavailable as e:
+        detail = str(e)
+        status_code = 404 if detail == "Inspiration space not found" else 400
+        raise HTTPException(status_code=status_code, detail=detail)
 
 
 def _inspiration_load_publish_snapshot(space_id: int, draft_id: int) -> dict:
-    with session_scope() as s:
-        space = _inspiration_space_or_404(s, int(space_id))
-        if str(space.status or "") != "publishing":
-            raise RuntimeError("Inspiration space is not in publishing state")
-        draft = s.get(InspirationDraft, int(draft_id))
-        if draft is None or int(draft.space_id) != int(space_id):
-            raise RuntimeError("Draft not found during publishing")
-
-        picked_tasks: list[dict] = []
-        for raw in draft.tasks or []:
-            if not isinstance(raw, dict):
-                continue
-            item = {
-                "title": str(raw.get("title") or "").strip()[:512],
-                "description": str(raw.get("description") or "").strip()[:4000],
-            }
-            if item["title"]:
-                picked_tasks.append(item)
-        if not picked_tasks:
-            raise RuntimeError("The draft does not contain publishable tasks")
-
-        return {
-            "space_title": str(space.title or "").strip(),
-            "goal_title": str(draft.goal_title or space.title).strip()[:2000]
-            or space.title,
-            "goal_description": str(draft.goal_description or "").strip()[:4000],
-            "picked_tasks": picked_tasks,
-            "draft_payload": _inspiration_draft_payload(draft),
-        }
+    return inspiration_publishing.load_publish_snapshot(int(space_id), int(draft_id))
 
 
 def _inspiration_publish_sync(
@@ -2675,156 +1064,13 @@ def _inspiration_publish_sync(
     due_date_iso: str,
     previous_status: str,
 ) -> None:
-    due_date = dt.date.fromisoformat(str(due_date_iso))
-    created_goal_id = 0
-    created_task_ids: list[int] = []
-    draft_payload: dict | None = None
-    try:
-        publish_snapshot = _inspiration_load_publish_snapshot(
-            int(space_id), int(draft_id)
-        )
-        picked_tasks = list(publish_snapshot.get("picked_tasks") or [])
-        draft_payload = publish_snapshot.get("draft_payload") or None
-        goal_title = str(publish_snapshot.get("goal_title") or "").strip()
-        goal_content = str(publish_snapshot.get("goal_description") or "").strip()
-
-        with session_scope() as s:
-            space = _inspiration_space_or_404(s, int(space_id))
-            if str(space.status or "") != "publishing":
-                raise RuntimeError("Inspiration space is not in publishing state")
-            draft = s.get(InspirationDraft, int(draft_id))
-            if draft is None or int(draft.space_id) != int(space_id):
-                raise RuntimeError("Draft not found during publishing")
-            goal = Goal(
-                title=goal_title,
-                content=goal_content,
-                due_date=due_date,
-                source_inspiration_space_id=int(space_id),
-                source_inspiration_draft_id=int(draft.id),
-            )
-            s.add(goal)
-            s.flush()
-            _add_goal_created_event(s, goal, agent="inspiration")
-            created_goal_id = int(goal.id)
-
-            created_tasks: list[Task] = []
-            for idx, item in enumerate(picked_tasks):
-                title = str(item.get("title") or "").strip()
-                description = str(item.get("description") or "").strip()
-                task_type = _infer_task_type(title, description)
-                estimated_minutes = _infer_estimated_minutes(
-                    task_type, title, description
-                )
-                context_key = _infer_context_key(
-                    title,
-                    description,
-                    goal_id=int(goal.id),
-                )
-                task = Task(
-                    goal_id=int(goal.id),
-                    title=title,
-                    content=description,
-                    status="todo",
-                    task_type=task_type,
-                    estimated_minutes=estimated_minutes,
-                    context_key=context_key,
-                    source_inspiration_space_id=int(space_id),
-                    source_inspiration_draft_id=int(draft.id),
-                )
-                s.add(task)
-                s.flush()
-                _add_task_created_event(s, task, agent="inspiration")
-                created_tasks.append(task)
-                created_task_ids.append(int(task.id))
-
-            summary_text = _inspiration_build_published_summary(
-                space=space,
-                draft=draft,
-                goal=goal,
-                created_tasks=created_tasks,
-                deferred_tasks=[],
-            )
-            seq_id = _inspiration_next_resource_seq(s, int(space_id))
-            summary_resource = InspirationResource(
-                space_id=int(space_id),
-                resource_seq_id=int(seq_id),
-                type="summary",
-                name="Published Summary",
-                text_content=summary_text,
-                url_content="",
-                file_path="",
-                source="system",
-                is_system_generated=True,
-            )
-            s.add(summary_resource)
-            _inspiration_write_resource_file(summary_resource, space)
-            s.flush()
-            record = InspirationPublishRecord(
-                space_id=int(space_id),
-                draft_id=int(draft.id),
-                created_goal_id=int(goal.id),
-                created_task_ids=created_task_ids,
-                deferred_tasks=[],
-                summary_resource_id=int(summary_resource.id),
-            )
-            s.add(record)
-            space.status = "published"
-            space.published_goal_id = int(goal.id)
-            space.published_at = _utcnow()
-            space.last_activity_at = _utcnow()
-            s.add(
-                InspirationMessage(
-                    space_id=int(space_id),
-                    role="assistant",
-                    kind="published",
-                    content=f"Published draft v{int(draft.version)} into Goal #{int(goal.id)} with {len(created_tasks)} tasks.",
-                    payload={
-                        "draft_id": int(draft.id),
-                        "created_goal_id": int(goal.id),
-                        "created_task_ids": created_task_ids,
-                    },
-                    draft_version=int(draft.version),
-                )
-            )
-    except Exception as e:
-        with session_scope() as s:
-            space = s.get(InspirationSpace, int(space_id))
-            if space is not None:
-                space.status = previous_status
-                space.last_activity_at = _utcnow()
-                s.add(
-                    InspirationMessage(
-                        space_id=int(space_id),
-                        role="assistant",
-                        kind="error",
-                        content=f"Failed to publish the draft: {str(e)}",
-                        payload={"error": str(e), "draft_id": int(draft_id)},
-                    )
-                )
-        _try_audit_memory(
-            kind="inspiration.publish_error",
-            source="web",
-            summary=f"Failed publishing inspiration space {int(space_id)}.",
-            detail=str(e),
-            metadata={"space_id": int(space_id), "draft_id": int(draft_id)},
-        )
-        return
-
-    _try_audit_memory(
-        kind="inspiration.published",
-        source="web",
-        summary=f"Published inspiration space {int(space_id)} into goal {int(created_goal_id)}.",
-        detail=json.dumps(
-            {
-                "draft": draft_payload or {},
-                "created_goal_id": created_goal_id,
-                "created_task_ids": created_task_ids,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        goal_id=created_goal_id,
-        metadata={"space_id": int(space_id), "created_task_ids": created_task_ids},
+    inspiration_publishing.publish_sync(
+        space_id=int(space_id),
+        draft_id=int(draft_id),
+        due_date_iso=str(due_date_iso),
+        previous_status=str(previous_status or "open"),
+        load_snapshot=_inspiration_load_publish_snapshot,
+        audit=_try_audit_memory,
     )
 
 
@@ -2844,9 +1090,17 @@ async def _kickoff_inspiration_publish(
     )
     with session_scope() as s:
         space = s.get(InspirationSpace, int(space_id))
-        is_published = space is not None and str(space.status or "") == "published"
-    if is_published:
+        should_release = space is not None and str(space.status or "") in {
+            "published",
+            "publishing_releasing",
+        }
+    if should_release:
         await _inspiration_release_terminals(int(space_id))
+        with session_scope() as s:
+            space = s.get(InspirationSpace, int(space_id))
+            if space is not None and str(space.status or "") == "publishing_releasing":
+                space.status = "published"
+                space.last_activity_at = _utcnow()
 
 
 async def _inspiration_enqueue_turn(space_id: int, content: str) -> dict:
@@ -3240,131 +1494,9 @@ def _next_move_task_type_label(task_type: str | None) -> str:
     )
 
 
-def _infer_task_type(title: str, description: str) -> str:
-    text = f"{title}\n{description}".lower()
-    if any(
-        k in text
-        for k in [
-            "review",
-            "approve",
-            "comment",
-            "code review",
-            "qa",
-            "test report",
-            "验收",
-            "评审",
-            "reviewer",
-            " pr",
-            " mr",
-        ]
-    ):
-        return "review"
-    if any(
-        k in text
-        for k in [
-            "sync",
-            "meeting",
-            "reply",
-            "email",
-            "message",
-            "call",
-            "沟通",
-            "对齐",
-            "联系",
-            "回复",
-            "会议",
-        ]
-    ):
-        return "communication"
-    if any(
-        k in text
-        for k in [
-            "admin",
-            "ops",
-            "cleanup",
-            "organize",
-            "docs",
-            "document",
-            "整理",
-            "记录",
-            "文档",
-            "行政",
-        ]
-    ):
-        return "admin"
-    if any(
-        k in text
-        for k in [
-            "design",
-            "investigate",
-            "analysis",
-            "analyze",
-            "refactor",
-            "architecture",
-            "research",
-            "规划",
-            "设计",
-            "排查",
-            "分析",
-            "重构",
-        ]
-    ):
-        return "deep_work"
-    return "execution"
-
-
-def _infer_estimated_minutes(task_type: str, title: str, description: str) -> int:
-    text = f"{title}\n{description}".lower()
-    m = re.search(
-        r"(\d{1,3})\s*(minutes?|mins?|min|小时|小時|hour|hours|hr|hrs|h|分钟|分鐘)",
-        text,
-    )
-    if m:
-        try:
-            num = max(5, min(240, int(m.group(1))))
-            unit = m.group(2)
-            if unit in {"小时", "小時", "hour", "hours", "hr", "hrs", "h"}:
-                return min(240, num * 60)
-            return num
-        except Exception:
-            pass
-    if re.search(
-        r"\b(quick|small|tiny|minor|trivial|fast|马上|快速|小改|顺手)\b", text
-    ):
-        return 20
-    if task_type == "review":
-        return 25
-    if task_type == "communication":
-        return 20
-    if task_type == "admin":
-        return 15
-    if task_type == "deep_work":
-        return 90
-    return 45
-
-
-def _infer_context_key(
-    title: str, description: str, *, goal_id: int, root_path: str | None = None
-) -> str:
-    rp = str(root_path or "").strip()
-    if rp:
-        try:
-            name = Path(rp).name.strip().lower()
-            if name:
-                return f"space:{name[:80]}"
-        except Exception:
-            pass
-    text = f"{title}\n{description}".lower()
-    m = re.search(r"([a-z0-9_.-]+/[a-z0-9_.-]+)", text)
-    if m:
-        return f"topic:{m.group(1)[:80]}"
-    tokens = [
-        x for x in re.split(r"[^a-zA-Z0-9\u4e00-\u9fff]+", text) if len(x.strip()) >= 2
-    ]
-    seed = (tokens[0] if tokens else "")[:32].strip().lower()
-    if seed:
-        return f"goal:{goal_id}:{seed}"
-    return f"goal:{goal_id}"
+_infer_task_type = goal_service.infer_task_type
+_infer_estimated_minutes = goal_service.infer_estimated_minutes
+_infer_context_key = goal_service.infer_context_key
 
 
 def _next_move_memory_context() -> dict:
@@ -3550,27 +1682,7 @@ def _next_move_learning_note(
 def _next_move_persist_feedback_learning(
     *, note: str, memory_note: str | None = None
 ) -> None:
-    now = _utcnow()
-    daily_path = _memory_daily_root() / f"{now.date().isoformat()}.md"
-    with _MEMORY_LOCK:
-        existing_daily = _memory_read_text(daily_path)
-        if note and note not in existing_daily:
-            prefix = (
-                "\n## Next Move Feedback\n\n"
-                if "## Next Move Feedback" not in existing_daily
-                else "\n"
-            )
-            _memory_append_text(daily_path, prefix + note + "\n")
-        if memory_note:
-            long_term_path = _memory_long_term_path()
-            existing_long_term = _memory_read_text(long_term_path)
-            if memory_note not in existing_long_term:
-                prefix = (
-                    "\n## Learned Preferences\n\n"
-                    if "## Learned Preferences" not in existing_long_term
-                    else "\n"
-                )
-                _memory_append_text(long_term_path, prefix + memory_note + "\n")
+    memory_service.persist_feedback_learning(note=note, memory_note=memory_note)
 
 
 @app.get("/api/recommendations/next")
@@ -3975,39 +2087,18 @@ async def goals_create(
     title: str = Form(..., min_length=1, max_length=2000),
     content: str = Form(..., min_length=1, max_length=4000),
     due_date: str = Form(...),
-    plan_mode: str | None = Form(default=None),
 ) -> RedirectResponse:
-    # Server-side guard: if Plan Mode is ON but JS didn't repoint form action,
-    # we should still enter Plan flow instead of creating the goal directly.
-    pm = str(plan_mode or "").strip().lower()
-    if pm in {"1", "true", "on", "yes"}:
-        return await goal_plan_create_session(
-            due_date=due_date,
+    parsed_due = dt.date.fromisoformat(due_date)
+    with session_scope() as s:
+        goal = goal_service.create_goal(
+            s,
             title=title,
             content=content,
-            draft_content=None,
-        )
-
-    parsed_due = dt.date.fromisoformat(due_date)
-    created_goal_id = 0
-    with session_scope() as s:
-        goal = Goal(
-            title=title.strip(),
-            content=content.strip(),
             due_date=parsed_due,
+            agent="ui",
+            source="web",
         )
-        s.add(goal)
-        s.flush()
-        _add_goal_created_event(s, goal, agent="ui")
         created_goal_id = int(goal.id or 0)
-    _try_audit_memory(
-        kind="goal.created",
-        source="web",
-        summary=f"Created goal: {title.strip()}",
-        detail=f"Goal title:\n\n{title.strip()}\n\nContent:\n\n{content.strip()}",
-        goal_id=created_goal_id or None,
-        metadata={"due_date": parsed_due.isoformat()},
-    )
     return RedirectResponse(
         url=f"/goals?goal={created_goal_id}&tab=tasks", status_code=303
     )
@@ -4019,44 +2110,18 @@ def tasks_create(
     title: str = Form(..., min_length=1, max_length=512),
     content: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
-    created_task_id = ""
     with session_scope() as s:
-        goal = s.get(Goal, goal_id)
-        if goal is None:
+        try:
+            goal_service.create_task(
+                s,
+                goal_id=int(goal_id),
+                title=title,
+                content=content,
+                agent="ui",
+                source="web",
+            )
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Goal not found")
-        title_text = title.strip()
-        content_text = content.strip()
-        task_type = _infer_task_type(title_text, content_text)
-        estimated_minutes = _infer_estimated_minutes(
-            task_type, title_text, content_text
-        )
-        context_key = _infer_context_key(title_text, content_text, goal_id=goal_id)
-        task = Task(
-            goal_id=goal_id,
-            title=title_text,
-            content=content_text,
-            status="todo",
-            task_type=task_type,
-            estimated_minutes=estimated_minutes,
-            context_key=context_key,
-        )
-        s.add(task)
-        s.flush()
-        _add_task_created_event(s, task, agent="ui")
-        created_task_id = str(task.public_id or "")
-    _try_audit_memory(
-        kind="task.created",
-        source="web",
-        summary=f"Created task: {title_text}",
-        detail=f"Task title:\n\n{title_text}\n\nContent:\n\n{content_text}",
-        goal_id=goal_id,
-        task_public_id=created_task_id or None,
-        metadata={
-            "task_type": task_type,
-            "estimated_minutes": estimated_minutes,
-            "context_key": context_key,
-        },
-    )
     return RedirectResponse(url=f"/goals?goal={goal_id}&tab=tasks", status_code=303)
 
 
@@ -4065,28 +2130,10 @@ def goals_mark_done(goal_id: int) -> RedirectResponse:
     """将 Goal 标记为已完成（人工行为）。"""
 
     with session_scope() as s:
-        g = s.get(Goal, goal_id)
-        if g is None:
+        try:
+            goal_service.mark_goal_done(s, goal_id=int(goal_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Goal not found")
-        if (g.status or "").strip() != "done":
-            old = (g.status or "").strip() or "active"
-            g.status = "done"
-            s.add(
-                Event(
-                    kind="goal.confirmed_done_by_user",
-                    agent="ui",
-                    task_id=None,
-                    payload={"goal_id": int(goal_id), "from": old},
-                )
-            )
-            _try_audit_memory(
-                kind="goal.finished",
-                source="web",
-                summary=f"Finished goal: {g.title}",
-                detail=f"Goal moved from `{old}` to `done`.",
-                goal_id=int(goal_id),
-                metadata={"from": old, "to": "done"},
-            )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -4095,59 +2142,22 @@ def goals_reopen(goal_id: int) -> RedirectResponse:
     """将已完成的 Goal 重新打开（人工行为）。"""
 
     with session_scope() as s:
-        g = s.get(Goal, goal_id)
-        if g is None:
+        try:
+            goal_service.reopen_goal(s, goal_id=int(goal_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Goal not found")
-        if (g.status or "").strip() == "done":
-            g.status = "active"
-            s.add(
-                Event(
-                    kind="goal.reopened_by_user",
-                    agent="ui",
-                    task_id=None,
-                    payload={"goal_id": int(goal_id)},
-                )
-            )
-            _try_audit_memory(
-                kind="goal.reopened",
-                source="web",
-                summary=f"Reopened goal: {g.title}",
-                detail="Goal moved from `done` back to `active`.",
-                goal_id=int(goal_id),
-                metadata={"to": "active"},
-            )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
 @app.post("/tasks/{task_id:int}/done", include_in_schema=False)
 def tasks_mark_done(task_id: int) -> RedirectResponse:
     with session_scope() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        try:
+            result = goal_service.mark_task_done(s, task_id=int(task_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Task not found")
-        if t.status != "done":
-            old = t.status
-            t.status = "done"
-            t.completed_at = dt.datetime.now(dt.timezone.utc)
-            s.add(
-                Event(
-                    kind="task.confirmed_done",
-                    agent="ui",
-                    task_id=t.public_id,
-                    payload={"from": old},
-                )
-            )
-            _try_audit_memory(
-                kind="task.finished",
-                source="web",
-                summary=f"Finished task: {t.title}",
-                detail=f"Task moved from `{old}` to `done`.",
-                goal_id=int(t.goal_id),
-                task_public_id=t.public_id,
-                metadata={"from": old, "to": "done"},
-            )
-        goal_id = t.goal_id
-        task_public_id = t.public_id
+        goal_id = result.goal_id
+        task_public_id = result.task_public_id
 
     # 完成任务时自动释放 AgentSpace（若存在）。
     # 注意：这里是 best-effort；释放失败不应阻断“完成”本身。
@@ -4173,30 +2183,11 @@ def tasks_reopen(task_id: int) -> RedirectResponse:
     """将已完成任务重新打开（人工行为）。"""
 
     with session_scope() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        try:
+            result = goal_service.reopen_task(s, task_id=int(task_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Task not found")
-        if t.status == "done":
-            t.status = "todo"
-            t.completed_at = None
-            s.add(
-                Event(
-                    kind="task.reopened",
-                    agent="ui",
-                    task_id=t.public_id,
-                    payload={},
-                )
-            )
-            _try_audit_memory(
-                kind="task.reopened",
-                source="web",
-                summary=f"Reopened task: {t.title}",
-                detail="Task moved from `done` back to `todo`.",
-                goal_id=int(t.goal_id),
-                task_public_id=t.public_id,
-                metadata={"to": "todo"},
-            )
-        goal_id = t.goal_id
+        goal_id = result.goal_id
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
@@ -4206,92 +2197,28 @@ def tasks_update(
     title: str = Form(..., min_length=1, max_length=512),
     content: str = Form(..., min_length=1, max_length=4000),
 ) -> RedirectResponse:
-    old_title = ""
-    old_content = ""
     with session_scope() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        try:
+            result = goal_service.update_task(
+                s, task_id=int(task_id), title=title, content=content
+            )
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Task not found")
-        old_title = str(t.title or "")
-        old_content = str(t.content or "")
-        title_text = title.strip()
-        content_text = content.strip()
-        task_type = _infer_task_type(title_text, content_text)
-        estimated_minutes = _infer_estimated_minutes(
-            task_type, title_text, content_text
-        )
-        context_key = _infer_context_key(title_text, content_text, goal_id=t.goal_id)
-        t.title = title_text
-        t.content = content_text
-        t.task_type = task_type
-        t.estimated_minutes = estimated_minutes
-        t.context_key = context_key
-        goal_id = t.goal_id
-        pid = t.public_id
-    _try_audit_memory(
-        kind="task.edited",
-        source="web",
-        summary=f"Edited task: {title_text}",
-        detail=(
-            f"Previous title: {old_title}\n\n"
-            f"Previous content:\n\n{old_content}\n\n"
-            f"Updated title: {title_text}\n\n"
-            f"Updated content:\n\n{content_text}"
-        ),
-        goal_id=goal_id,
-        task_public_id=pid,
-        metadata={
-            "task_type": task_type,
-            "estimated_minutes": estimated_minutes,
-            "context_key": context_key,
-        },
-    )
     # 保持 Dashboard 选中态
-    return RedirectResponse(url=f"/goals?task={pid}&goal={goal_id}", status_code=303)
+    return RedirectResponse(
+        url=f"/goals?task={result.task_public_id}&goal={result.goal_id}",
+        status_code=303,
+    )
 
 
 @app.post("/tasks/{task_id:int}/delete", include_in_schema=False)
 def tasks_delete(task_id: int) -> RedirectResponse:
-    deleted_title = ""
-    deleted_public_id = ""
     with session_scope() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        try:
+            result = goal_service.delete_task(s, task_id=int(task_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Task not found")
-        goal_id = t.goal_id
-        deleted_title = str(t.title or "")
-        deleted_public_id = str(t.public_id or "")
-        # 清理该 task 绑定的 AgentSpace（若存在）
-        space = (
-            s.query(AgentSpace)
-            .filter(AgentSpace.task_public_id == t.public_id)
-            .one_or_none()
-        )
-        if space is not None:
-            # 同时清理 Agent 会话/消息（对话持久化属于 AgentSpace 生命周期）
-            sessions = (
-                s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
-            )
-            sess_ids = [ss.session_id for ss in sessions]
-            if sess_ids:
-                s.query(AgentMessage).filter(
-                    AgentMessage.session_id.in_(sess_ids)
-                ).delete(synchronize_session=False)
-                s.query(AgentSession).filter(
-                    AgentSession.session_id.in_(sess_ids)
-                ).delete(synchronize_session=False)
-            s.delete(space)
-        s.delete(t)
-    _try_audit_memory(
-        kind="task.deleted",
-        source="web",
-        summary=f"Deleted task: {deleted_title}",
-        detail="Task and related AgentSpace resources were deleted.",
-        goal_id=goal_id,
-        task_public_id=deleted_public_id or None,
-        metadata={},
-    )
-    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
+    return RedirectResponse(url=f"/goals?goal={result.goal_id}", status_code=303)
 
 
 @app.post("/goals/{goal_id:int}/edit", include_in_schema=False)
@@ -4305,749 +2232,31 @@ def goals_update(
     importance: str = Form("normal", max_length=32),
 ) -> RedirectResponse:
     parsed_due = dt.date.fromisoformat(due_date)
-    old_title = ""
-    old_content = ""
     with session_scope() as s:
-        goal = s.get(Goal, goal_id)
-        if goal is None:
+        try:
+            goal_service.update_goal(
+                s,
+                goal_id=int(goal_id),
+                title=title,
+                content=content,
+                due_date=parsed_due,
+                status=status,
+                priority=priority,
+                importance=importance,
+            )
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Goal not found")
-        old_title = str(goal.title or "")
-        old_content = str(goal.content or "")
-        goal.title = title.strip()
-        goal.content = content.strip()
-        goal.due_date = parsed_due
-        goal.status = status.strip() or "active"
-        goal.priority = priority.strip() or "normal"
-        goal.importance = importance.strip() or "normal"
-    _try_audit_memory(
-        kind="goal.edited",
-        source="web",
-        summary=f"Edited goal: {title.strip()}",
-        detail=(
-            f"Previous title: {old_title}\n\n"
-            f"Previous content:\n\n{old_content}\n\n"
-            f"Updated title: {title.strip()}\n\n"
-            f"Updated content:\n\n{content.strip()}"
-        ),
-        goal_id=goal_id,
-        metadata={
-            "due_date": parsed_due.isoformat(),
-            "status": status.strip() or "active",
-            "priority": priority.strip() or "normal",
-            "importance": importance.strip() or "normal",
-        },
-    )
     return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
 
 @app.post("/goals/{goal_id:int}/delete", include_in_schema=False)
 def goals_delete(goal_id: int) -> RedirectResponse:
-    deleted_title = ""
     with session_scope() as s:
-        goal = s.get(Goal, goal_id)
-        if goal is None:
+        try:
+            goal_service.delete_goal(s, goal_id=int(goal_id))
+        except goal_service.GoalTaskNotFound:
             raise HTTPException(status_code=404, detail="Goal not found")
-        deleted_title = str(goal.title or "")
-        # 清理关联 tasks（MVP 先做简单级联）
-        s.query(Task).filter(Task.goal_id == goal_id).delete()
-        s.delete(goal)
-    _try_audit_memory(
-        kind="goal.deleted",
-        source="web",
-        summary=f"Deleted goal: {deleted_title}",
-        detail="Goal and its tasks were deleted.",
-        goal_id=goal_id,
-        metadata={},
-    )
     return RedirectResponse(url="/goals", status_code=303)
-
-
-@app.get("/goals/plan", response_class=HTMLResponse)
-def goal_plan_start(request: Request) -> HTMLResponse:
-    # Optional prefill from:
-    # - /goals/{goal_id}/plan/start when LLM not configured => ?goal_id=
-    # - /goals/plan/start POST when LLM not configured => ?draft_content=&due_date=
-    default_due_obj = dt.date.today() + dt.timedelta(days=7)
-    draft_content = ""
-
-    qp = getattr(request, "query_params", None)
-    if qp is not None:
-        try:
-            # Preserve user input if POST fails due to missing LLM.
-            draft_content = str(qp.get("draft_content") or "").strip()
-        except Exception:
-            draft_content = ""
-
-        try:
-            due = str(qp.get("due_date") or "").strip()
-            if due:
-                default_due_obj = dt.date.fromisoformat(due)
-        except Exception:
-            pass
-
-        # If coming from a goal, prefill from that goal.
-        if not draft_content:
-            try:
-                gid_raw = str(qp.get("goal_id") or "").strip()
-                gid = int(gid_raw) if gid_raw else 0
-            except Exception:
-                gid = 0
-            if gid:
-                try:
-                    with session_scope() as s:
-                        g = s.get(Goal, gid)
-                        if g is not None:
-                            draft_content = str(g.title or "").strip()
-                            if getattr(g, "due_date", None):
-                                default_due_obj = g.due_date
-                except Exception:
-                    pass
-
-    _provider, err = _get_llm_provider_or_error()
-    return templates.TemplateResponse(
-        request,
-        "goal_plan.html",
-        {
-            "default_due": default_due_obj.isoformat(),
-            "draft_content": draft_content,
-            "error": err,
-        },
-    )
-
-
-def _plan_system_prompt(*, remaining_turns: int) -> str:
-    return (
-        "You are a Goal planning assistant in Plan Mode.\n"
-        "Your job is to clarify the goal through conversation, identify potential goal conflicts and goal relationships, and produce executable tasks.\n"
-        "You must return strict JSON only, never Markdown.\n"
-        "On each turn you may do exactly one of the following:\n"
-        '1) Ask a follow-up question: {"type":"question", "question":"..."}\n'
-        '2) Return a final plan: {"type":"final", "goal":{...}, "tasks":[...], "conflicts":[...], "relations":[...]}\n'
-        f"Remaining follow-up turns: {remaining_turns}. When remaining_turns <= 0 you must return `final`.\n"
-        "`final.goal` must include: title, content, status, priority, importance.\n"
-        "Each item in `tasks` must include at least `title` as a string."
-    )
-
-
-def _plan_llm_step(
-    *,
-    provider: OpenAICompatibleProvider,
-    session: GoalPlanSession,
-    messages: list[GoalPlanMessage],
-    source_goal: Goal | None = None,
-    existing_tasks: list[Task] | None = None,
-) -> dict:
-    remaining = max(0, 3 - session.turns)
-    sys = _plan_system_prompt(remaining_turns=remaining)
-    convo: list[dict] = [{"role": "system", "content": sys}]
-    extra = ""
-    if source_goal is not None:
-        extra += f"\nCurrent goal: {source_goal.title}\n"
-        if source_goal.content:
-            extra += f"Goal content: {source_goal.content}\n"
-        extra += f"Goal status: {source_goal.status} · priority={source_goal.priority} · importance={source_goal.importance}\n"
-    if existing_tasks:
-        extra += "\nExisting tasks:\n"
-        for t in existing_tasks[:50]:
-            extra += f"- [{t.status}] {t.title} (taskId={t.public_id})\n"
-
-    convo.append(
-        {
-            "role": "user",
-            "content": (
-                f"Draft goal: {session.draft_content}\nDue date: {session.due_date.isoformat()}\n"
-                + extra
-            ),
-        }
-    )
-    for m in messages:
-        convo.append({"role": m.role, "content": m.content})
-
-    res = provider.chat_completions(
-        messages=convo,
-        temperature=0.0,
-        max_tokens=900,
-        response_format={"type": "json_object"},
-    )
-    import json as _json
-
-    return _json.loads(res.content)
-
-
-async def _kickoff_plan_session_first_step(session_id: int) -> None:
-    """Start the first Plan Session step asynchronously without blocking creation."""
-
-    try:
-        provider, err = _get_llm_provider_or_error()
-        if provider is None:
-            with session_scope() as s:
-                sess = s.get(GoalPlanSession, int(session_id))
-                if sess is None:
-                    return
-                sess.status = "error"
-                s.add(
-                    GoalPlanMessage(
-                        session_id=int(session_id),
-                        role="assistant",
-                        content=str(err or "LLM is not configured"),
-                    )
-                )
-            _try_audit_memory(
-                kind="plan.error",
-                source="plan_mode",
-                summary=f"Plan session {int(session_id)} is blocked by missing LLM.",
-                detail=str(err or "LLM is not configured"),
-                metadata={"session_id": int(session_id)},
-            )
-            return
-
-        # Snapshot session/messages for LLM call (avoid holding DB session during network).
-        with session_scope() as s:
-            sess = s.get(GoalPlanSession, int(session_id))
-            if sess is None:
-                return
-            msgs = (
-                s.query(GoalPlanMessage)
-                .filter(GoalPlanMessage.session_id == int(session_id))
-                .order_by(GoalPlanMessage.id.asc())
-                .all()
-            )
-            sess_snapshot = GoalPlanSession(
-                id=sess.id,
-                status=sess.status,
-                draft_content=sess.draft_content,
-                due_date=sess.due_date,
-                source_goal_id=sess.source_goal_id,
-                turns=sess.turns,
-                result_json=sess.result_json,
-                created_goal_id=sess.created_goal_id,
-            )
-            msgs_snapshot = [
-                GoalPlanMessage(session_id=m.session_id, role=m.role, content=m.content)
-                for m in msgs
-            ]
-
-        data = await asyncio.to_thread(
-            _plan_llm_step,
-            provider=provider,
-            session=sess_snapshot,
-            messages=msgs_snapshot,
-        )
-
-        with session_scope() as s:
-            sess = s.get(GoalPlanSession, int(session_id))
-            if sess is None:
-                return
-
-            if data.get("type") == "question":
-                q = (
-                    str(data.get("question") or "").strip()
-                    or "Please share a bit more detail."
-                )
-                s.add(
-                    GoalPlanMessage(
-                        session_id=int(session_id), role="assistant", content=q
-                    )
-                )
-                sess.status = "in_progress"
-                _try_audit_memory(
-                    kind="plan.assistant_message",
-                    source="plan_mode",
-                    summary=f"Plan session {int(session_id)} asked a follow-up question.",
-                    detail=q,
-                    metadata={
-                        "session_id": int(session_id),
-                        "message_type": "question",
-                    },
-                )
-                return
-
-            # Save the draft result but keep the conversation open for more iteration.
-            sess.result_json = data
-            sess.status = "in_progress"
-            s.add(
-                GoalPlanMessage(
-                    session_id=int(session_id),
-                    role="assistant",
-                    content="I generated a draft task breakdown. You can keep refining it here, or click Create to write the goal and tasks.",
-                )
-            )
-            _try_audit_memory(
-                kind="plan.draft_generated",
-                source="plan_mode",
-                summary=f"Plan session {int(session_id)} generated a draft.",
-                detail=json.dumps(data, ensure_ascii=False, indent=2),
-                metadata={
-                    "session_id": int(session_id),
-                    "tasks": len(data.get("tasks") or []),
-                },
-            )
-    except Exception as e:
-        with session_scope() as s:
-            sess = s.get(GoalPlanSession, int(session_id))
-            if sess is None:
-                return
-            sess.status = "error"
-            s.add(
-                GoalPlanMessage(
-                    session_id=int(session_id),
-                    role="assistant",
-                    content="Failed to start: " + str(e),
-                )
-            )
-        _try_audit_memory(
-            kind="plan.error",
-            source="plan_mode",
-            summary=f"Plan session {int(session_id)} failed to start.",
-            detail=str(e),
-            metadata={"session_id": int(session_id)},
-        )
-
-
-@app.post("/goals/plan/start", include_in_schema=False)
-async def goal_plan_create_session(
-    due_date: str = Form(...),
-    draft_content: str | None = Form(default=None),
-    title: str | None = Form(default=None),
-    content: str | None = Form(default=None),
-    description: str | None = Form(default=None),
-) -> RedirectResponse:
-    provider, err = _get_llm_provider_or_error()
-    if provider is None:
-        from urllib.parse import urlencode
-
-        raw = (draft_content or "").strip()
-        if not raw:
-            title_text = (title or "").strip()
-            content_text = (content or "").strip()
-            # Backward compatibility for older callers that posted
-            # content=<title>, description=<content>.
-            if not title_text and description is not None:
-                title_text = content_text
-                content_text = (description or "").strip()
-            raw = title_text
-            if content_text:
-                raw = (title_text + "\n\nContent:\n" + content_text).strip()
-        _try_audit_memory(
-            kind="plan.session_start_requested",
-            source="web",
-            summary="Requested plan session without available LLM provider.",
-            detail=raw,
-            metadata={
-                "due_date": due_date,
-                "error": str(err or "LLM is not configured"),
-            },
-        )
-        qs = urlencode({"draft_content": raw, "due_date": due_date})
-        return RedirectResponse(url="/goals/plan?" + qs, status_code=303)
-
-    parsed_due = dt.date.fromisoformat(due_date)
-    raw = (draft_content or "").strip()
-    if not raw:
-        title_text = (title or "").strip()
-        content_text = (content or "").strip()
-        # Backward compatibility for older callers that posted
-        # content=<title>, description=<content>.
-        if not title_text and description is not None:
-            title_text = content_text
-            content_text = (description or "").strip()
-        raw = title_text
-        if content_text:
-            raw = (title_text + "\n\nContent:\n" + content_text).strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="draft_content/content is required")
-    if len(raw) > 2000:
-        raw = raw[:2000]
-
-    with session_scope() as s:
-        sess = GoalPlanSession(
-            status="starting", draft_content=raw, due_date=parsed_due
-        )
-        s.add(sess)
-        s.flush()
-        sid = sess.id
-        # Seed the session with an assistant intro message.
-        s.add(
-            GoalPlanMessage(
-                session_id=sid,
-                role="assistant",
-                content="I will ask a few questions to clarify the goal, then draft an executable task breakdown.",
-            )
-        )
-
-    _try_audit_memory(
-        kind="plan.session_started",
-        source="web",
-        summary=f"Started plan session {int(sid)}.",
-        detail=raw,
-        metadata={"session_id": int(sid), "due_date": parsed_due.isoformat()},
-    )
-
-    try:
-        asyncio.get_running_loop().create_task(
-            _kickoff_plan_session_first_step(int(sid))
-        )
-    except RuntimeError:
-        # no running loop (should not happen under uvicorn); best-effort fallback
-        pass
-
-    return RedirectResponse(url=f"/goals/plan/{sid}", status_code=303)
-
-
-@app.get("/goals/plan/{session_id}", response_class=HTMLResponse)
-def goal_plan_view(request: Request, session_id: int) -> HTMLResponse:
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, session_id)
-        if sess is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        msgs = (
-            s.query(GoalPlanMessage)
-            .filter(GoalPlanMessage.session_id == session_id)
-            .order_by(GoalPlanMessage.id.asc())
-            .all()
-        )
-    return templates.TemplateResponse(
-        request,
-        "goal_plan_session.html",
-        {
-            "session": sess,
-            "messages": msgs,
-            "created_goal_id": sess.created_goal_id,
-        },
-    )
-
-
-@app.post("/goals/plan/{session_id}/reply", include_in_schema=False)
-def goal_plan_reply(
-    session_id: int, answer: str = Form(..., min_length=1, max_length=20000)
-) -> RedirectResponse:
-    provider, err = _get_llm_provider_or_error()
-    if provider is None:
-        return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, session_id)
-        if sess is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if sess.status != "in_progress":
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-        s.add(
-            GoalPlanMessage(session_id=session_id, role="user", content=answer.strip())
-        )
-        sess.turns += 1
-    _try_audit_memory(
-        kind="plan.user_reply",
-        source="web",
-        summary=f"Plan session {int(session_id)} received a user reply.",
-        detail=answer.strip(),
-        metadata={"session_id": int(session_id)},
-    )
-
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, session_id)
-        msgs = (
-            s.query(GoalPlanMessage)
-            .filter(GoalPlanMessage.session_id == session_id)
-            .order_by(GoalPlanMessage.id.asc())
-            .all()
-        )
-        source_goal = None
-        existing_tasks = None
-        if getattr(sess, "source_goal_id", None):
-            source_goal = s.get(Goal, sess.source_goal_id)
-            existing_tasks = (
-                s.query(Task)
-                .filter(Task.goal_id == sess.source_goal_id)
-                .order_by(Task.id.asc())
-                .all()
-            )
-        data = _plan_llm_step(
-            provider=provider,
-            session=sess,
-            messages=msgs,
-            source_goal=source_goal,
-            existing_tasks=existing_tasks,
-        )
-
-        if data.get("type") == "question":
-            q = (
-                str(data.get("question") or "").strip()
-                or "Please share a bit more detail."
-            )
-            s.add(GoalPlanMessage(session_id=session_id, role="assistant", content=q))
-            _try_audit_memory(
-                kind="plan.assistant_message",
-                source="plan_mode",
-                summary=f"Plan session {int(session_id)} asked a follow-up question.",
-                detail=q,
-                metadata={"session_id": int(session_id), "message_type": "question"},
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-        # Save the draft result but keep the conversation open for more iteration.
-        sess.result_json = data
-        sess.status = "in_progress"
-        s.add(
-            GoalPlanMessage(
-                session_id=session_id,
-                role="assistant",
-                content="I generated a draft task breakdown. You can keep refining it here, or click Create to write the goal and tasks.",
-            )
-        )
-        _try_audit_memory(
-            kind="plan.draft_generated",
-            source="plan_mode",
-            summary=f"Plan session {int(session_id)} generated a draft.",
-            detail=json.dumps(data, ensure_ascii=False, indent=2),
-            metadata={
-                "session_id": int(session_id),
-                "tasks": len(data.get("tasks") or []),
-            },
-        )
-        return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-
-@app.post("/goals/{goal_id:int}/plan/start", include_in_schema=False)
-def goal_plan_create_session_from_goal(goal_id: int) -> RedirectResponse:
-    # 交互约束：已创建的 goal 不支持 Plan Mode。
-    return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
-
-
-@app.post("/goals/plan/{session_id}/confirm", include_in_schema=False)
-async def goal_plan_confirm(request: Request, session_id: int) -> RedirectResponse:
-    form = await request.form()
-    selected_task = list(form.getlist("selected_task"))
-
-    # Optional edited titles from UI: task_title_{i}
-    edited: dict[int, str] = {}
-    try:
-        for k, v in form.items():
-            if not isinstance(k, str):
-                continue
-            if not k.startswith("task_title_"):
-                continue
-            try:
-                idx = int(k.split("task_title_", 1)[1])
-            except Exception:
-                continue
-            edited[idx] = str(v or "").strip()
-    except Exception:
-        edited = {}
-
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, session_id)
-        if sess is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        # Allow writes during `in_progress` so the latest draft can be created at any time.
-        if sess.status not in {"in_progress", "awaiting_confirm"}:
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-        data = sess.result_json or {}
-        if not data:
-            s.add(
-                GoalPlanMessage(
-                    session_id=session_id,
-                    role="assistant",
-                    content="There is no draft to create yet. Generate a plan first.",
-                )
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-        tasks = data.get("tasks") or []
-
-        # Use indices instead of titles so duplicate task names remain selectable.
-        selected_idx: set[int] = set()
-        for x in selected_task:
-            try:
-                selected_idx.add(int(x))
-            except Exception:
-                continue
-
-        picked: list[str] = []
-        for i, t in enumerate(tasks):
-            if selected_idx and i not in selected_idx:
-                continue
-            if not isinstance(t, dict):
-                continue
-            title = str(edited.get(i) or t.get("title") or "").strip()
-            if title:
-                picked.append(title)
-
-        # If nothing is selected, return to the session without making changes.
-        if not picked:
-            s.add(
-                GoalPlanMessage(
-                    session_id=session_id,
-                    role="assistant",
-                    content="No tasks were selected. No changes were made.",
-                )
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-        target_goal_id: int
-        if getattr(sess, "source_goal_id", None):
-            target_goal_id = int(sess.source_goal_id)
-        else:
-            goal_obj = data.get("goal") or {}
-            title = str(
-                goal_obj.get("title") or goal_obj.get("content") or sess.draft_content
-            ).strip()
-            goal_content = str(
-                goal_obj.get("content") or goal_obj.get("description") or ""
-            ).strip()
-            status = str(goal_obj.get("status") or "active").strip() or "active"
-            priority = str(goal_obj.get("priority") or "normal").strip() or "normal"
-            importance = str(goal_obj.get("importance") or "normal").strip() or "normal"
-
-            g = Goal(
-                title=title,
-                content=goal_content,
-                due_date=sess.due_date,
-                status=status,
-                priority=priority,
-                importance=importance,
-            )
-            s.add(g)
-            s.flush()
-            _add_goal_created_event(s, g, agent="plan")
-            target_goal_id = g.id
-            sess.created_goal_id = g.id
-
-        # Create tasks from the selected draft items.
-        for title in picked:
-            task = Task(
-                goal_id=target_goal_id,
-                title=title,
-                content="",
-                status="todo",
-            )
-            s.add(task)
-            s.flush()
-            _add_task_created_event(s, task, agent="plan")
-
-        sess.status = "completed"
-        if sess.created_goal_id is None:
-            sess.created_goal_id = target_goal_id
-        s.add(
-            GoalPlanMessage(
-                session_id=session_id, role="assistant", content="Applied to the goal."
-            )
-        )
-
-    _try_audit_memory(
-        kind="plan.confirmed",
-        source="web",
-        summary=f"Plan session {int(session_id)} created goal/tasks.",
-        detail="\n".join(f"- {title}" for title in picked),
-        goal_id=target_goal_id,
-        metadata={"session_id": int(session_id), "created_tasks": picked},
-    )
-
-    return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
-
-
-@app.post("/goals/plan/{session_id}/step/{step_index}/create", include_in_schema=False)
-async def goal_plan_create_single_task(
-    request: Request, session_id: int, step_index: int
-) -> RedirectResponse:
-    """Create a single task from one step in the Plan draft.
-
-    - Create the goal first if the session has not created one yet.
-    - Redirect back to the Dashboard with the new task opened.
-    """
-
-    form = await request.form()
-
-    with session_scope() as s:
-        sess = s.get(GoalPlanSession, session_id)
-        if sess is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        data = sess.result_json or {}
-        tasks = data.get("tasks") or []
-        if not isinstance(tasks, list) or step_index < 0 or step_index >= len(tasks):
-            s.add(
-                GoalPlanMessage(
-                    session_id=session_id, role="assistant", content="Invalid step."
-                )
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-        t_item = tasks[step_index]
-        if not isinstance(t_item, dict):
-            s.add(
-                GoalPlanMessage(
-                    session_id=session_id, role="assistant", content="Invalid step."
-                )
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-        # Prefer edited title from UI if present.
-        edited_title = ""
-        try:
-            edited_title = str(form.get(f"task_title_{step_index}") or "").strip()
-        except Exception:
-            edited_title = ""
-        title = edited_title or str(t_item.get("title") or "").strip()
-        if not title:
-            s.add(
-                GoalPlanMessage(
-                    session_id=session_id,
-                    role="assistant",
-                    content="The step title is empty, so the task cannot be created.",
-                )
-            )
-            return RedirectResponse(url=f"/goals/plan/{session_id}", status_code=303)
-
-        # Ensure a goal exists.
-        target_goal_id: int
-        if getattr(sess, "created_goal_id", None):
-            target_goal_id = int(sess.created_goal_id)
-        else:
-            goal_obj = data.get("goal") or {}
-            title = str(
-                goal_obj.get("title") or goal_obj.get("content") or sess.draft_content
-            ).strip()
-            goal_content = str(
-                goal_obj.get("content") or goal_obj.get("description") or ""
-            ).strip()
-            status = str(goal_obj.get("status") or "active").strip() or "active"
-            priority = str(goal_obj.get("priority") or "normal").strip() or "normal"
-            importance = str(goal_obj.get("importance") or "normal").strip() or "normal"
-
-            g = Goal(
-                title=title,
-                content=goal_content,
-                due_date=sess.due_date,
-                status=status,
-                priority=priority,
-                importance=importance,
-            )
-            s.add(g)
-            s.flush()
-            _add_goal_created_event(s, g, agent="plan")
-            target_goal_id = g.id
-            sess.created_goal_id = g.id
-
-        task = Task(goal_id=target_goal_id, title=title, content="", status="todo")
-        s.add(task)
-        s.flush()
-        _add_task_created_event(s, task, agent="plan")
-
-        s.add(
-            GoalPlanMessage(
-                session_id=session_id,
-                role="assistant",
-                content=f"Created task: {title}",
-            )
-        )
-        # Keep session in progress for further iterations.
-        sess.status = "in_progress"
-
-        public_id = str(getattr(task, "public_id", "") or "").strip()
-        if public_id:
-            return RedirectResponse(url=f"/goals?task={public_id}", status_code=303)
-
-    # Fallback
-    return RedirectResponse(url=f"/goals?goal={target_goal_id}", status_code=303)
 
 
 @app.get("/api/inspirations")
@@ -5992,13 +3201,7 @@ def memory_view(request: Request) -> HTMLResponse:
 @app.post("/memory/audit/summary", include_in_schema=False)
 def memory_audit_summary() -> RedirectResponse:
     now = _utcnow()
-    with _MEMORY_LOCK:
-        state = _memory_load_state_unlocked()
-        _memory_rotate_current_audit_unlocked(state, now, force=True, create_next=True)
-        _memory_finalize_due_days_unlocked(state, now)
-        _memory_cleanup_audit_files_unlocked(now)
-        state["last_maintenance_at"] = _memory_iso(now)
-        _memory_save_state_unlocked(state)
+    _memory_force_audit_summary(now)
     return RedirectResponse(url="/memory?tab=audit", status_code=303)
 
 
@@ -6008,302 +3211,37 @@ def companions_view(request: Request) -> HTMLResponse:
 
 
 def _companion_display_status(c: Companion, *, now: dt.datetime | None = None) -> str:
-    """用于 Web/UI 展示的 Companion 状态。
-
-    约束：配对成功后，以 gRPC 长连接是否存在作为 online/offline 的判定依据。
-    - pending_certification: 未完成配对
-    - active: 已配对 + gRPC 在线
-    - offline: 已配对 + gRPC 不在线
-
-    参数 now 保留仅为兼容旧调用方（当前不再基于心跳时间计算）。
-    """
-
-    if (c.status or "").strip() == "pending_certification" or not (
-        c.auth_token or ""
-    ).strip():
-        return "pending_certification"
-
-    cid = int(getattr(c, "id", 0) or 0)
-    online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
-    return "active" if online else "offline"
+    return str(companion_service.display_status(c, COMPANION_GRPC, now=now) or "")
 
 
 @app.post("/api/companions/register")
 def companion_register(payload: dict) -> dict:
-    """Companion -> OpenFocus 注册/心跳。
-
-    Companion 进程启动后应定期调用该接口刷新 last_seen。
-    """
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="invalid payload")
-    device_id = str(payload.get("device_id") or "").strip()
-    base_url = str(payload.get("base_url") or "").strip()
-    name = str(payload.get("name") or "").strip()
-    if not device_id or len(device_id) > 64:
-        raise HTTPException(status_code=400, detail="device_id is required")
-    if not base_url or len(base_url) > 1024:
-        raise HTTPException(status_code=400, detail="base_url is required")
-
-    now = _utcnow()
-    with session_scope() as s:
-        c = s.query(Companion).filter(Companion.device_id == device_id).one_or_none()
-        if c is None:
-            c = Companion(device_id=device_id, base_url=base_url, name=name)
-            s.add(c)
-            s.flush()
-        else:
-            c.base_url = base_url
-            if name:
-                c.name = name
-        c.last_seen_at = now
-        # 若已配对成功则保持 active
-        if (c.auth_token or "").strip():
-            c.status = "active"
-        else:
-            c.status = "pending_certification"
-        s.add(c)
-        cid = c.id
-        status_out = c.status
-
-    return {"ok": True, "id": cid, "status": status_out}
+    return companion_service.register_companion(payload)
 
 
 @app.get("/api/companions")
 def companions_list(limit: int = 50) -> dict:
-    limit = max(1, min(int(limit or 50), 200))
-    with session_scope() as s:
-        comps = s.query(Companion).order_by(Companion.id.desc()).limit(limit).all()
-        ids = [c.id for c in comps]
-        spaces_by_comp: dict[int, list[dict]] = {cid: [] for cid in ids}
-        if ids:
-            spaces = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.companion_id.in_(ids))
-                .order_by(AgentSpace.id.desc())
-                .all()
-            )
-            for sp in spaces:
-                cid = int(getattr(sp, "companion_id", 0) or 0)
-                if cid in spaces_by_comp:
-                    spaces_by_comp[cid].append(
-                        {"id": sp.id, "task_public_id": sp.task_public_id}
-                    )
-
-    items: list[dict] = []
-    for c in comps:
-        items.append(
-            {
-                "id": c.id,
-                "device_id": c.device_id,
-                "name": c.name,
-                "base_url": c.base_url,
-                "status": _companion_display_status(c),
-                "last_seen_at": (
-                    c.last_seen_at.isoformat() if c.last_seen_at else None
-                ),
-                "created_at": (
-                    c.created_at.isoformat() if getattr(c, "created_at", None) else None
-                ),
-                "agent_spaces": spaces_by_comp.get(c.id, []),
-            }
-        )
-    return {"ok": True, "items": items}
+    return companion_service.list_companions(COMPANION_GRPC, limit=limit)
 
 
 @app.delete("/api/companions/{companion_id:int}")
 def companion_delete(companion_id: int) -> dict:
-    """删除 Companion。
-
-    行为：
-    - best-effort 断开 gRPC 连接（若在线）
-    - 将关联的 AgentSpace 解绑（companion_id=NULL），避免脏引用
-    - 删除 Companion 记录
-    - 记录事件
-    """
-
-    cid = int(companion_id)
-    if cid <= 0:
-        raise HTTPException(status_code=400, detail="invalid companion_id")
-
-    # 先 best-effort 断开在线连接（真正从 registry 移除由 gRPC stream finally 处理）
-    try:
-        conn = COMPANION_GRPC.registry.get(cid)
-        if conn is not None:
-            conn.close()
-    except Exception:
-        pass
-
-    unbound = 0
-    device_id = ""
-    with session_scope() as s:
-        c = s.get(Companion, cid)
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        device_id = str(c.device_id or "")
-
-        spaces = s.query(AgentSpace).filter(AgentSpace.companion_id == cid).all()
-        unbound = len(spaces)
-        for sp in spaces:
-            sp.companion_id = None
-            s.add(sp)
-
-        s.delete(c)
-        s.add(
-            Event(
-                kind="companion.deleted",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={
-                    "companion_id": cid,
-                    "device_id": device_id,
-                    "unbound_spaces": unbound,
-                },
-            )
-        )
-
-    return {"ok": True, "companion_id": cid, "unbound_spaces": unbound}
+    return companion_service.delete_companion(COMPANION_GRPC, companion_id)
 
 
 @app.post("/api/companions/{companion_id:int}/pair")
 async def companion_pair(companion_id: int, payload: dict) -> dict:
-    code = str((payload.get("code") if isinstance(payload, dict) else "") or "").strip()
-    if not code:
-        raise HTTPException(status_code=400, detail="code is required")
-    if len(code) != 10:
-        raise HTTPException(status_code=400, detail="认证码必须为 10 位")
-
-    now = _utcnow()
-    minute_start = now.replace(second=0, microsecond=0)
-
-    with session_scope() as s:
-        c = s.get(Companion, companion_id)
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-
-        # 每分钟最多 10 次尝试
-        ws = c.pair_attempt_window_start
-        if (
-            ws is None
-            or (ws.replace(tzinfo=dt.timezone.utc) if ws.tzinfo is None else ws)
-            != minute_start
-        ):
-            c.pair_attempt_window_start = minute_start
-            c.pair_attempt_count = 0
-        if c.pair_attempt_count >= 10:
-            raise HTTPException(
-                status_code=429, detail="本分钟认证尝试次数已达上限（10 次）"
-            )
-        c.pair_attempt_count += 1
-        s.add(c)
-
-        device_id = c.device_id
-
-        # 记录一次“提交认证码”的尝试（不落具体 code，避免泄露）
-        s.add(
-            Event(
-                kind="companion.pair.attempted",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
-        )
-
-    # 通过 gRPC 长连接下发配对确认
-    conn = COMPANION_GRPC.registry.get(companion_id)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-    try:
-        token = await conn.request_pair(code, timeout_seconds=10.0)
-    except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion 配对失败：{e}")
-
-    with session_scope() as s:
-        c3 = s.get(Companion, companion_id)
-        if c3 is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        c3.auth_token = token
-        c3.status = "active"
-        c3.last_seen_at = now
-        s.add(c3)
-
-        s.add(
-            Event(
-                kind="companion.paired",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
-        )
-    return {"ok": True}
+    return await companion_service.pair_companion(COMPANION_GRPC, companion_id, payload)
 
 
 @app.post("/api/companions/{companion_id:int}/pairing_code")
 async def companion_pairing_code(companion_id: int) -> dict:
-    """用户点击“认证”时获取（并刷新）当前配对码。
-
-    设计约束：每次用户点击认证都生成一个新的 code，有效期 10 分钟。
-    """
-
-    with session_scope() as s:
-        c = s.get(Companion, companion_id)
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        device_id = c.device_id
-
-        # 记录一次“申请配对码”（用户点击认证）
-        s.add(
-            Event(
-                kind="companion.pairing_code.requested",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
-        )
-
-        if _companion_display_status(c) == "offline":
-            raise HTTPException(status_code=400, detail="Companion offline")
-
-    conn = COMPANION_GRPC.registry.get(companion_id)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-
-    try:
-        _code, expires_at = await conn.request_pairing_code(
-            force_new=True, timeout_seconds=10.0
-        )
-    except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion 获取配对码失败：{e}")
-
-    # 安全要求：配对码只在 Companion 终端/本机侧展示；Web 侧不回传 code，避免“自动填充”绕过人工确认。
-    return {"ok": True, "expires_at": expires_at}
+    return await companion_service.request_pairing_code(COMPANION_GRPC, companion_id)
 
 
 @app.post("/api/companions/{companion_id:int}/choose_directory")
 async def companion_choose_directory_proxy(companion_id: int) -> dict:
-    with session_scope() as s:
-        c = s.get(Companion, companion_id)
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (
-            c.auth_token or ""
-        ).strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-
-    conn = COMPANION_GRPC.registry.get(companion_id)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-    try:
-        path = await conn.request_choose_directory(timeout_seconds=30.0)
-    except CompanionGrpcError as e:
-        raise HTTPException(status_code=502, detail=f"Companion 目录选择失败：{e}")
-    return {"ok": True, "path": path}
+    return await companion_service.choose_directory(COMPANION_GRPC, companion_id)
 
 
 @app.post("/memory/save", include_in_schema=False)
@@ -6834,128 +3772,22 @@ async def delete_agent_space(task_public_id: str) -> dict:
 
 @app.get("/api/agent_spaces/{space_id}/files/list")
 async def agent_space_files_list(space_id: int, path: str = "") -> dict:
-    # 通过 Companion(gRPC) 从远端节点列目录（只读）
-    with session_scope() as s:
-        sp = s.get(AgentSpace, int(space_id))
-        if sp is None:
-            raise HTTPException(status_code=404, detail="AgentSpace not found")
-        if not sp.companion_id:
-            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-
-        c = s.get(Companion, int(sp.companion_id))
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (
-            c.auth_token or ""
-        ).strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-
-        root_path = str(sp.root_path or "")
-        cid = int(c.id)
-
-    conn = COMPANION_GRPC.registry.get(cid)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-
-    try:
-        res = await conn.request_files_list(
-            root_path=root_path, rel_path=str(path or ""), timeout_seconds=10.0
-        )
-    except CompanionGrpcError as e:
-        raise _map_companion_files_error(e)
-
-    entries = [
-        {
-            "name": it.name,
-            "rel_path": it.rel_path,
-            "kind": it.kind,
-            "size": int(it.size),
-            "mtime": float(it.mtime),
-        }
-        for it in (res.entries or [])
-    ]
-    return {"ok": True, "path": res.path, "entries": entries}
+    return await companion_service.list_space_files(
+        COMPANION_GRPC, space_id=space_id, path=path
+    )
 
 
 @app.get("/api/agent_spaces/{space_id}/files/read")
 async def agent_space_files_read(space_id: int, path: str) -> dict:
-    with session_scope() as s:
-        sp = s.get(AgentSpace, int(space_id))
-        if sp is None:
-            raise HTTPException(status_code=404, detail="AgentSpace not found")
-        if not sp.companion_id:
-            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-
-        c = s.get(Companion, int(sp.companion_id))
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (
-            c.auth_token or ""
-        ).strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-
-        root_path = str(sp.root_path or "")
-        cid = int(c.id)
-
-    conn = COMPANION_GRPC.registry.get(cid)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-
-    try:
-        res = await conn.request_files_read(
-            root_path=root_path, rel_path=str(path or ""), max_bytes=256 * 1024
-        )
-    except CompanionGrpcError as e:
-        raise _map_companion_files_error(e)
-
-    return {
-        "ok": True,
-        "path": res.path,
-        "content": res.content,
-        "truncated": bool(res.truncated),
-        "mime": res.mime,
-    }
+    return await companion_service.read_space_file(
+        COMPANION_GRPC, space_id=space_id, path=path
+    )
 
 
 @app.get("/api/agent_spaces/{space_id}/files/raw")
 async def agent_space_files_raw(space_id: int, path: str) -> Response:
-    with session_scope() as s:
-        sp = s.get(AgentSpace, int(space_id))
-        if sp is None:
-            raise HTTPException(status_code=404, detail="AgentSpace not found")
-        if not sp.companion_id:
-            raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-
-        c = s.get(Companion, int(sp.companion_id))
-        if c is None:
-            raise HTTPException(status_code=404, detail="Companion not found")
-        if (c.status or "").strip() == "pending_certification" or not (
-            c.auth_token or ""
-        ).strip():
-            raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-
-        root_path = str(sp.root_path or "")
-        cid = int(c.id)
-
-    conn = COMPANION_GRPC.registry.get(cid)
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-
-    try:
-        res = await conn.request_files_raw(
-            root_path=root_path, rel_path=str(path or ""), max_bytes=2 * 1024 * 1024
-        )
-    except CompanionGrpcError as e:
-        raise _map_companion_files_error(e)
-
-    return Response(
-        content=bytes(res.data), media_type=(res.mime or "application/octet-stream")
+    return await companion_service.raw_space_file(
+        COMPANION_GRPC, space_id=space_id, path=path
     )
 
 
@@ -6985,101 +3817,37 @@ def _inject_openfocus_prompt(
 def _load_space_and_optional_companion(
     space_id: int,
 ) -> tuple[AgentSpace, Companion | None]:
-    with session_scope() as s:
-        sp = s.get(AgentSpace, int(space_id))
-        if sp is None:
-            raise HTTPException(status_code=404, detail="AgentSpace not found")
-        comp = None
-        if getattr(sp, "companion_id", None):
-            comp = s.get(Companion, int(sp.companion_id))
-        return sp, comp
+    return companion_service.load_space_and_optional_companion(space_id)
 
 
 def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
-    if comp is None:
-        raise HTTPException(status_code=400, detail="AgentSpace 未绑定 Companion")
-    if (comp.status or "").strip() == "pending_certification" or not (
-        comp.auth_token or ""
-    ).strip():
-        raise HTTPException(status_code=400, detail="Companion 未认证/不可用")
-    conn = COMPANION_GRPC.registry.get(int(comp.id))
-    if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion 未在线（无可用 gRPC 长连接）"
-        )
-    return conn
+    return companion_service.require_online(COMPANION_GRPC, companion=comp)
 
 
 def _inspiration_terminal_space_id(space_id: int) -> int:
-    return -int(space_id)
+    return inspiration_terminal_bridge.terminal_space_id(int(space_id))
 
 
 def _select_online_companion(
     companion_id: int | None = None,
 ) -> tuple[Companion, object]:
-    with session_scope() as s:
-        q = s.query(Companion)
-        if companion_id:
-            q = q.filter(Companion.id == int(companion_id))
-        comps = q.order_by(Companion.id.desc()).all()
-        for comp in comps:
-            if (comp.status or "").strip() == "pending_certification" or not (
-                comp.auth_token or ""
-            ).strip():
-                continue
-            conn = COMPANION_GRPC.registry.get(int(comp.id))
-            if conn is None:
-                continue
-            return comp, conn
-    raise HTTPException(status_code=502, detail="No online Companion is available")
+    return companion_service.select_online(COMPANION_GRPC, companion_id)
 
 
 def _has_online_companion() -> bool:
-    with session_scope() as s:
-        comps = s.query(Companion).order_by(Companion.id.desc()).all()
-        for comp in comps:
-            if (comp.status or "").strip() == "pending_certification" or not (
-                comp.auth_token or ""
-            ).strip():
-                continue
-            if COMPANION_GRPC.registry.get(int(comp.id)) is not None:
-                return True
-    return False
+    return companion_service.has_online(COMPANION_GRPC)
 
 
 def _inspiration_terminal_payload(space_id: int, t: RemoteTerminalSession) -> dict:
-    backend = str(getattr(t, "backend", "") or "ttyd").strip() or "ttyd"
-    connect_url = str(getattr(t, "connect_url", "") or "").strip()
-    tid = str(t.terminal_id or "")
-    out = {
-        "terminal_id": tid,
-        "name": str(t.name or ""),
-        "status": str(t.status or "active"),
-        "backend": backend,
-        "created_at": t.created_at.isoformat()
-        if hasattr(t.created_at, "isoformat")
-        else str(t.created_at),
-    }
-    if backend == "ttyd" and connect_url:
-        out["embed_url"] = _inspiration_ttyd_embed_path(int(space_id), tid)
-    return out
+    return inspiration_terminal_bridge.terminal_payload(
+        int(space_id), t, embed_path=_inspiration_ttyd_embed_path
+    )
 
 
 def _build_inspiration_draft_summary_prompt(space: InspirationSpace) -> str:
-    base = str(os.environ.get("OPENFOCUS_BASE_URL") or "").strip()
-    title = str(space.title or "Inspiration").strip()
-    parts = [
-        "You are collaborating with OpenFocus as a terminal agent.",
-        "Read the current workspace and resources/ directory, ask the user in this terminal if key context is missing, then create or update resources/draft_summary.md.",
-        "The file is the bridge from your custom agent to OpenFocus goal generation: it must be Markdown with one level-1 heading as the goal title, the text under that heading as the goal content, and then one level-2 heading per task with that task's content below it.",
-        f"Inspiration title: {title}.",
-    ]
-    if base:
-        parts.append(f"OpenFocus: {base}.")
-    parts.append(
-        "After saving resources/draft_summary.md, stop and tell the user it is ready to sync in OpenFocus."
+    return inspiration_terminal_bridge.draft_summary_prompt(
+        space, base_url=str(os.environ.get("OPENFOCUS_BASE_URL") or "").strip()
     )
-    return " ".join(parts)
 
 
 def _inspiration_terminal_conn(companion_id: int | None):
@@ -7091,13 +3859,9 @@ def _inspiration_terminal_conn(companion_id: int | None):
 
 
 async def _inspiration_release_terminals(space_id: int) -> int:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
+    owner = terminal_service.owner_for_inspiration_space(int(space_id))
     with session_scope() as s:
-        terms = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == owner_sid)
-            .all()
-        )
+        terms = terminal_service.list_terminals(s, owner)
         term_infos = [
             {
                 "terminal_id": str(t.terminal_id or ""),
@@ -7114,12 +3878,7 @@ async def _inspiration_release_terminals(space_id: int) -> int:
             conn = _inspiration_terminal_conn(comp_id)
             await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=5.0)
     with session_scope() as s:
-        s.query(RemoteTerminalSession).filter(
-            RemoteTerminalSession.space_id == owner_sid
-        ).delete(synchronize_session=False)
-        s.query(RemoteTerminalOutput).filter(
-            RemoteTerminalOutput.space_id == owner_sid
-        ).delete(synchronize_session=False)
+        terminal_service.delete_owner_terminal_records(s, owner=owner)
     for info in term_infos:
         _TTYD_AGENT_MODE.pop(str(info.get("terminal_id") or ""), None)
     return len(term_infos)
@@ -7130,14 +3889,8 @@ def inspiration_terminals_list(space_id: int) -> dict:
     with session_scope() as s:
         space = _inspiration_space_or_404(s, int(space_id))
         _inspiration_workspace_path(space, int(space_id))
-        owner_sid = _inspiration_terminal_space_id(int(space_id))
-        terms = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == owner_sid)
-            .filter(RemoteTerminalSession.status != "closed")
-            .order_by(RemoteTerminalSession.id.asc())
-            .all()
-        )
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        terms = terminal_service.list_terminals(s, owner)
     return {
         "ok": True,
         "companion": {"online": _has_online_companion()},
@@ -7197,39 +3950,19 @@ async def inspiration_terminals_new(space_id: int, request: Request) -> dict:
         raise HTTPException(
             status_code=502, detail="Companion Terminal 启动失败：missing connect_url"
         )
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     with session_scope() as s:
-        existing = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == owner_sid)
-            .all()
-        )
-        used = {
-            str((t.name or "").strip()) for t in existing if str((t.name or "").strip())
-        }
-        base_name = "terminal"
-        name = base_name
-        if name in used:
-            i = 2
-            while True:
-                cand = f"{base_name}-{i}"
-                if cand not in used:
-                    name = cand
-                    break
-                i += 1
-        t = RemoteTerminalSession(
-            space_id=owner_sid,
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        t = terminal_service.create_terminal_record(
+            s,
+            owner=owner,
             task_public_id="",
             companion_id=int(comp.id),
             root_path=workspace_path,
-            name=name,
             terminal_id=real_tid,
             backend=backend,
             connect_url=connect_url,
-            status="active",
         )
-        s.add(t)
-        s.flush()
+        name = str(t.name or "")
         terminal_payload = _inspiration_terminal_payload(int(space_id), t)
     _try_audit_memory(
         kind="inspiration.terminal_created",
@@ -7289,7 +4022,6 @@ async def inspiration_terminals_inject(
 async def inspiration_terminals_rename(
     space_id: int, terminal_id: str, payload: dict
 ) -> dict:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
@@ -7300,24 +4032,15 @@ async def inspiration_terminals_rename(
         raise HTTPException(status_code=400, detail="name 过长（<=128）")
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_service.rename_terminal(
+                s, owner=owner, terminal_id=tid, name=raw_name
+            )
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
-        dup = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == owner_sid)
-            .filter(RemoteTerminalSession.terminal_id != tid)
-            .filter(RemoteTerminalSession.name == raw_name)
-            .one_or_none()
-        )
-        if dup is not None:
+        except terminal_service.TerminalNameConflict:
             raise HTTPException(status_code=400, detail="name 已存在")
-        t.name = raw_name
-        s.add(t)
     return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
 
@@ -7394,31 +4117,23 @@ async def inspiration_terminal_prepare_draft_summary(
 
 @app.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/close")
 async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
-    owner_sid = _inspiration_terminal_space_id(int(space_id))
     tid = str(terminal_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="terminal_id is required")
     comp_id = 0
     with session_scope() as s:
         _inspiration_space_or_404(s, int(space_id))
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != owner_sid:
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            t = terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         comp_id = int(t.companion_id or 0)
     with contextlib.suppress(Exception):
         conn = _inspiration_terminal_conn(comp_id)
         await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
     with session_scope() as s:
-        s.query(RemoteTerminalSession).filter(
-            RemoteTerminalSession.terminal_id == tid
-        ).delete(synchronize_session=False)
-        s.query(RemoteTerminalOutput).filter(
-            RemoteTerminalOutput.terminal_id == tid
-        ).delete(synchronize_session=False)
+        terminal_service.delete_terminal_record(s, terminal_id=tid)
     _TTYD_AGENT_MODE.pop(tid, None)
     return {"ok": True}
 
@@ -7450,30 +4165,17 @@ def _load_inspiration_ttyd_terminal(
 def terminals_list(space_id: int) -> dict:
     sp, comp = _load_space_and_optional_companion(space_id)
     with session_scope() as s:
-        terms = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == int(sp.id))
-            .filter(RemoteTerminalSession.status != "closed")
-            .order_by(RemoteTerminalSession.id.asc())
-            .all()
-        )
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        terms = terminal_service.list_terminals(s, owner)
 
     cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
     online = bool(cid and (COMPANION_GRPC.registry.get(cid) is not None))
 
     def _terminal_payload(t: RemoteTerminalSession) -> dict:
+        out = terminal_service.terminal_payload(t)
         backend = str(getattr(t, "backend", "") or "ttyd").strip() or "ttyd"
         connect_url = str(getattr(t, "connect_url", "") or "").strip()
         tid = str(t.terminal_id or "")
-        out = {
-            "terminal_id": tid,
-            "name": (t.name or ""),
-            "status": t.status,
-            "backend": backend,
-            "created_at": t.created_at.isoformat()
-            if hasattr(t.created_at, "isoformat")
-            else str(t.created_at),
-        }
         if backend == "ttyd" and connect_url:
             out["embed_url"] = _ttyd_embed_path(int(sp.id), tid)
         return out
@@ -7510,41 +4212,19 @@ async def terminals_new(space_id: int) -> dict:
     backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
     connect_url = str(getattr(res, "connect_url", "") or "").strip()
 
-    # 默认 name：terminal / terminal-2 / terminal-3 ...（同一 space 下不重复）
     with session_scope() as s:
-        existing = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == int(sp.id))
-            .all()
-        )
-        used = {
-            str((t.name or "").strip()) for t in existing if str((t.name or "").strip())
-        }
-        base = "terminal"
-        name = base
-        if name in used:
-            i = 2
-            while True:
-                cand = f"{base}-{i}"
-                if cand not in used:
-                    name = cand
-                    break
-                i += 1
-
-    with session_scope() as s:
-        t = RemoteTerminalSession(
-            space_id=int(sp.id),
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        t = terminal_service.create_terminal_record(
+            s,
+            owner=owner,
             task_public_id=str(sp.task_public_id or ""),
             companion_id=int(getattr(comp, "id", 0) or 0) if comp is not None else None,
             root_path=str(sp.root_path or ""),
-            name=name,
             terminal_id=real_tid,
             backend=backend,
             connect_url=connect_url,
-            status="active",
         )
-        s.add(t)
-        s.flush()
+        name = str(t.name or "")
 
     _try_audit_memory(
         kind="terminal.created",
@@ -7576,26 +4256,15 @@ async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> di
         raise HTTPException(status_code=400, detail="name 过长（<=128）")
 
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.rename_terminal(
+                s, owner=owner, terminal_id=tid, name=raw_name
+            )
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
-
-        dup = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.space_id == int(sp.id))
-            .filter(RemoteTerminalSession.terminal_id != tid)
-            .filter(RemoteTerminalSession.name == raw_name)
-            .one_or_none()
-        )
-        if dup is not None:
+        except terminal_service.TerminalNameConflict:
             raise HTTPException(status_code=400, detail="name 已存在")
-
-        t.name = raw_name
-        s.add(t)
 
     return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
@@ -7610,12 +4279,10 @@ async def terminals_inject(space_id: int, terminal_id: str, payload: dict) -> di
         raise HTTPException(status_code=400, detail="terminal_id is required")
 
     with session_scope() as s:
-        t = (
-            s.query(RemoteTerminalSession)
-            .filter(RemoteTerminalSession.terminal_id == tid)
-            .one_or_none()
-        )
-        if t is None or int(t.space_id) != int(sp.id):
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
+        try:
+            terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+        except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
 
     raw = b""
@@ -7724,12 +4391,7 @@ async def terminals_close(space_id: int, terminal_id: str) -> dict:
 
     with session_scope() as s:
         # 关闭即删除记录（避免刷新后重新出现 tab）
-        s.query(RemoteTerminalSession).filter(
-            RemoteTerminalSession.terminal_id == tid
-        ).delete(synchronize_session=False)
-        s.query(RemoteTerminalOutput).filter(
-            RemoteTerminalOutput.terminal_id == tid
-        ).delete(synchronize_session=False)
+        terminal_service.delete_terminal_record(s, terminal_id=tid)
     _TTYD_AGENT_MODE.pop(tid, None)
 
     _try_audit_memory(

@@ -26,7 +26,7 @@
 
 - 每个 feature 和 bug fix 必须新增/更新对应单元测试。
 - 单元测试应覆盖：
-  - Web 路由（Goals/Tasks/Plan）
+  - Web 路由（Goals/Tasks/Inspiration）
   - REST API（`/api/agent/events`、`/api/skills/focus_report`）
   - 关键工具（如 `list_goals/describe_goal`）
 - 测试隔离：

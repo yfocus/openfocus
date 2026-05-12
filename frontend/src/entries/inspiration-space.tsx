@@ -1,6 +1,25 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 import { createRoot } from 'react-dom/client';
 import React, { useCallback, useEffect, useRef } from 'react';
+import { apiJson } from '../api/client';
+import {
+  closeSpace,
+  createInspiration,
+  createResource,
+  deleteResource,
+  deleteSpace,
+  forkSpace,
+  generateDraftFromResource,
+  getInspiration,
+  postMessage,
+  publishDraft,
+  reopenSpace,
+  replaceResource,
+  syncResources,
+  syncResourcesUrl,
+  terminalApiBase,
+  updateResource,
+} from '../api/inspirations';
 
 type InspirationConfig = {
   hasSpace: boolean;
@@ -17,15 +36,7 @@ function toast(message: string): void {
   if (typeof window.toast === 'function') window.toast(message);
 }
 
-async function callJson<T = Record<string, unknown>>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options || {});
-  if (!response.ok) {
-    const text = await response.text().catch(() => 'request failed');
-    throw new Error(text || `HTTP ${response.status}`);
-  }
-  const contentType = String(response.headers.get('content-type') || '');
-  return contentType.includes('application/json') ? ((await response.json()) as T) : ({} as T);
-}
+const callJson = apiJson;
 
 function InspirationSpaceController({ config }: { config: InspirationConfig }) {
   const stateRef = useRef({
@@ -139,7 +150,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     if (!state.hasSpace || !config.spaceId || (!state.waiting && !state.publishing)) return;
     state.busyPollTimer = window.setTimeout(async () => {
       try {
-        const data = await callJson<{ is_waiting?: boolean; is_publishing?: boolean }>(`/api/inspirations/${config.spaceId}`);
+        const data = await getInspiration(config.spaceId);
         const nextWaiting = !!data.is_waiting;
         const nextPublishing = !!data.is_publishing;
         if (nextWaiting || nextPublishing) {
@@ -302,7 +313,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     appendPendingTurn(text, pendingText);
     setWaitingUI(true);
     try {
-      await callJson(`/api/inspirations/${config.spaceId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: text }), keepalive: true });
+      await postMessage(config.spaceId, text);
       scheduleBusyPoll(400);
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err || 'send failed'));
@@ -334,8 +345,8 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     window.OpenFocusRemoteTerminal.mount(termRoot, {
       spaceId: config.spaceId,
       mode: 'inspiration',
-      apiBase: `/api/inspirations/${config.spaceId}/terminals`,
-      syncUrl: `/api/inspirations/${config.spaceId}/resources/sync`,
+      apiBase: terminalApiBase(config.spaceId),
+      syncUrl: syncResourcesUrl(config.spaceId),
       draftSummaryPrompt: config.draftSummaryPrompt,
       agentPrefix: `OpenFocus Inspiration #${config.spaceId} · write resources/draft_summary.md; do not create Goals/Tasks directly`,
       goalResources,
@@ -346,7 +357,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
         if (!item) { toast('Type or choose a resource first'); return; }
         setWaitingUI(true);
         try {
-          await callJson(`/api/inspirations/${config.spaceId}/drafts/generate_from_resource`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resource_id: item.id }) });
+          await generateDraftFromResource(config.spaceId, item.id);
           scheduleBusyPoll(400);
         } catch (err) {
           setWaitingUI(false);
@@ -381,7 +392,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       if (btn) btn.disabled = true;
       if (hint) hint.style.display = 'inline-flex';
       try {
-        const data = await callJson<{ item?: { id?: number } }>('/api/inspirations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, initial_message: initialMessage, mode }) });
+        const data = await createInspiration({ title, initial_message: initialMessage, mode });
         const id = data.item?.id || 0;
         if (!id) throw new Error('missing space id');
         window.location.href = `/inspirations/${id}`;
@@ -411,12 +422,11 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
           const payload: { name: string; url_content?: string; text_content?: string } = { name: String(fd.get('name') || '').trim() };
           if (nextType === 'url') payload.url_content = String(fd.get('url_content') || '');
           else payload.text_content = String(fd.get('text_content') || '');
-          await callJson(`/api/inspirations/${config.spaceId}/resources/${resourceModalResourceId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          await updateResource(config.spaceId, resourceModalResourceId, payload);
         } else if (resourceModalMode === 'replace') {
-          await callJson(`/api/inspirations/${config.spaceId}/resources/${resourceModalResourceId}/replace`, { method: 'POST', body: fd });
+          await replaceResource(config.spaceId, resourceModalResourceId, fd);
         } else {
-          const response = await fetch(`/api/inspirations/${config.spaceId}/resources`, { method: 'POST', body: fd });
-          if (!response.ok) throw new Error(await response.text().catch(() => 'upload failed'));
+          await createResource(config.spaceId, fd);
         }
         form.reset();
         configureResourceModal({ mode: 'create', type: 'text' });
@@ -444,26 +454,26 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     document.getElementById('insp-generate-draft')?.addEventListener('click', () => { if (!stateRef.current.waiting && !stateRef.current.publishing) void submitTurn('/plan'); });
     document.getElementById('insp-resource-sync')?.addEventListener('click', async () => {
       if (stateRef.current.waiting || stateRef.current.publishing) return;
-      try { await callJson(`/api/inspirations/${config.spaceId}/resources/sync`, { method: 'POST' }); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'sync failed')); }
+      try { await syncResources(config.spaceId); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'sync failed')); }
     });
     document.getElementById('insp-close-space')?.addEventListener('click', async () => {
       if (stateRef.current.publishing) return;
-      try { await callJson(`/api/inspirations/${config.spaceId}/close`, { method: 'POST' }); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'request failed')); }
+      try { await closeSpace(config.spaceId); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'request failed')); }
     });
     document.getElementById('insp-reopen-space')?.addEventListener('click', async () => {
       if (stateRef.current.publishing) return;
-      try { await callJson(`/api/inspirations/${config.spaceId}/reopen`, { method: 'POST' }); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'request failed')); }
+      try { await reopenSpace(config.spaceId); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'request failed')); }
     });
     document.getElementById('insp-delete-space')?.addEventListener('click', async () => {
       if (stateRef.current.publishing || !window.confirm('Delete this unpublished Inspiration space?')) return;
-      try { await callJson(`/api/inspirations/${config.spaceId}`, { method: 'DELETE' }); window.location.href = '/inspirations'; } catch (err) { toast(err instanceof Error ? err.message : String(err || 'delete failed')); }
+      try { await deleteSpace(config.spaceId); window.location.href = '/inspirations'; } catch (err) { toast(err instanceof Error ? err.message : String(err || 'delete failed')); }
     });
     document.getElementById('insp-fork-space')?.addEventListener('click', async () => {
       if (stateRef.current.publishing) return;
       const title = window.prompt('Fork title', config.forkTitle);
       if (title === null) return;
       try {
-        const data = await callJson<{ item?: { id?: number } }>(`/api/inspirations/${config.spaceId}/fork`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: String(title || '').trim(), include_all_resources: true }) });
+        const data = await forkSpace(config.spaceId, { title: String(title || '').trim(), include_all_resources: true });
         if (data.item?.id) window.location.href = `/inspirations/${data.item.id}`;
       } catch (err) { toast(err instanceof Error ? err.message : String(err || 'fork failed')); }
     });
@@ -501,7 +511,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       const resourceId = Number(card?.dataset.resourceId || 0);
       const resourceType = String(card?.dataset.resourceType || 'resource');
       if (!resourceId || !window.confirm(`Delete this ${resourceType} resource?`)) return;
-      try { await callJson(`/api/inspirations/${config.spaceId}/resources/${resourceId}`, { method: 'DELETE' }); await refreshPageFromServer(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'delete failed')); }
+      try { await deleteResource(config.spaceId, resourceId); await refreshPageFromServer(); } catch (err) { toast(err instanceof Error ? err.message : String(err || 'delete failed')); }
     }));
     document.querySelectorAll<HTMLElement>('.insp-draft-cancel-btn').forEach((btn) => btn.addEventListener('click', () => {
       btn.closest('.msg-row')?.remove();
@@ -515,7 +525,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       const btn = form.querySelector<HTMLButtonElement>('.insp-publish-btn');
       setPublishingUI(true, btn);
       try {
-        await callJson(`/api/inspirations/${config.spaceId}/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft_id: Number(fd.get('draft_id') || 0), due_date: String(fd.get('due_date') || '').trim() }) });
+        await publishDraft(config.spaceId, { draft_id: Number(fd.get('draft_id') || 0), due_date: String(fd.get('due_date') || '').trim() });
         scheduleBusyPoll(350);
       } catch (err) {
         setPublishingUI(false, btn);

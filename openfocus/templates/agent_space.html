@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
+  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
   <style>
     .agent-preview-content { height: 100%; min-height: 0; }
     .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: 10px; background: rgba(255,255,255,0.02); }
@@ -104,7 +104,7 @@
     <div class="muted" style="padding: 12px;">Loading AgentSpace…</div>
   </div>
 
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15"></script>
+  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15"></script>
   <script type="module" src="/static/dist/assets/agent-space.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=1"></script>
   {% endif %}
   </div>

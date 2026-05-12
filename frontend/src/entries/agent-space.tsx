@@ -19,19 +19,13 @@ import { python } from '@codemirror/lang-python';
 import { rust } from '@codemirror/lang-rust';
 import { sql } from '@codemirror/lang-sql';
 import { xml } from '@codemirror/lang-xml';
+import { listFiles, rawFileUrl, readFile, releaseTaskAgentSpace } from '../api/agentSpaces';
+import type { FileEntry } from '../types/openfocus';
 
 type AgentSpaceConfig = {
   spaceId: number;
   taskPublicId: string;
   rootPath: string;
-};
-
-type FileEntry = {
-  name: string;
-  rel_path: string;
-  kind: string;
-  size?: number;
-  mtime?: number;
 };
 
 type PreviewState = {
@@ -44,15 +38,6 @@ type PreviewState = {
 
 function toast(message: string): void {
   if (typeof window.toast === 'function') window.toast(message);
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(text || `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -187,7 +172,7 @@ function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry;
     let cancelled = false;
     setError('');
     setLoading(true);
-    fetchJson<{ entries?: FileEntry[] }>(`/api/agent_spaces/${spaceId}/files/list?path=${encodeURIComponent(entry.rel_path || '')}`)
+    listFiles(spaceId, entry.rel_path || '')
       .then((data) => {
         if (cancelled) return;
         setEntries(Array.isArray(data.entries) ? data.entries : []);
@@ -359,14 +344,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: true, error: '' });
       try {
         if (isLikelyImage(displayName)) {
-          const imageUrl = `/api/agent_spaces/${config.spaceId}/files/raw?path=${encodeURIComponent(relPath)}`;
+          const imageUrl = rawFileUrl(config.spaceId, relPath);
           setPreview({ path: relPath, name: displayName, content: '', imageUrl, loading: false, error: '' });
           requestAnimationFrame(() => {
             if (previewScrollRef.current) previewScrollRef.current.scrollTop = 0;
           });
           return;
         }
-        const data = await fetchJson<{ content?: string }>(`/api/agent_spaces/${config.spaceId}/files/read?path=${encodeURIComponent(relPath)}`);
+        const data = await readFile(config.spaceId, relPath);
         setPreview({ path: relPath, name: displayName, content: String(data.content || ''), imageUrl: '', loading: false, error: '' });
       } catch (err) {
         setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `预览失败：${err instanceof Error ? err.message : String(err)}` });
@@ -498,8 +483,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const releaseSpace = async () => {
       if (!window.confirm('确认释放该 AgentSpace？（只会删除 OpenFocus 侧记录，不会删除你的本地文件）')) return;
       try {
-        const response = await fetch(`/api/tasks/${encodeURIComponent(config.taskPublicId)}/agent_space`, { method: 'DELETE' });
-        if (!response.ok) throw new Error(await response.text().catch(() => `HTTP ${response.status}`));
+        await releaseTaskAgentSpace(config.taskPublicId);
         toast('已释放');
         window.location.href = `/goals?task=${encodeURIComponent(config.taskPublicId)}`;
       } catch (err) {

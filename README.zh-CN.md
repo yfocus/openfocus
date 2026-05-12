@@ -141,7 +141,7 @@ npm run build
 |------|------|
 | [openfocus](./openfocus) | FastAPI 应用、数据模型、Companion gRPC bridge、模板和后端逻辑 |
 | [frontend](./frontend) | React islands 入口，用于更复杂的交互界面 |
-| [remote-terminal](./remote-terminal) | 嵌入式 remote terminal 前端资源 |
+| [openfocus/static/terminal-panel](./openfocus/static/terminal-panel) | 嵌入式终端面板前端资源 |
 | [skills](./skills) | OpenFocus skills 与上报辅助工具 |
 | [spec](./spec/README.md) | 产品与技术规范 |
 | [tests](./tests) | Pytest 测试套件 |

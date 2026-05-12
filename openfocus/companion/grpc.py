@@ -10,11 +10,12 @@ from typing import AsyncIterator, Callable
 
 import grpc
 
+from ..db import session_scope
+from ..models import Companion
+
 # 由 grpc_tools.protoc 生成
 from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
-from .db import session_scope
-from .models import Companion
 
 
 def _utcnow() -> dt.datetime:

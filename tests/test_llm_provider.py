@@ -1,52 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-
-@pytest.mark.anyio
-async def test_plan_route_not_swallowed_by_goal_id():
-    # With no LLM key configured, the plan page should render an unavailable state instead of failing.
-    import os
-
-    os.environ.pop("OPENFOCUS_OPENAI_API_KEY", None)
-
-    from openfocus.main import app
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/goals/plan")
-        assert r.status_code == 200
-
-
-@pytest.mark.anyio
-async def test_plan_session_writes_audit_memory(monkeypatch, tmp_path):
-    import os
-
-    os.environ.pop("OPENFOCUS_OPENAI_API_KEY", None)
-    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
-
-    from openfocus.main import app
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.post(
-            "/goals/plan/start",
-            data={
-                "due_date": "2026-12-31",
-                "title": "build memory pipeline",
-                "content": "need a plan first",
-            },
-            follow_redirects=False,
-        )
-        assert r.status_code == 303
-
-    audit_files = list((tmp_path / "memory" / "audit").glob("**/*.md"))
-    assert audit_files
-    text = audit_files[0].read_text(encoding="utf-8")
-    assert "plan.session_start_requested" in text
-
 
 def test_llm_provider_env_supports_ark(monkeypatch):
     # Verify that Ark (OpenAI-compatible) environment variable aliases are supported.

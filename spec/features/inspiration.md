@@ -9,7 +9,7 @@
 - terminal agent 是“不受信协作者”：它可以在 workspace 中产出文件，但不能直接写入 Goal/Task，不能绕过 OpenFocus 的草案生成、用户确认与发布链路。
 - built-in 模式下，当用户显式触发 `/draft_goal_tasks` 或内建 Agent 判断上下文已经足够完整时，可生成新的 `Draft vN`；terminal 模式下通过 `Prompt Zone` 的 `Create Goal` 选择一个已同步 resource，并基于该 resource 生成 `Draft vN`。
 - 在用户点击 `Publish` 之前，不写入任何 Goal/Tasks；所有结构化结果都先保存为草案。
-- `New Goal` 对话框不再承载 Plan Mode；需要规划或灵感孵化时，统一进入 `Inspiration` 模块。
+- `New Goal` 对话框只负责立即创建目标；需要规划或灵感孵化时，统一进入 `Inspiration` 模块。
 
 ## Inspiration Workspace 与 Terminal Runtime
 

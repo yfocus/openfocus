@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/remote-terminal/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21">
+  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21">
   {% set is_busy = is_waiting or is_publishing %}
   {% set is_terminal_mode = space and ((space.mode or 'built_in') == 'terminal') %}
   <style>
@@ -503,6 +503,6 @@
 
   <div id="inspiration-space-react-root" data-config='{"hasSpace": {{ "true" if space else "false" }}, "spaceId": {{ space.id if space else 0 }}, "isTerminalMode": {{ "true" if is_terminal_mode else "false" }}, "isWaiting": {{ "true" if is_waiting else "false" }}, "isPublishing": {{ "true" if is_publishing else "false" }}, "forkTitle": {{ (((space.title if space else "Inspiration") ~ " / Follow-up")|tojson) }}, "draftSummaryPrompt": {{ draft_summary_prompt|tojson }}, "resourceIds": {{ resources|map(attribute="id")|list|tojson }}}'></div>
   <!-- React controller keeps these legacy interaction strings: scheduleBusyPoll(900); refreshPageFromServer; Publish this draft and lock this Inspiration space? -->
-  <script src="/remote-terminal/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21"></script>
+  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=21"></script>
   <script type="module" src="/static/dist/assets/inspiration-space.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=1"></script>
 {% endblock %}

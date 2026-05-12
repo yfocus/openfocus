@@ -67,7 +67,7 @@ flowchart TD
      - 对话框只包含：`Title`（必填，<=2000）+ `Content`（必填，<=4000）+ `DDL`（必填）。
      - `Title` 必须由用户或发布流程明确提供；OpenFocus 不再提供 `Auto` 开关，也不再通过 LLM/Agent 从 `Content` 自动提炼或生成 `Title`。
      - 必须移除 `gen` / `Auto generate from content` 等自动标题生成入口。
-     - 顶部导航栏提供独立的 `Inspiration` 入口；`New Goal` 对话框内不再承载 `Plan Mode` 或其他规划入口。
+     - 顶部导航栏提供独立的 `Inspiration` 入口；`New Goal` 对话框内不承载任何规划入口。
      - 提交按钮固定显示为 `Save`；点击后立即创建 goal。
 7. `Title`/`Content` 规则（强约束）：
   - Goal 和 Task 的用户语义字段只保留 `title` 与 `content`；不再维护独立 `summary` / `description` 语义。
@@ -149,7 +149,7 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
 ### Inspiration
 
 **概述**
-Inspiration is the dedicated ideation and planning module. It replaces `New Goal`'s old `Plan Mode` flow and provides persistent `InspirationSpace` workspaces for discussion, resource-assisted exploration, optional bring-your-own-agent terminal collaboration, draft iteration, and final publish.
+Inspiration is the dedicated ideation and planning module. It provides persistent `InspirationSpace` workspaces for discussion, resource-assisted exploration, optional bring-your-own-agent terminal collaboration, draft iteration, and final publish.
 
 **视觉与交互**
 1. 顶部导航提供独立的 `Inspiration` 页面，采用：

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* OpenFocus Remote Terminal (browser UI)
+/* OpenFocus Terminal Panel (browser UI)
  * ttyd + tmux only.
  * Exposes: window.OpenFocusRemoteTerminal.mount(el, { spaceId })
  */

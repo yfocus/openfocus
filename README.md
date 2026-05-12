@@ -141,7 +141,7 @@ npm run build
 |-----------|-------------|
 | [openfocus](./openfocus) | FastAPI app, data models, Companion gRPC bridge, templates, and backend logic |
 | [frontend](./frontend) | React islands entrypoints for richer interactive surfaces |
-| [remote-terminal](./remote-terminal) | Embedded remote terminal frontend assets |
+| [openfocus/static/terminal-panel](./openfocus/static/terminal-panel) | Embedded terminal panel frontend assets |
 | [skills](./skills) | OpenFocus skills and reporting helpers |
 | [spec](./spec/README.md) | Product and technical specifications |
 | [tests](./tests) | Pytest test suite |

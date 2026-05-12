@@ -173,49 +173,6 @@ class NextMoveFeedback(Base):
     )
 
 
-class GoalPlanSession(Base):
-    __tablename__ = "goal_plan_sessions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="in_progress"
-    )
-
-    draft_content: Mapped[str] = mapped_column(String(2000), nullable=False)
-    due_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
-
-    # 若从已有 Goal 进入 Plan（用于“拆解/再规划”），则关联该 goal。
-    # 为空表示“创建新 goal 的 plan”。
-    source_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    result_json: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False, default=dict
-    )
-    created_goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
-    )
-    updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: dt.datetime.now(dt.timezone.utc),
-        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
-    )
-
-
-class GoalPlanMessage(Base):
-    __tablename__ = "goal_plan_messages"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    role: Mapped[str] = mapped_column(String(32), nullable=False)  # user/assistant
-    content: Mapped[str] = mapped_column(String(20000), nullable=False)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
-    )
-
-
 class InspirationSpace(Base):
     __tablename__ = "inspiration_spaces"
 

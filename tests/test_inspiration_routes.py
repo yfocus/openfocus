@@ -31,7 +31,7 @@ async def test_inspiration_pages_and_nav_render(monkeypatch):
         r = await client.get("/goals")
         assert r.status_code == 200
         assert "Inspiration" in r.text
-        assert "Plan Mode" not in r.text
+        assert "Create Space" in r.text
 
 
 @pytest.mark.anyio
