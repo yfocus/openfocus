@@ -621,6 +621,7 @@
         <div class="dlg-field">
           <div class="dlg-label"><label for="next-feedback-reason">Reason</label></div>
           <select id="next-feedback-reason" name="reason_code" style="width:100%;">
+            <option value="not_for_now">Not for now</option>
             <option value="too_much_context_switch">Too much context switching</option>
             <option value="too_long">Too long for now</option>
             <option value="wrong_type">Wrong type of work right now</option>
@@ -881,10 +882,38 @@
       if(hint) hint.textContent = title ? ('Tell Next Move why "' + title + '" is not right now.') : 'Tell Next Move why this recommendation is off.';
       if(runId) runId.value = run;
       if(taskId) taskId.value = pid;
-      if(reason) reason.value = 'too_much_context_switch';
+      if(reason) reason.value = 'not_for_now';
       if(text) text.value = '';
       try{ dlg?.showModal(); }catch(_){ }
       setTimeout(()=>{ try{ reason?.focus(); }catch(_){ } }, 30);
+    }
+
+    async function submitNextFeedback(payload, submitBtn){
+      if(submitBtn) submitBtn.disabled = true;
+      try{
+        const body = {
+          run_id: payload?.run_id || '',
+          task_public_id: payload?.task_public_id || '',
+          feedback_type: payload?.feedback_type || 'dismiss',
+          reason_code: payload?.reason_code || 'not_for_now',
+          reason_text: payload?.reason_text || '',
+        };
+        const r = await fetch('/api/recommendations/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        toast('not for now, finding another');
+        await refreshNext('feedback_submitted');
+        refreshEvents();
+        return true;
+      }catch(_){
+        toast('failed to save feedback');
+        return false;
+      }finally{
+        if(submitBtn) submitBtn.disabled = false;
+      }
     }
 
     function _openNewTaskDialog(goalId){
@@ -1376,30 +1405,17 @@
       if(form.id === 'next-feedback-form'){
         e.preventDefault();
         const submitBtn = document.getElementById('next-feedback-submit');
-        try{
-          if(submitBtn) submitBtn.disabled = true;
-          const payload = {
-            run_id: document.getElementById('next-feedback-run-id')?.value || '',
-            task_public_id: document.getElementById('next-feedback-task-id')?.value || '',
-            feedback_type: document.getElementById('next-feedback-type')?.value || 'dismiss',
-            reason_code: document.getElementById('next-feedback-reason')?.value || '',
-            reason_text: document.getElementById('next-feedback-text')?.value || '',
-          };
-          const r = await fetch(form.action, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if(!r.ok) throw new Error('HTTP ' + r.status);
+        const ok = await submitNextFeedback({
+          run_id: document.getElementById('next-feedback-run-id')?.value || '',
+          task_public_id: document.getElementById('next-feedback-task-id')?.value || '',
+          feedback_type: document.getElementById('next-feedback-type')?.value || 'dismiss',
+          reason_code: document.getElementById('next-feedback-reason')?.value || 'not_for_now',
+          reason_text: document.getElementById('next-feedback-text')?.value || '',
+        }, submitBtn);
+        if(ok){
           try{ document.getElementById('next-feedback-dialog')?.close(); }catch(_){ }
           const note = document.getElementById('next-feedback-text');
           if(note) note.value = '';
-          toast('thanks, learning updated');
-          await refreshNext('feedback_submitted');
-        }catch(_){
-          toast('failed to save feedback');
-        }finally{
-          if(submitBtn) submitBtn.disabled = false;
         }
         return;
       }
@@ -1464,24 +1480,40 @@
       }
     });
 
-      async function refreshNext(trigger){
-      const box = document.getElementById('next-list');
-      const btn = document.getElementById('next-refresh');
-      const scroller = box.closest('.side-body');
-      if(!box) return;
-      if(btn) btn.disabled = true;
-      if(scroller) scroller.scrollTop = 0;
-      box.innerHTML = '<span class="spin"></span> <span class="muted">thinking...</span>';
-      try{
-        const trig = String(trigger || 'manual_refresh');
-        const r = await fetch('/api/recommendations/next?limit=3&trigger=' + encodeURIComponent(trig), { cache: 'no-store' });
-        if(!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
-        const items = Array.isArray(data?.items) ? data.items : [];
-        const runId = String(data?.run_id || '');
-        if(!items.length){ if(scroller) scroller.scrollTop = 0; box.textContent = 'no suggestion.'; return; }
+    const NEXT_STATE = { data: null, updating: false, lastEventId: 0, inFlight: false };
 
-        const cards = items.map((item, idx)=>{
+    function nextUpdatedLabel(iso){
+      if(!iso) return 'not updated yet';
+      const clock = fmtClock(iso);
+      const ago = fmtAgo(iso);
+      return 'updated ' + (clock || '') + (ago ? (' · ' + ago) : '');
+    }
+
+    function renderNext(data, opts){
+      const box = document.getElementById('next-list');
+      const scroller = box ? box.closest('.side-body') : null;
+      if(!box) return;
+      const updating = !!(opts && opts.updating);
+      const note = opts && opts.note ? String(opts.note) : '';
+      const items = Array.isArray(data?.items) ? data.items.slice(0, 2) : [];
+      const runId = String(data?.run_id || '');
+      if(!items.length){
+        box.classList.add('muted');
+        box.innerHTML = updating
+          ? '<span class="spin"></span> <span class="muted">thinking...</span>'
+          : 'no suggestion.';
+        if(scroller) scroller.scrollTop = 0;
+        return;
+      }
+
+      const statusHtml = `
+        <div class="nm-card" style="padding:8px 10px;">
+          <div class="nm-sub">
+            ${escapeHtml(nextUpdatedLabel(data?.generated_at))}${updating ? ' · updating...' : ''}${note ? (' · ' + escapeHtml(note)) : ''}
+          </div>
+        </div>
+      `;
+      const cards = items.map((item, idx)=>{
           const why = Array.isArray(item?.why) ? item.why : [];
           const title = String(item?.title || '').trim();
           const target = item?.target || {};
@@ -1495,7 +1527,7 @@
           const reasons = why.map(x => `<div class="nm-reason">- ${escapeHtml(String(x || ''))}</div>`).join('');
           return `
             <div class="nm-card">
-              <div class="nm-k">Rank ${idx + 1}</div>
+              <div class="nm-k">Recommendation ${idx + 1}</div>
               <div class="nm-title">${escapeHtml(title || (pid ? ('task ' + pid) : 'next'))}</div>
               <div class="nm-sub">${escapeHtml(goalTitle || '')}</div>
               <div class="nm-meta">
@@ -1511,21 +1543,84 @@
               </div>
             </div>
           `;
-        }).join('');
+      }).join('');
 
-        box.classList.remove('muted');
-        box.innerHTML = `
-          <div class="nm-wrap">
-            ${cards}
-          </div>
-        `;
-        if(scroller) scroller.scrollTop = 0;
+      box.classList.remove('muted');
+      box.innerHTML = `
+        <div class="nm-wrap">
+          ${statusHtml}
+          ${cards}
+        </div>
+      `;
+      if(scroller && opts && opts.scrollTop) scroller.scrollTop = 0;
+    }
+
+    function applyNextData(data, opts){
+      NEXT_STATE.data = data || null;
+      NEXT_STATE.updating = !!(opts && opts.updating);
+      const lastEventId = Number(data?.last_event_id || data?.context_summary?.latest_event_id || 0);
+      if(Number.isFinite(lastEventId)) NEXT_STATE.lastEventId = lastEventId;
+      renderNext(NEXT_STATE.data, opts || {});
+    }
+
+    async function loadLatestNext(){
+      try{
+        const r = await fetch('/api/recommendations/latest', { cache: 'no-store' });
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = Array.isArray(data?.items) ? data.items : [];
+        if(items.length){
+          applyNextData(data, { updating: false, scrollTop: true });
+          return true;
+        }
+      }catch(_){ }
+      return false;
+    }
+
+    async function refreshNext(trigger, opts){
+      const box = document.getElementById('next-list');
+      const btn = document.getElementById('next-refresh');
+      if(!box) return;
+      if(NEXT_STATE.inFlight) return;
+      const hasPrevious = !!(NEXT_STATE.data && Array.isArray(NEXT_STATE.data.items) && NEXT_STATE.data.items.length);
+      NEXT_STATE.inFlight = true;
+      if(btn) btn.disabled = true;
+      if(hasPrevious){
+        renderNext(NEXT_STATE.data, { updating: true });
+      }else{
+        renderNext(null, { updating: true, scrollTop: true });
+      }
+      try{
+        const trig = String(trigger || 'manual_refresh');
+        const r = await fetch('/api/recommendations/next?limit=2&trigger=' + encodeURIComponent(trig), { cache: 'no-store' });
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        applyNextData(data, { updating: false, scrollTop: true });
       }catch(e){
-        box.textContent = 'failed to load.';
-        if(scroller) scroller.scrollTop = 0;
+        if(hasPrevious) renderNext(NEXT_STATE.data, { updating: false, note: 'update failed' });
+        else box.textContent = 'failed to load.';
       }finally{
+        NEXT_STATE.inFlight = false;
         if(btn) btn.disabled = false;
       }
+    }
+
+    async function checkNextMoveEvents(){
+      try{
+        const r = await fetch('/api/events/recent?limit=1', { cache: 'no-store' });
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const latestEventId = items.length ? Number(items[0]?.id || 0) : 0;
+        const hasNext = !!(NEXT_STATE.data && Array.isArray(NEXT_STATE.data.items) && NEXT_STATE.data.items.length);
+        if(!hasNext){
+          await refreshNext('manual_refresh');
+          return;
+        }
+        if(Number.isFinite(latestEventId) && latestEventId > Number(NEXT_STATE.lastEventId || 0)){
+          await refreshNext('state_changed');
+        }
+      }catch(_){ }
     }
 
     function fmtClock(iso){
@@ -1912,13 +2007,16 @@
     document.getElementById('notify-toggle')?.addEventListener('change', _toggleNotifyFromSwitch);
     _refreshNotifySwitch();
 
-    // periodic refresh
-    setInterval(refreshNext, 30 * 60 * 1000);
+    // Next Move update policy: poll for new events every minute; only refresh when events changed.
+    setInterval(checkNextMoveEvents, 60 * 1000);
     setInterval(refreshEvents, 15 * 1000);
-    setInterval(()=> refreshNext('periodic_refresh'), 30 * 60 * 1000);
 
     // initial
-    refreshNext();
+    (async ()=>{
+      const hasLatest = await loadLatestNext();
+      if(!hasLatest) await refreshNext('manual_refresh');
+      else checkNextMoveEvents();
+    })();
     refreshEvents();
 
     // initial selection from server params or last

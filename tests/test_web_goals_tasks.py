@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 
 import pytest
@@ -9,8 +10,11 @@ from httpx import ASGITransport, AsyncClient
 
 
 @pytest.mark.anyio
-async def test_goals_crud_and_task_flow(monkeypatch):
-    from openfocus.main import app
+async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
+    import openfocus.main as main_mod
+    from openfocus.agent.llm.types import LLMCallResult
+
+    app = main_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -34,6 +38,7 @@ async def test_goals_crud_and_task_flow(monkeypatch):
         r = await client.get("/goals")
         assert r.status_code == 200
         assert "目标-单测" in r.text
+        assert '<option value="not_for_now">Not for now</option>' in r.text
 
         # get latest goal id from DB
         from openfocus.db import session_scope
@@ -148,13 +153,124 @@ async def test_goals_crud_and_task_flow(monkeypatch):
             assert t.title == "task-1-edit"
             assert t.content == "task desc edit"
 
-        # recommendations should include task
+        mem_dir = tmp_path / "memory"
+        daily_dir = mem_dir / "daily"
+        daily_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / "MEMORY.md").write_text(
+            "Long memory: prefer continuity and protect attention.", encoding="utf-8"
+        )
+        (daily_dir / "2026-05-12.md").write_text(
+            "Daily memory: current focus is OpenFocus refactor.", encoding="utf-8"
+        )
+        monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(mem_dir))
+
+        llm_calls = []
+
+        class FakeNextMoveProvider:
+            def chat_completions(self, **kwargs):
+                llm_calls.append(kwargs)
+                messages = kwargs.get("messages") or []
+                system_text = str(messages[0].get("content") or "")
+                user_text = str(messages[1].get("content") or "")
+                assert "最多推荐 2 个" in system_text
+                assert "前额叶" in system_text
+                assert "工作记忆容量有限" in system_text
+                assert "Long memory: prefer continuity" in user_text
+                assert "list_daily_memory_files" in user_text
+                assert "read_daily_memory_file" in user_text
+                assert "recent_events_latest_100" in user_text
+                assert "list_recent_events" in user_text
+                assert "open_goals_and_tasks" in user_text
+                assert "completed_last_7_days" in user_text
+                return LLMCallResult(
+                    content=json.dumps(
+                        {
+                            "recommendations": [
+                                {
+                                    "task_public_id": task_public_id,
+                                    "goal_id": goal_id,
+                                    "reason": "Continue the active refactor while context is warm.",
+                                    "why": [
+                                        "Keeps the current context warm.",
+                                        "Reduces decision fatigue by choosing one next step.",
+                                    ],
+                                    "confidence": "high",
+                                    "context_switch_cost": "low",
+                                }
+                            ],
+                            "no_recommendation_reason": None,
+                        }
+                    ),
+                    finish_reason="stop",
+                    usage={},
+                    tool_calls=None,
+                )
+
+        monkeypatch.setattr(
+            main_mod,
+            "_get_llm_provider_or_error",
+            lambda: (FakeNextMoveProvider(), None),
+        )
+
+        # recommendations should include the LLM/agent-loop selected task and timestamp metadata
         r = await client.get("/api/recommendations/next?limit=5")
         assert r.status_code == 200
         assert "no-store" in (r.headers.get("cache-control") or "")
         data = r.json()
         items = data.get("items") or []
-        assert any((it.get("title") == "task-1-edit") for it in items)
+        assert len(items) == 1
+        assert items[0].get("title") == "task-1-edit"
+        assert (
+            items[0].get("reason")
+            == "Continue the active refactor while context is warm."
+        )
+        assert data.get("item") == items[0]
+        assert data.get("generated_at")
+        assert "last_event_id" in data
+        assert len(llm_calls) == 1
+
+        r = await client.get("/api/recommendations/latest")
+        assert r.status_code == 200
+        latest = r.json()
+        assert latest.get("run_id") == data.get("run_id")
+        assert latest.get("generated_at") == data.get("generated_at")
+        assert latest.get("items") == data.get("items")
+
+        run_id = int(data.get("run_id") or 0)
+        assert run_id > 0
+
+        # Not for now feedback should persist both feedback and an event used by the next run.
+        r = await client.post(
+            "/api/recommendations/feedback",
+            json={
+                "run_id": run_id,
+                "task_public_id": task_public_id,
+                "feedback_type": "dismiss",
+                "reason_code": "not_for_now",
+                "reason_text": "Need a smaller step first.",
+            },
+        )
+        assert r.status_code == 200
+        from openfocus.models import Event, NextMoveFeedback
+
+        with session_scope() as s:
+            fb = (
+                s.query(NextMoveFeedback)
+                .filter(NextMoveFeedback.task_public_id == task_public_id)
+                .order_by(NextMoveFeedback.id.desc())
+                .first()
+            )
+            assert fb is not None
+            assert fb.reason_code == "not_for_now"
+            ev = (
+                s.query(Event)
+                .filter(Event.kind == "next_move.not_for_now")
+                .order_by(Event.id.desc())
+                .first()
+            )
+            assert ev is not None
+            assert ev.task_id == task_public_id
+            assert (ev.payload or {}).get("reason_code") == "not_for_now"
 
         # recent events should include something
         r = await client.get("/api/events/recent?limit=10")
@@ -342,12 +458,15 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
 
 
 @pytest.mark.anyio
-async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tmp_path):
+async def test_next_move_returns_two_tasks_and_learns_feedback(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
+    import openfocus.main as main_mod
+    from openfocus.agent.llm.types import LLMCallResult
     from openfocus.db import session_scope
-    from openfocus.main import app
-    from openfocus.models import Goal, NextMoveFeedback
+    from openfocus.models import Goal, NextMoveFeedback, Task
+
+    app = main_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -381,12 +500,86 @@ async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tm
             )
             assert r.status_code == 303
 
+        with session_scope() as s:
+            task_rows = (
+                s.query(Task)
+                .filter(Task.goal_id == goal_id)
+                .order_by(Task.id.asc())
+                .all()
+            )
+            first_pid = task_rows[0].public_id
+            second_pid = task_rows[1].public_id
+            third_pid = task_rows[2].public_id
+
+        calls = []
+
+        class FakeNextMoveProvider:
+            def chat_completions(self, **kwargs):
+                calls.append(kwargs)
+                messages = kwargs.get("messages") or []
+                user_text = str(messages[1].get("content") or "")
+                if len(calls) == 1:
+                    assert "recent_events_latest_100" in user_text
+                    assert "open_goals_and_tasks" in user_text
+                    recs = [
+                        (
+                            first_pid,
+                            "Keep momentum on the most demanding refactor while context is loaded.",
+                        ),
+                        (
+                            second_pid,
+                            "Keep review work available as the next fallback option.",
+                        ),
+                    ]
+                else:
+                    assert "next_move.not_for_now" in user_text
+                    assert "现在只想先做短任务" in user_text
+                    recs = [
+                        (
+                            second_pid,
+                            "Switch to review because the previous deep task was dismissed for now.",
+                        ),
+                        (
+                            third_pid,
+                            "Keep a short communication task as backup while the next refresh settles.",
+                        ),
+                    ]
+                return LLMCallResult(
+                    content=json.dumps(
+                        {
+                            "recommendations": [
+                                {
+                                    "task_public_id": pid,
+                                    "goal_id": goal_id,
+                                    "reason": reason,
+                                    "why": [reason],
+                                    "confidence": "medium",
+                                    "context_switch_cost": "low",
+                                }
+                                for pid, reason in recs
+                            ],
+                            "no_recommendation_reason": None,
+                        }
+                    ),
+                    finish_reason="stop",
+                    usage={},
+                    tool_calls=None,
+                )
+
+        monkeypatch.setattr(
+            main_mod,
+            "_get_llm_provider_or_error",
+            lambda: (FakeNextMoveProvider(), None),
+        )
+
         r = await client.get("/api/recommendations/next?limit=3&trigger=manual_refresh")
         assert r.status_code == 200
         data = r.json()
         items = data.get("items") or []
-        assert len(items) == 3
+        assert len(items) == 2
         assert data.get("run_id")
+        assert data.get("generated_at")
+        assert "last_event_id" in data
         top = items[0]
         assert top.get("task_type")
         assert top.get("task_type_label")
@@ -421,7 +614,7 @@ async def test_next_move_returns_three_tasks_and_learns_feedback(monkeypatch, tm
         assert r.status_code == 200
         data2 = r.json()
         items2 = data2.get("items") or []
-        assert len(items2) == 3
+        assert len(items2) == 2
         assert ((items2[0].get("target") or {}).get("task_public_id")) != dismissed_pid
 
         daily_path = tmp_path / "memory" / "daily" / f"{dt.date.today().isoformat()}.md"

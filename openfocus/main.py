@@ -36,7 +36,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
+from .agent.agents.attention_scheduler import AttentionSchedulerAgent
 from .agent.llm.openai_compat import OpenAICompatibleProvider
+from .agent.storage.events import DbEventSink
 from .companion.grpc import (
     CompanionGrpcError,
     CompanionGrpcServer,
@@ -1464,17 +1466,6 @@ def goals_list(request: Request) -> HTMLResponse:
     )
 
 
-def _score_text_to_weight(v: str | None) -> int:
-    x = (v or "").strip().lower()
-    if x in {"p0", "urgent", "highest", "high"}:
-        return 3
-    if x in {"p1", "medium", "normal"}:
-        return 2
-    if x in {"p2", "low"}:
-        return 1
-    return 2
-
-
 _NEXT_MOVE_TASK_TYPE_LABELS = {
     "deep_work": "Deep Work",
     "communication": "Communication",
@@ -1482,10 +1473,6 @@ _NEXT_MOVE_TASK_TYPE_LABELS = {
     "execution": "Execution",
     "admin": "Admin",
 }
-
-
-def _next_move_goal_label(goal: Goal) -> str:
-    return _truncate_zh(str(goal.title or "").strip(), 20)
 
 
 def _next_move_task_type_label(task_type: str | None) -> str:
@@ -1499,57 +1486,6 @@ _infer_estimated_minutes = goal_service.infer_estimated_minutes
 _infer_context_key = goal_service.infer_context_key
 
 
-def _next_move_memory_context() -> dict:
-    daily_text = ""
-    try:
-        daily_files = sorted(_memory_daily_root().glob("*.md"), reverse=True)
-        if daily_files:
-            daily_text = _memory_read_text(daily_files[0])
-    except Exception:
-        daily_text = ""
-    long_term_text = _memory_read_text(_memory_long_term_path())
-    merged = f"{daily_text}\n{long_term_text}".lower()
-    signals: set[str] = set()
-    if any(
-        k in merged
-        for k in [
-            "fast feedback",
-            "quick feedback",
-            "快速反馈",
-            "短反馈",
-            "short task",
-            "short tasks",
-        ]
-    ):
-        signals.add("fast_feedback")
-    if any(
-        k in merged
-        for k in [
-            "avoid context switch",
-            "reduce context switch",
-            "减少切换",
-            "连续推进",
-            "保持上下文",
-            "stay in the same context",
-        ]
-    ):
-        signals.add("avoid_context_switch")
-    if any(
-        k in merged for k in ["deep work", "深度工作", "long focus block", "大块时间"]
-    ):
-        signals.add("deep_work")
-    if any(
-        k in merged
-        for k in ["review first", "先 review", "prefer review", "喜欢 review"]
-    ):
-        signals.add("review")
-    return {
-        "daily": daily_text[:4000],
-        "long_term": long_term_text[:4000],
-        "signals": sorted(signals),
-    }
-
-
 def _next_move_feedback_meta(raw: str | None) -> dict:
     text_value = str(raw or "").strip()
     if not text_value:
@@ -1559,87 +1495,6 @@ def _next_move_feedback_meta(raw: str | None) -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
-
-
-def _next_move_feedback_penalty(
-    feedback_rows: list[NextMoveFeedback],
-    *,
-    task_public_id: str,
-    task_type: str,
-    estimated_minutes: int,
-    goal_id: int,
-    continuity_score: float,
-    now: dt.datetime,
-) -> tuple[float, list[str]]:
-    penalty = 0.0
-    reasons: list[str] = []
-    for fb in feedback_rows:
-        created_at = getattr(fb, "created_at", None) or now
-        if getattr(created_at, "tzinfo", None) is None:
-            created_at = created_at.replace(tzinfo=dt.timezone.utc)
-        if getattr(now, "tzinfo", None) is None:
-            now = now.replace(tzinfo=dt.timezone.utc)
-        age_hours = max(0.0, (now - created_at).total_seconds() / 3600.0)
-        if age_hours > 24 * 14:
-            continue
-        freshness = (
-            1.0
-            if age_hours <= 24
-            else (0.7 if age_hours <= 72 else (0.4 if age_hours <= 24 * 7 else 0.2))
-        )
-        meta = _next_move_feedback_meta(getattr(fb, "learned_summary", ""))
-        reason_code = (
-            str(getattr(fb, "reason_code", "") or meta.get("reason_code") or "")
-            .strip()
-            .lower()
-        )
-        meta_task_type = str(meta.get("task_type") or "").strip().lower()
-        try:
-            meta_goal_id = int(meta.get("goal_id") or 0)
-        except Exception:
-            meta_goal_id = 0
-
-        if str(getattr(fb, "task_public_id", "") or "") == task_public_id:
-            penalty += 8.0 * freshness
-            reasons.append("you recently said not now for this task")
-        if reason_code == "too_long" and estimated_minutes >= max(
-            45, int(meta.get("estimated_minutes") or 45)
-        ):
-            penalty += 2.5 * freshness
-            reasons.append("recent feedback prefers a shorter block")
-        if (
-            reason_code == "wrong_type"
-            and meta_task_type
-            and meta_task_type == task_type
-        ):
-            penalty += 2.2 * freshness
-            reasons.append("recent feedback deprioritized this task type")
-        if (
-            reason_code in {"too_much_context_switch", "lacking_context"}
-            and continuity_score < 1.0
-        ):
-            penalty += 2.0 * freshness
-            reasons.append("recent feedback asked for less context switching")
-        if (
-            reason_code == "not_important_now"
-            and meta_goal_id
-            and meta_goal_id == goal_id
-        ):
-            penalty += 1.6 * freshness
-            reasons.append("this goal was recently deprioritized")
-    deduped: list[str] = []
-    for item in reasons:
-        if item not in deduped:
-            deduped.append(item)
-    return penalty, deduped[:2]
-
-
-def _next_move_confidence(score: float) -> str:
-    if score >= 19:
-        return "high"
-    if score >= 13:
-        return "medium"
-    return "low"
 
 
 def _next_move_sentence(items: list[dict]) -> str | None:
@@ -1652,7 +1507,55 @@ def _next_move_sentence(items: list[dict]) -> str | None:
     ]
     if not titles:
         return None
-    return "Top picks now: " + ", ".join(titles) + "."
+    if len(titles) == 1:
+        return "Recommended next: " + titles[0] + "."
+    return "Recommended next: " + ", ".join(titles[:2]) + "."
+
+
+def _next_move_ts(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return value.isoformat() + "Z"
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _next_move_response_payload(run: NextMoveRun | None) -> dict:
+    if run is None:
+        return {
+            "generated_at": None,
+            "run_id": None,
+            "item": None,
+            "items": [],
+            "context_summary": {},
+            "last_event_id": 0,
+            "sentence": None,
+        }
+    recommendations = run.recommendations or {}
+    items = recommendations.get("items") if isinstance(recommendations, dict) else []
+    if not isinstance(items, list):
+        items = []
+    items = [it for it in items if isinstance(it, dict)][:2]
+    context_summary = run.context_summary or {}
+    if not isinstance(context_summary, dict):
+        context_summary = {}
+    try:
+        last_event_id = int(context_summary.get("latest_event_id") or 0)
+    except Exception:
+        last_event_id = 0
+    return {
+        "generated_at": _next_move_ts(run.generated_at),
+        "run_id": int(run.id or 0),
+        "item": items[0] if items else None,
+        "items": items,
+        "context_summary": context_summary,
+        "last_event_id": last_event_id,
+        "sentence": _next_move_sentence(items),
+    }
 
 
 def _next_move_learning_note(
@@ -1665,6 +1568,7 @@ def _next_move_learning_note(
 ) -> str:
     type_label = _next_move_task_type_label(task_type)
     reason_map = {
+        "not_for_now": "user explicitly said not for now and this task should be avoided in the immediate next recommendation",
         "too_much_context_switch": "user wants less context switching",
         "too_long": "user wants a shorter task block right now",
         "wrong_type": "this work type does not fit the current mode",
@@ -1687,269 +1591,57 @@ def _next_move_persist_feedback_learning(
 
 @app.get("/api/recommendations/next")
 def recommendations_next(
-    limit: int = 3, trigger: str = "manual_refresh"
+    limit: int = 2, trigger: str = "manual_refresh"
 ) -> JSONResponse:
-    now = _utcnow()
-    today = now.date()
-    limit = 3
-
-    with session_scope() as s:
-        memory_context = _next_move_memory_context()
-        goal_rows = (
-            s.query(Goal)
-            .filter(Goal.status.notin_(["done", "archived", "paused"]))
-            .order_by(Goal.due_date.asc(), Goal.id.desc())
-            .all()
+    provider, provider_error = _get_llm_provider_or_error()
+    if provider is None:
+        items: list[dict] = []
+        context_summary = {
+            "error": provider_error,
+            "agent_loop": "unavailable",
+            "recommendation_count": 0,
+            "latest_event_id": 0,
+        }
+        no_recommendation_reason = provider_error
+    else:
+        agent = AttentionSchedulerAgent(provider=provider)
+        data = agent.run(sink=DbEventSink())
+        items = (data.get("items") or [])[:2] if isinstance(data, dict) else []
+        context_summary = (
+            dict(data.get("context_summary") or {}) if isinstance(data, dict) else {}
         )
-        goal_by_id = {g.id: g for g in goal_rows}
-        tasks = (
-            s.query(Task)
-            .filter(
-                Task.goal_id.in_(list(goal_by_id.keys())) if goal_by_id else text("1=0")
-            )
-            .filter(Task.status.in_(["todo", "in_progress", "blocked"]))
-            .order_by(Task.id.asc())
-            .all()
-        )
-        public_ids = [t.public_id for t in tasks]
-        spaces_by_task: dict[str, AgentSpace] = {}
-        if public_ids:
-            for space in (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id.in_(public_ids))
-                .all()
-            ):
-                spaces_by_task[space.task_public_id] = space
-
-        latest_event_by_task: dict[str, Event] = {}
-        recent_focus_task_id = ""
-        if public_ids:
-            evs = (
-                s.query(Event)
-                .filter(Event.task_id.in_(public_ids))
-                .order_by(Event.id.desc())
-                .all()
-            )
-            for ev in evs:
-                if ev.task_id and ev.task_id not in latest_event_by_task:
-                    latest_event_by_task[ev.task_id] = ev
-                if (
-                    not recent_focus_task_id
-                    and ev.task_id
-                    and ev.kind in {"task.started", "task.progress"}
-                ):
-                    recent_focus_task_id = str(ev.task_id)
-
-        feedback_rows = (
-            s.query(NextMoveFeedback)
-            .order_by(NextMoveFeedback.id.desc())
-            .limit(120)
-            .all()
-        )
-
-        memory_signals = set(memory_context.get("signals") or [])
-        recent_focus_task = next(
-            (t for t in tasks if t.public_id == recent_focus_task_id), None
-        )
-        recent_focus_goal_id = (
-            int(recent_focus_task.goal_id) if recent_focus_task is not None else 0
-        )
-        recent_focus_type = (
-            str(getattr(recent_focus_task, "task_type", "") or "").strip().lower()
-            if recent_focus_task is not None
+        context_summary["agent_loop"] = "attention_scheduler"
+        context_summary["recommendation_count"] = len(items)
+        no_recommendation_reason = (
+            str(data.get("no_recommendation_reason") or "")
+            if isinstance(data, dict)
             else ""
         )
-        recent_focus_context = ""
-        if recent_focus_task is not None:
-            recent_focus_context = str(
-                getattr(recent_focus_task, "context_key", "") or ""
-            ).strip()
-            if not recent_focus_context:
-                recent_focus_context = _infer_context_key(
-                    str(recent_focus_task.title or ""),
-                    str(recent_focus_task.content or ""),
-                    goal_id=int(recent_focus_task.goal_id),
-                    root_path=getattr(
-                        spaces_by_task.get(recent_focus_task.public_id),
-                        "root_path",
-                        None,
-                    ),
-                )
 
-        scored: list[tuple[float, dict]] = []
-        for t in tasks:
-            g = goal_by_id.get(t.goal_id)
-            if g is None:
-                continue
-
-            space = spaces_by_task.get(t.public_id)
-            task_type = str(
-                getattr(t, "task_type", "") or ""
-            ).strip().lower() or _infer_task_type(t.title, t.content)
-            estimated_minutes = int(
-                getattr(t, "estimated_minutes", 0) or 0
-            ) or _infer_estimated_minutes(task_type, t.title, t.content)
-            context_key = str(
-                getattr(t, "context_key", "") or ""
-            ).strip() or _infer_context_key(
-                t.title,
-                t.content,
-                goal_id=int(t.goal_id),
-                root_path=getattr(space, "root_path", None),
-            )
-
-            days_left = (g.due_date - today).days
-            urgency = (
-                6.5
-                if days_left <= 0
-                else (
-                    5.2
-                    if days_left <= 1
-                    else (4.1 if days_left <= 3 else (2.8 if days_left <= 7 else 1.0))
-                )
-            )
-
-            pri = _score_text_to_weight(g.priority)
-            imp = _score_text_to_weight(g.importance)
-
-            ev = latest_event_by_task.get(t.public_id)
-            in_progress = (t.status == "in_progress") or (
-                ev is not None and ev.kind in {"task.started", "task.progress"}
-            )
-            continuity_score = 0.0
-            if recent_focus_task_id and recent_focus_task_id == t.public_id:
-                continuity_score = 3.0
-            elif recent_focus_context and recent_focus_context == context_key:
-                continuity_score = 2.4
-            elif recent_focus_goal_id and recent_focus_goal_id == int(g.id):
-                continuity_score = 1.6
-            elif recent_focus_type and recent_focus_type == task_type:
-                continuity_score = 0.8
-            if in_progress:
-                continuity_score += 1.2
-
-            hour = now.astimezone().hour
-            if estimated_minutes <= 30:
-                time_fit = 2.0 if hour < 10 or hour >= 18 else 1.0
-            elif estimated_minutes >= 90:
-                time_fit = 1.2 if 10 <= hour <= 16 else -1.0
-            else:
-                time_fit = 0.8
-
-            memory_bonus = 0.0
-            memory_notes: list[str] = []
-            if "fast_feedback" in memory_signals:
-                if estimated_minutes <= 30:
-                    memory_bonus += 2.0
-                    memory_notes.append("matches your fast-feedback preference")
-                elif estimated_minutes >= 90:
-                    memory_bonus -= 1.0
-            if "avoid_context_switch" in memory_signals:
-                if continuity_score >= 1.6:
-                    memory_bonus += 2.0
-                    memory_notes.append("keeps the current context warm")
-                else:
-                    memory_bonus -= 1.0
-            if "deep_work" in memory_signals and task_type == "deep_work":
-                memory_bonus += 1.4
-                memory_notes.append("matches your deep-work preference")
-            if "review" in memory_signals and task_type == "review":
-                memory_bonus += 1.2
-                memory_notes.append("fits your review-first preference")
-
-            feedback_penalty, feedback_notes = _next_move_feedback_penalty(
-                feedback_rows,
-                task_public_id=t.public_id,
-                task_type=task_type,
-                estimated_minutes=estimated_minutes,
-                goal_id=int(g.id),
-                continuity_score=continuity_score,
-                now=now,
-            )
-
-            score = (
-                urgency * 2.7
-                + pri * 2.0
-                + imp * 2.2
-                + continuity_score
-                + time_fit
-                + memory_bonus
-                - feedback_penalty
-            )
-
-            context_switch_cost = (
-                "low"
-                if continuity_score >= 2.0
-                else ("medium" if continuity_score >= 0.8 else "high")
-            )
-            why: list[str] = []
-            if days_left <= 0:
-                why.append("Deadline pressure is high.")
-            elif days_left <= 3:
-                why.append(f"Deadline is close ({days_left}d).")
-            else:
-                why.append(f"Goal DDL: {g.due_date.isoformat()}.")
-            if continuity_score >= 2.0:
-                why.append("Keeps your current context active.")
-            elif estimated_minutes <= 30:
-                why.append(f"Short block: about {estimated_minutes}m.")
-            else:
-                why.append(f"Estimated effort: about {estimated_minutes}m.")
-            if memory_notes:
-                why.append(memory_notes[0].capitalize() + ".")
-            elif imp >= 3 or pri >= 3:
-                why.append(f"High goal weight: {g.importance}/{g.priority}.")
-            elif feedback_notes:
-                why.append(
-                    "Kept lower because of recent feedback, but still relevant now."
-                )
-
-            scored.append(
-                (
-                    score,
-                    {
-                        "type": "do_task",
-                        "target": {"goal_id": g.id, "task_public_id": t.public_id},
-                        "goal_title": _next_move_goal_label(g),
-                        "title": t.title,
-                        "task_type": task_type,
-                        "task_type_label": _next_move_task_type_label(task_type),
-                        "why": why[:3],
-                        "expected_time_minutes": estimated_minutes,
-                        "context_switch_cost": context_switch_cost,
-                        "confidence": _next_move_confidence(score),
-                        "debug": {"score": round(score, 2)},
-                    },
-                )
-            )
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        items = [it for _s, it in scored[:limit]]
+    with session_scope() as s:
         run = NextMoveRun(
             trigger_kind=str(trigger or "manual_refresh")[:64],
-            context_summary={
-                "candidate_count": len(tasks),
-                "recent_focus_task_public_id": recent_focus_task_id or None,
-                "memory_signals": sorted(memory_signals),
-                "feedback_count": len(feedback_rows),
-            },
+            context_summary=context_summary,
             recommendations={"items": items},
         )
         s.add(run)
         s.flush()
-        run_id = int(run.id or 0)
+        payload = _next_move_response_payload(run)
 
-    sentence = _next_move_sentence(items)
-    item = items[0] if items else None
-
+    payload["no_recommendation_reason"] = no_recommendation_reason or None
     return JSONResponse(
-        {
-            "generated_at": now.isoformat(),
-            "run_id": run_id,
-            "item": item,
-            "items": items,
-            "sentence": sentence,
-        },
+        payload,
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
+
+
+@app.get("/api/recommendations/latest")
+def recommendations_latest() -> JSONResponse:
+    with session_scope() as s:
+        run = s.query(NextMoveRun).order_by(NextMoveRun.id.desc()).first()
+        payload = _next_move_response_payload(run)
+    return JSONResponse(
+        payload,
         headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
     )
 
@@ -1966,7 +1658,7 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
     feedback_type = (
         str(payload.get("feedback_type") or "dismiss").strip().lower() or "dismiss"
     )
-    reason_code = str(payload.get("reason_code") or "").strip().lower()
+    reason_code = str(payload.get("reason_code") or "not_for_now").strip().lower()
     reason_text = str(payload.get("reason_text") or "").strip()
     try:
         run_id = int(payload.get("run_id") or 0) or None
@@ -2019,6 +1711,24 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
         s.add(row)
         s.flush()
         feedback_id = int(row.id or 0)
+        s.add(
+            Event(
+                kind="next_move.not_for_now"
+                if feedback_type == "dismiss"
+                else "next_move.feedback",
+                agent="web",
+                task_id=task_public_id,
+                payload={
+                    "run_id": run_id,
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "reason_code": reason_code,
+                    "reason_text": reason_text,
+                    "task_title": task.title,
+                    "goal_id": int(task.goal_id),
+                },
+            )
+        )
         similar_rows = (
             s.query(NextMoveFeedback)
             .filter(NextMoveFeedback.feedback_type == feedback_type)
@@ -2056,6 +1766,8 @@ def recommendations_feedback(payload: dict) -> JSONResponse:
             memory_note = f"- Avoid prioritizing {_next_move_task_type_label(task_type)} tasks when the user says the work type is wrong for now."
         elif reason_code == "not_important_now":
             memory_note = "- When the user dismisses a recommendation as not important now, reduce near-term priority for similar work."
+        elif reason_code == "not_for_now":
+            memory_note = "- When the user says Not for now, avoid immediately recommending the same task again and use the reason text to infer the next best alternative."
     _next_move_persist_feedback_learning(note=daily_note, memory_note=memory_note)
 
     _try_audit_memory(
@@ -3505,6 +3217,10 @@ def _event_summary(kind: str, payload: object) -> str:
         return "reopen by user"
     if kind == "task.reopened":
         return "已重新打开（从完成状态恢复）"
+    if kind == "next_move.not_for_now":
+        return "Not for now"
+    if kind == "next_move.feedback":
+        return "Next Move feedback"
 
     if kind == "companion.pairing_code.requested":
         return "申请配对码"
@@ -3588,6 +3304,10 @@ def _event_kind_label(kind: str, payload: object) -> str:
         return "重新打开"
     if kind == "task.confirmed_done":
         return "人工确认完成"
+    if kind == "next_move.not_for_now":
+        return "Next Move"
+    if kind == "next_move.feedback":
+        return "Next Move"
     if kind == "goal.confirmed_done_by_user":
         return "confirm done by user"
     if kind == "goal.reopened_by_user":
