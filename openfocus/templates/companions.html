@@ -69,7 +69,7 @@
     .status.offline{ color: rgba(239,68,68,0.95); }
     .status.pending_certification{ color: rgba(245,158,11,0.95); }
 
-    .actions{ display:flex; gap: 10px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
+    .actions{ display:flex; gap: 10px; align-items:flex-start; justify-content:flex-end; flex-wrap:wrap; }
     .btn{
       border: 0;
       border-radius: 10px;
@@ -78,16 +78,26 @@
       line-height: 1;
       cursor: pointer;
       font-family: var(--mono);
+      min-width: 140px;
+      height: 36px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      color: #fff;
     }
-    .btn.pair{ background: rgba(34,197,94,0.92); color: #07140b; }
+    .btn.pair{ background: rgba(34,197,94,0.92); }
     .btn.pair:hover{ background: rgba(34,197,94,1); }
-    .btn.del{ background: rgba(239,68,68,0.92); color: #180707; }
+    .btn.code{ background: rgba(59,130,246,0.92); }
+    .btn.code:hover{ background: rgba(59,130,246,1); }
+    .btn.del{ background: rgba(239,68,68,0.92); }
     .btn.del:hover{ background: rgba(239,68,68,1); }
 
     /* Inline pair (per pending companion) */
+    .pair-block{ width: 360px; max-width: 100%; }
+    .pair-head{ display:flex; justify-content:flex-end; margin-bottom: 10px; }
     .pair-inline{ display:grid; grid-template-columns: 1fr 140px; gap: 10px; align-items:stretch; width: 360px; max-width: 100%; }
     .pair-inline input{ height: 36px; font-family: var(--mono); }
-    .pair-inline button{ height: 36px; }
+    .pair-inline-note{ margin-top: 8px; color: rgba(215,255,233,0.62); font-size: 12px; text-align: right; }
     .pair-inline-err{ margin-top: 8px; color: var(--danger); font-size: 12px; text-align: right; }
   </style>
 
@@ -196,11 +206,15 @@
                 ${statusBadge(st.key)}
                 <div class="actions">
                   ${(st.waiting) ? `
-                    <div>
+                    <div class="pair-block">
+                      <div class="pair-head">
+                        <button type="button" class="btn code js-pairing-code" data-id="${esc(it.id)}">Request code</button>
+                      </div>
                       <div class="pair-inline">
                         <input class="mono js-pair-code" placeholder="Enter pairing code" maxlength="10" />
                         <button type="button" class="btn pair js-pair-submit" data-id="${esc(it.id)}">Pair</button>
                       </div>
+                      <div class="pair-inline-note js-pair-note">Click “Request code”, then check the companion terminal output.</div>
                       <div class="pair-inline-err js-pair-err"></div>
                     </div>
                   ` : ''}
@@ -237,11 +251,51 @@
         })();
         return;
       }
+      const req = t.closest('.js-pairing-code');
+      if(req){
+        const id = String(req.getAttribute('data-id') || '').trim();
+        const item = req.closest('.comp-item');
+        const noteEl = item ? item.querySelector('.js-pair-note') : null;
+        const errEl = item ? item.querySelector('.js-pair-err') : null;
+        const codeEl = item ? item.querySelector('.js-pair-code') : null;
+        if(errEl) errEl.textContent = '';
+        if(!id){ if(errEl) errEl.textContent = 'Missing companion_id'; return; }
+
+        (async ()=>{
+          try{
+            req.disabled = true;
+            if(noteEl) noteEl.textContent = 'Requesting pairing code...';
+            const r = await fetch('/api/companions/' + encodeURIComponent(id) + '/pairing_code', {
+              method: 'POST',
+            });
+            if(!r.ok){
+              const txt = await r.text().catch(()=> '');
+              throw new Error(txt || ('HTTP ' + r.status));
+            }
+            const data = await r.json().catch(()=> ({}));
+            const expiresAt = String((data && data.expires_at) || '').trim();
+            if(noteEl){
+              noteEl.textContent = expiresAt
+                ? ('Pairing code requested. Check the companion terminal output. Expires at ' + expiresAt)
+                : 'Pairing code requested. Check the companion terminal output.';
+            }
+            if(codeEl && typeof codeEl.focus === 'function') codeEl.focus();
+            toast('pairing code requested');
+          }catch(err){
+            if(noteEl) noteEl.textContent = 'Click “Request code”, then check the companion terminal output.';
+            if(errEl) errEl.textContent = String(err && err.message ? err.message : err);
+          }finally{
+            req.disabled = false;
+          }
+        })();
+        return;
+      }
       const p = t.closest('.js-pair-submit');
       if(!p) return;
       const id = String(p.getAttribute('data-id') || '').trim();
       const item = p.closest('.comp-item');
       const codeEl = item ? item.querySelector('.js-pair-code') : null;
+      const noteEl = item ? item.querySelector('.js-pair-note') : null;
       const errEl = item ? item.querySelector('.js-pair-err') : null;
       if(errEl) errEl.textContent = '';
       const code = String((codeEl && codeEl.value) ? codeEl.value : '').trim();
@@ -267,6 +321,7 @@
           toast('paired');
           await refresh();
         }catch(err){
+          if(noteEl && !noteEl.textContent) noteEl.textContent = 'Click “Request code”, then check the companion terminal output.';
           if(errEl) errEl.textContent = String(err && err.message ? err.message : err);
         }finally{
           p.disabled = false;

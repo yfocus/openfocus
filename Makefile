@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 .PHONY: serve companion fmt fmt-check lint test check
 
-HOST ?= 127.0.0.1
-PORT ?= 8001
-
 serve:
-	poetry run uvicorn openfocus.app:app --host $(HOST) --port $(PORT) --reload
+	set -a; \
+	[ -f .env ] && . ./.env; \
+	set +a; \
+	poetry run uvicorn openfocus.app:app --host "$${HOST:-$${OPENFOCUS_HOST:-127.0.0.1}}" --port "$${PORT:-$${OPENFOCUS_PORT:-8001}}" --reload
 
 companion:
 	set -a; \

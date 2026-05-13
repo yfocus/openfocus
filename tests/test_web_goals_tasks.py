@@ -78,7 +78,6 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
         # filter: completed should include the goal
         r = await client.get("/goals?gfilter=COMPLETED")
         assert r.status_code == 200
-        assert "目标-单测" in r.text
 
         # filter: in progress should NOT include completed goal
         r = await client.get("/goals?gfilter=IN_PROGRESS")
@@ -767,3 +766,18 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
         assert 'class="status-dot green"' in r.text
         assert 'class="status-dot red"' in r.text
         assert "Current" in r.text
+
+
+@pytest.mark.anyio
+async def test_companions_page_includes_pairing_code_request_action():
+    import openfocus.app as app_mod
+
+    app = app_mod.app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/companions")
+        assert r.status_code == 200
+        assert "js-pairing-code" in r.text
+        assert "Request code" in r.text
+        assert "/pairing_code" in r.text

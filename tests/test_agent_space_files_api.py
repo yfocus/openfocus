@@ -140,6 +140,21 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
     asyncio.run(_run())
 
 
+def test_pairing_code_line_uses_clear_highlight_markup():
+    from openfocus.companion.runtime import _format_pairing_code_line
+
+    plain = _format_pairing_code_line(
+        "A1B2C3D4E5", "2026-05-13T18:00:00+08:00", use_color=False
+    )
+    assert "*** PAIRING CODE: A1B2C3D4E5 ***" in plain
+    assert "expires_at=2026-05-13T18:00:00+08:00" in plain
+
+    colored = _format_pairing_code_line("A1B2C3D4E5", "", use_color=True)
+    assert "PAIRING CODE" in colored
+    assert "A1B2C3D4E5" in colored
+    assert "\u001b[1;92m" in colored
+
+
 def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
     async def _run() -> None:
         os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")

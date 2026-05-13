@@ -85,6 +85,28 @@ def _gen_pair_code() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(10))
 
 
+def _stdout_supports_ansi() -> bool:
+    try:
+        if str(os.environ.get("NO_COLOR") or "").strip():
+            return False
+        if str(os.environ.get("TERM") or "").strip().lower() == "dumb":
+            return False
+        return bool(getattr(sys.stdout, "isatty", lambda: False)())
+    except Exception:
+        return False
+
+
+def _format_pairing_code_line(code: str, exp_s: str, *, use_color: bool) -> str:
+    base = f"PAIRING CODE: {code}"
+    suffix = f" (expires_at={exp_s})" if exp_s else ""
+    if use_color:
+        label = "\033[1;30;42m PAIRING CODE \033[0m"
+        value = f"\033[1;92m{code}\033[0m"
+        meta = f" \033[2m(expires_at={exp_s})\033[0m" if exp_s else ""
+        return f"\n{label} {value}{meta}"
+    return f"*** {base} ***{suffix}"
+
+
 class _CompanionRuntime:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -123,7 +145,12 @@ class _CompanionRuntime:
         exp = self._pair_code_expire_at
         exp_s = exp.isoformat() if exp else ""
         try:
-            print(f"pairing_code={code} (expires_at={exp_s})", flush=True)
+            print(
+                _format_pairing_code_line(
+                    code, exp_s, use_color=_stdout_supports_ansi()
+                ),
+                flush=True,
+            )
         except Exception:
             # best-effort
             pass
