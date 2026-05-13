@@ -114,8 +114,10 @@ http://127.0.0.1:8001/goals
 Run this on a machine that should host workspaces, terminals, or command-line agents:
 
 ```shell
-poetry run python -m openfocus.companion
+make companion
 ```
+
+This target loads configuration from the repository root `.env` before starting the companion.
 
 Then pair it from the Companion page in OpenFocus.
 
