@@ -53,7 +53,7 @@ def test_llm_provider_can_load_from_dotenv(monkeypatch, tmp_path):
     # Under pytest, cwd/.env is not auto-loaded; force it via OPENFOCUS_ENV_FILE.
     monkeypatch.setenv("OPENFOCUS_ENV_FILE", str(tmp_path / ".env"))
 
-    import openfocus.main as m
+    import openfocus.app as m
 
     # Reset the one-time guard for this test.
     monkeypatch.setattr(m, "_DOTENV_LOADED", False)

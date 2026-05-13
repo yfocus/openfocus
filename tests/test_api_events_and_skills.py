@@ -10,8 +10,8 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.mark.anyio
 async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm():
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import Event, Goal, Task
 
     # seed goal + task
@@ -47,8 +47,8 @@ async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm
 
 @pytest.mark.anyio
 async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm():
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import Event, Goal, Task
 
     with session_scope() as s:
@@ -91,8 +91,8 @@ async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm
 async def test_agent_and_skill_events_write_audit_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import Goal, Task
 
     with session_scope() as s:

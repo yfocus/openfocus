@@ -18,7 +18,7 @@ async def _wait_until_companion_ready(
 ) -> dict:
     """等待 Companion 完成注册，并且 gRPC 长连接已进入 registry。"""
 
-    from openfocus.main import COMPANION_GRPC
+    from openfocus.app import COMPANION_GRPC
 
     deadline = asyncio.get_running_loop().time() + float(timeout_s)
     last = None
@@ -50,9 +50,9 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
         from openfocus.db import get_engine, session_scope
-        from openfocus.main import COMPANION_GRPC, app
         from openfocus.models import Base, Event, Goal, Task
 
         Base.metadata.create_all(bind=get_engine())
@@ -148,9 +148,9 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
         from openfocus.db import session_scope
-        from openfocus.main import COMPANION_GRPC, app
         from openfocus.models import Goal, Task
 
         ws = tmp_path / "ws"
@@ -245,9 +245,9 @@ def test_agent_space_files_path_traversal_is_blocked_via_grpc(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
         from openfocus.db import session_scope
-        from openfocus.main import COMPANION_GRPC, app
         from openfocus.models import Goal, Task
 
         ws = tmp_path / "ws"
@@ -333,9 +333,9 @@ def test_agent_space_agent_new_session_send_stream_and_persist(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
         from openfocus.db import get_engine, session_scope
-        from openfocus.main import COMPANION_GRPC, app
         from openfocus.models import Base, Goal, Task
 
         Base.metadata.create_all(bind=get_engine())
@@ -442,8 +442,8 @@ def test_agent_space_agent_offline_returns_502(tmp_path):
         reset_engine()
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
 
+        from openfocus.app import app
         from openfocus.db import get_engine, session_scope
-        from openfocus.main import app
         from openfocus.models import Base, Companion, Goal, Task
 
         Base.metadata.create_all(bind=get_engine())
@@ -492,8 +492,8 @@ def test_companion_delete_unbinds_agent_spaces_and_removes_companion(tmp_path):
         reset_engine()
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
 
+        from openfocus.app import app
         from openfocus.db import get_engine, session_scope
-        from openfocus.main import app
         from openfocus.models import AgentSpace, Base, Companion
 
         Base.metadata.create_all(bind=get_engine())
@@ -549,9 +549,9 @@ def test_companion_restart_reuses_server_companion_id(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
         from openfocus.db import get_engine
-        from openfocus.main import COMPANION_GRPC, app
         from openfocus.models import Base
 
         Base.metadata.create_all(bind=get_engine())
@@ -595,8 +595,8 @@ def test_companion_pair_rate_limited_per_minute_grpc(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
+        from openfocus.app import COMPANION_GRPC, app
         from openfocus.companion import run_companion
-        from openfocus.main import COMPANION_GRPC, app
 
         await COMPANION_GRPC.start()
         assert COMPANION_GRPC.bound_addr

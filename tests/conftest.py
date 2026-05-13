@@ -29,7 +29,7 @@ def _isolate_db(tmp_path):
 
     # 初始化 schema（create_all + goals 轻量迁移）
     try:
-        from openfocus.main import _startup
+        from openfocus.app import _startup
 
         _startup()
     except Exception:

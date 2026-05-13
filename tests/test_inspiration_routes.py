@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 async def test_inspiration_pages_and_nav_render(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    from openfocus.main import app
+    from openfocus.app import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -40,8 +40,8 @@ async def test_inspiration_detail_renders_sidebar_status_and_resource_controls(
 ):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import InspirationSpace
 
     transport = ASGITransport(app=app)
@@ -234,7 +234,7 @@ async def test_inspiration_resource_actions_support_edit_replace_and_delete(
 ):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    from openfocus.main import app
+    from openfocus.app import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -324,7 +324,7 @@ async def test_inspiration_resource_actions_support_edit_replace_and_delete(
 async def test_inspiration_workspace_resource_files_and_draft_summary_sync(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    from openfocus.main import app
+    from openfocus.app import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -412,7 +412,7 @@ async def test_inspiration_workspace_resource_files_and_draft_summary_sync(monke
 async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    import openfocus.main as main
+    import openfocus.app as app_mod
     from openfocus.db import session_scope
     from openfocus.models import RemoteTerminalSession
 
@@ -446,10 +446,12 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
     def fake_select_online_companion(companion_id=None):
         return SimpleNamespace(id=77), fake_conn
 
-    monkeypatch.setattr(main, "_select_online_companion", fake_select_online_companion)
-    monkeypatch.setattr(main, "_has_online_companion", lambda: True)
+    monkeypatch.setattr(
+        app_mod, "_select_online_companion", fake_select_online_companion
+    )
+    monkeypatch.setattr(app_mod, "_has_online_companion", lambda: True)
 
-    app = main.app
+    app = app_mod.app
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         create_resp = await client.post(
@@ -645,9 +647,9 @@ async def _wait_until_published(
 async def test_inspiration_waiting_state_and_command_flow(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    import openfocus.main as main
+    import openfocus.app as app_mod
 
-    original_followup = main._kickoff_inspiration_followup
+    original_followup = app_mod._kickoff_inspiration_followup
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -662,9 +664,9 @@ async def test_inspiration_waiting_state_and_command_flow(monkeypatch):
             pending_message_id=pending_message_id,
         )
 
-    monkeypatch.setattr(main, "_kickoff_inspiration_followup", blocked_followup)
+    monkeypatch.setattr(app_mod, "_kickoff_inspiration_followup", blocked_followup)
 
-    app = main.app
+    app = app_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -736,9 +738,9 @@ async def test_inspiration_waiting_state_and_command_flow(monkeypatch):
 async def test_inspiration_plan_generation_does_not_block_other_pages(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    import openfocus.main as main
+    import openfocus.app as app_mod
 
-    original_followup = main._kickoff_inspiration_followup
+    original_followup = app_mod._kickoff_inspiration_followup
     started = asyncio.Event()
 
     async def observed_followup(
@@ -761,10 +763,10 @@ async def test_inspiration_plan_generation_does_not_block_other_pages(monkeypatc
             "rejected_or_deferred_ideas": [],
         }
 
-    monkeypatch.setattr(main, "_kickoff_inspiration_followup", observed_followup)
-    monkeypatch.setattr(main, "_inspiration_fallback_draft", slow_fallback_draft)
+    monkeypatch.setattr(app_mod, "_kickoff_inspiration_followup", observed_followup)
+    monkeypatch.setattr(app_mod, "_inspiration_fallback_draft", slow_fallback_draft)
 
-    app = main.app
+    app = app_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -795,9 +797,9 @@ async def test_inspiration_plan_generation_does_not_block_other_pages(monkeypatc
 async def test_inspiration_publish_state_persists_across_navigation(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    import openfocus.main as main
+    import openfocus.app as app_mod
 
-    original_publish = main._kickoff_inspiration_publish
+    original_publish = app_mod._kickoff_inspiration_publish
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -813,9 +815,9 @@ async def test_inspiration_publish_state_persists_across_navigation(monkeypatch)
             previous_status=previous_status,
         )
 
-    monkeypatch.setattr(main, "_kickoff_inspiration_publish", blocked_publish)
+    monkeypatch.setattr(app_mod, "_kickoff_inspiration_publish", blocked_publish)
 
-    app = main.app
+    app = app_mod.app
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         create = await client.post(
@@ -868,11 +870,11 @@ async def test_inspiration_publish_does_not_hold_db_write_lock_during_summarizat
 ):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    import openfocus.main as main
+    import openfocus.app as app_mod
     from openfocus.db import session_scope
     from openfocus.models import Goal
 
-    original_load_publish_snapshot = main._inspiration_load_publish_snapshot
+    original_load_publish_snapshot = app_mod._inspiration_load_publish_snapshot
     started = threading.Event()
     release = threading.Event()
 
@@ -884,10 +886,10 @@ async def test_inspiration_publish_does_not_hold_db_write_lock_during_summarizat
         return snapshot
 
     monkeypatch.setattr(
-        main, "_inspiration_load_publish_snapshot", blocked_load_publish_snapshot
+        app_mod, "_inspiration_load_publish_snapshot", blocked_load_publish_snapshot
     )
 
-    app = main.app
+    app = app_mod.app
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         goal_resp = await client.post(
@@ -959,8 +961,8 @@ async def test_inspiration_publish_and_fork_flow(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import (
         Goal,
         InspirationDraft,
@@ -1109,7 +1111,7 @@ async def test_inspiration_publish_and_fork_flow(monkeypatch, tmp_path):
 async def test_inspiration_image_resource_raw_preview(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
-    from openfocus.main import app
+    from openfocus.app import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

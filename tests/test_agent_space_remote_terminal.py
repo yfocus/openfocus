@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 async def _wait_until_companion_ready(
     client: AsyncClient, *, timeout_s: float = 2.0
 ) -> dict:
-    from openfocus.main import COMPANION_GRPC
+    from openfocus.app import COMPANION_GRPC
 
     deadline = asyncio.get_running_loop().time() + float(timeout_s)
     last = None
@@ -41,14 +41,14 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
         os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
         os.environ["OPENFOCUS_GRPC_PORT"] = "0"
 
-        from openfocus.companion import run_companion
-        from openfocus.db import get_engine, reset_engine, session_scope
-        from openfocus.main import (
+        from openfocus.app import (
             COMPANION_GRPC,
             _term_subscribe,
             _term_unsubscribe,
             app,
         )
+        from openfocus.companion import run_companion
+        from openfocus.db import get_engine, reset_engine, session_scope
         from openfocus.models import Base, Goal, RemoteTerminalSession, Task
 
         reset_engine()

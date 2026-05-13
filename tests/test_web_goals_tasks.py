@@ -11,10 +11,10 @@ from httpx import ASGITransport, AsyncClient
 
 @pytest.mark.anyio
 async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
-    import openfocus.main as main_mod
+    import openfocus.app as app_mod
     from openfocus.agent.llm.types import LLMCallResult
 
-    app = main_mod.app
+    app = app_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -207,7 +207,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
                 )
 
         monkeypatch.setattr(
-            main_mod,
+            app_mod,
             "_get_llm_provider_or_error",
             lambda: (FakeNextMoveProvider(), None),
         )
@@ -316,7 +316,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
-    from openfocus.main import app
+    from openfocus.app import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -380,8 +380,8 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
 
 @pytest.mark.anyio
 async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monkeypatch):
+    from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.main import app
     from openfocus.models import Event, Goal, Task
 
     transport = ASGITransport(app=app)
@@ -461,12 +461,12 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
 async def test_next_move_returns_two_tasks_and_learns_feedback(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
-    import openfocus.main as main_mod
+    import openfocus.app as app_mod
     from openfocus.agent.llm.types import LLMCallResult
     from openfocus.db import session_scope
     from openfocus.models import Goal, NextMoveFeedback, Task
 
-    app = main_mod.app
+    app = app_mod.app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -567,7 +567,7 @@ async def test_next_move_returns_two_tasks_and_learns_feedback(monkeypatch, tmp_
                 )
 
         monkeypatch.setattr(
-            main_mod,
+            app_mod,
             "_get_llm_provider_or_error",
             lambda: (FakeNextMoveProvider(), None),
         )
@@ -626,7 +626,7 @@ async def test_next_move_returns_two_tasks_and_learns_feedback(monkeypatch, tmp_
 
 @pytest.mark.anyio
 async def test_memory_page_and_save(monkeypatch, tmp_path):
-    from openfocus.main import app
+    from openfocus.app import app
 
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "3600")
@@ -672,8 +672,8 @@ async def test_memory_pipeline_records_audit_and_daily(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "1")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2")
 
+    from openfocus.app import app
     from openfocus.domains.memory import service as memory_service
-    from openfocus.main import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -729,8 +729,8 @@ async def test_memory_manual_summary_rolls_new_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_WINDOW_SECONDS", "3600")
     monkeypatch.setenv("OPENFOCUS_MEMORY_AUDIT_MAX_ENTRIES", "2000")
 
+    from openfocus.app import app
     from openfocus.domains.memory import service as memory_service
-    from openfocus.main import app
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
