@@ -8,6 +8,9 @@ from sqlalchemy.engine import Engine
 
 STARTUP_SCHEMA_MIGRATION_ID = "20260511_startup_schema_baseline"
 REMOTE_TERMINAL_OWNER_MIGRATION_ID = "20260512_remote_terminal_owner_fields"
+REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
+    "20260514_remote_terminal_task_public_id_nullable"
+)
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -312,7 +315,83 @@ def _migrate_remote_terminal_owner_fields(conn: Any) -> None:
         )
 
 
+def _migrate_remote_terminal_task_public_id_nullable(conn: Any) -> None:
+    """Migrate remote_terminal_sessions to the current schema."""
+
+    term_cols = _table_columns(conn, "remote_terminal_sessions")
+    if not term_cols:
+        return
+
+    task_public_id_col = _table_column(
+        conn, "remote_terminal_sessions", "task_public_id"
+    )
+    if task_public_id_col is None:
+        return
+    if not bool(task_public_id_col[3]):
+        conn.execute(
+            text(
+                "UPDATE remote_terminal_sessions "
+                "SET task_public_id = NULL WHERE task_public_id = ''"
+            )
+        )
+        return
+
+    old_table = "remote_terminal_sessions__old"
+    conn.execute(text(f"DROP TABLE IF EXISTS {old_table}"))
+    conn.execute(text(f"ALTER TABLE remote_terminal_sessions RENAME TO {old_table}"))
+    conn.execute(
+        text(
+            "CREATE TABLE remote_terminal_sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "owner_type VARCHAR(32) NOT NULL, "
+            "owner_id INTEGER NOT NULL, "
+            "space_id INTEGER NOT NULL, "
+            "task_public_id VARCHAR(36), "
+            "companion_id INTEGER, "
+            "root_path VARCHAR(4000) NOT NULL, "
+            "name VARCHAR(128) NOT NULL, "
+            "terminal_id VARCHAR(64) NOT NULL UNIQUE, "
+            "backend VARCHAR(32) NOT NULL, "
+            "connect_url VARCHAR(1024) NOT NULL, "
+            "status VARCHAR(32) NOT NULL, "
+            "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO remote_terminal_sessions ("
+            "id, owner_type, owner_id, space_id, task_public_id, companion_id, "
+            "root_path, name, terminal_id, backend, connect_url, status, "
+            "created_at, updated_at"
+            ") "
+            "SELECT "
+            "id, "
+            "COALESCE(NULLIF(owner_type, ''), CASE WHEN space_id < 0 THEN 'inspiration_space' ELSE 'agent_space' END), "
+            "CASE WHEN owner_id IS NULL OR owner_id = 0 THEN CASE WHEN space_id < 0 THEN -space_id ELSE space_id END ELSE owner_id END, "
+            "COALESCE(space_id, 0), "
+            "NULLIF(task_public_id, ''), "
+            "companion_id, "
+            "COALESCE(root_path, ''), "
+            "COALESCE(name, ''), "
+            "COALESCE(NULLIF(terminal_id, ''), 'migrated-terminal-' || id), "
+            "COALESCE(NULLIF(backend, ''), 'ttyd'), "
+            "COALESCE(connect_url, ''), "
+            "COALESCE(NULLIF(status, ''), 'active'), "
+            "COALESCE(created_at, CURRENT_TIMESTAMP), "
+            "COALESCE(updated_at, CURRENT_TIMESTAMP) "
+            f"FROM {old_table}"
+        )
+    )
+    conn.execute(text(f"DROP TABLE {old_table}"))
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
+    (
+        REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID,
+        _migrate_remote_terminal_task_public_id_nullable,
+    ),
 ]

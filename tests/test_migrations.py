@@ -109,6 +109,20 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
                 "FROM remote_terminal_sessions ORDER BY id"
             )
         ).fetchall()
+        task_public_id_col = next(
+            r
+            for r in conn.exec_driver_sql(
+                "PRAGMA table_info(remote_terminal_sessions)"
+            ).fetchall()
+            if r[1] == "task_public_id"
+        )
+        conn.execute(
+            text(
+                "INSERT INTO remote_terminal_sessions "
+                "(owner_type, owner_id, space_id, task_public_id, root_path, name, terminal_id, backend, connect_url, status) "
+                "VALUES ('inspiration_space', 56, -56, NULL, '/tmp', 'terminal', 'terminal-null-task-id', 'ttyd', 'http://127.0.0.1', 'active')"
+            )
+        )
 
     assert {"title", "status", "priority", "importance"}.issubset(goal_cols)
     assert {"content", "task_type", "estimated_minutes", "context_key"}.issubset(
@@ -132,6 +146,10 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         "updated_at",
     }.issubset(terminal_cols)
     assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
-    assert terminal_rows[1][1:] == ("inspiration_space", 34, "")
+    assert terminal_rows[1][1:] == ("inspiration_space", 34, None)
+    assert task_public_id_col[3] == 0
     assert migrations.STARTUP_SCHEMA_MIGRATION_ID in migration_ids
     assert migrations.REMOTE_TERMINAL_OWNER_MIGRATION_ID in migration_ids
+    assert (
+        migrations.REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID in migration_ids
+    )

@@ -78,6 +78,26 @@
       #memory-page .status-dot.green{ background: rgba(71,255,181,0.88); border-color: rgba(71,255,181,0.62); }
       #memory-page .status-dot.red{ background: rgba(255,59,92,0.88); border-color: rgba(255,59,92,0.62); }
       #memory-page .current-label{ color: rgba(255,191,102,0.92); font-size: 11px; }
+      /* shadcn-like neutral pass */
+      #memory-page{ grid-template-columns:320px minmax(0, 1fr); gap:14px; margin-top:0; height:100%; }
+      #memory-page .panel,
+      #memory-page .side-card{ border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--card); box-shadow:0 1px 2px rgba(0,0,0,0.22); }
+      #memory-page .divider{ height:1px; margin:12px 0; background:var(--border); border:0; }
+      #memory-page .wb-title{ font-size:18px; font-weight:650; color:var(--foreground); letter-spacing:-0.02em; }
+      #memory-page .wb-sub{ color:var(--muted-foreground); font-size:12px; }
+      #memory-page .tab-btn,
+      #memory-page .file-item{ border:1px solid var(--border); border-radius:var(--radius); background:var(--background); color:var(--foreground); transition:background .15s ease, border-color .15s ease; }
+      #memory-page .tab-btn:hover,
+      #memory-page .file-item:hover{ color:var(--foreground); background:var(--accent); border-color:color-mix(in srgb, var(--border) 50%, var(--foreground)); }
+      #memory-page .tab-btn.active,
+      #memory-page .file-item.active{ color:var(--foreground); border-color:var(--ring); background:var(--accent); box-shadow:0 0 0 1px var(--ring) inset; }
+      #memory-page .file-name{ color:var(--foreground); font-weight:650; }
+      #memory-page .file-meta{ color:var(--muted-foreground); }
+      #memory-page .viewer textarea{ background:var(--background); border:1px solid var(--border); color:var(--foreground); font-family:var(--font-mono); line-height:1.55; }
+      #memory-page .empty{ border:1px dashed var(--border); border-radius:var(--radius); background:var(--background); color:var(--muted-foreground); }
+      #memory-page .status-dot.green{ background:var(--success); border-color:color-mix(in srgb, var(--success) 70%, white); }
+      #memory-page .status-dot.red{ background:var(--destructive); border-color:color-mix(in srgb, var(--destructive) 70%, white); }
+      #memory-page .current-label{ color:var(--foreground); border:1px solid var(--border); border-radius:999px; padding:1px 6px; background:var(--muted-surface); }
       @media (max-width: 1100px) {
         #memory-page{ grid-template-columns: 1fr; height: auto; }
         #memory-page .viewer{ min-height: 360px; height: auto; }

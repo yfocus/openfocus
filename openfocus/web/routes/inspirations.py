@@ -1067,10 +1067,17 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.get("/inspirations/{space_id:int}", response_class=HTMLResponse)
     def inspiration_detail_page(request: Request, space_id: int) -> HTMLResponse:
+        try:
+            context = _inspiration_detail_page_context(int(space_id))
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            context = _inspiration_detail_page_context(None)
+            context["missing_space_id"] = int(space_id)
         return templates.TemplateResponse(
             request,
             "inspiration_detail.html",
-            _inspiration_detail_page_context(int(space_id)),
+            context,
         )
 
     @router.get("/api/inspirations/{space_id:int}/terminals")

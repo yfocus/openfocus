@@ -4,7 +4,7 @@
   <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
   <style>
     .agent-preview-content { height: 100%; min-height: 0; }
-    .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: 10px; background: rgba(255,255,255,0.02); }
+    .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: var(--radius); background: var(--background); border: 1px solid var(--border); }
     .codebox.cm-preview .cm-editor { height: 100%; }
     .codebox.cm-preview .cm-scroller { overflow: auto !important; }
 
@@ -15,12 +15,12 @@
       display: grid;
       grid-template-columns: minmax(220px, var(--files-w)) 10px minmax(320px, 1fr) 10px minmax(320px, var(--term-w));
       gap: 0;
-      margin-top: 10px;
-      height: calc(100% - 10px);
+      margin-top: 12px;
+      height: calc(100% - 12px);
       min-height: 0;
       align-items: stretch;
     }
-    .agent-space-split > .panel { min-height: 0; min-width: 0; }
+    .agent-space-split > .panel { min-height: 0; min-width: 0; border:1px solid var(--border); background:var(--card); border-radius:var(--radius-lg); }
     .agent-space-splitter {
       position: relative;
       cursor: col-resize;
@@ -35,16 +35,16 @@
       left: 50%;
       width: 2px;
       transform: translateX(-50%);
-      background: rgba(0,229,255,0.16);
+      background: var(--border);
       border-radius: 999px;
     }
     .agent-space-splitter:hover::before {
-      background: rgba(0,229,255,0.55);
-      box-shadow: 0 0 0 3px rgba(0,229,255,0.10);
+      background: var(--ring);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 16%, transparent);
     }
     .agent-space-splitter.dragging::before {
-      background: rgba(0,229,255,0.85);
-      box-shadow: 0 0 0 4px rgba(0,229,255,0.14);
+      background: var(--ring);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--ring) 20%, transparent);
     }
     /* Keep original responsive behavior: stack on narrow screens */
     @media (max-width: 1100px) {
@@ -55,18 +55,18 @@
     .space-actions{ display:flex; gap: 8px; align-items:center; justify-content:flex-end; }
     .space-btn{
       padding: 2px 8px;
-      border-radius: 8px;
-      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: calc(var(--radius) - 2px);
+      border: 1px solid var(--border);
       text-decoration:none;
       font-size: 14px;
       line-height: 1.2;
       background: transparent;
     }
     .space-btn:hover{ text-decoration:none; }
-    .space-btn.ok{ border-color: rgba(43,255,183,0.38); background: rgba(43,255,183,0.12); color: rgba(43,255,183,0.92); }
-    .space-btn.ok:hover{ background: rgba(43,255,183,0.16); }
-    .space-btn.danger{ border-color: rgba(255,59,92,0.35); background: rgba(255,59,92,0.10); color: rgba(255,59,92,0.92); }
-    .space-btn.danger:hover{ background: rgba(255,59,92,0.14); }
+    .space-btn.ok{ border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+    .space-btn.ok:hover{ background: color-mix(in srgb, var(--primary) 90%, var(--background)); }
+    .space-btn.danger{ border-color: var(--destructive); background: color-mix(in srgb, var(--destructive) 12%, transparent); color: var(--destructive); }
+    .space-btn.danger:hover{ background: color-mix(in srgb, var(--destructive) 18%, transparent); }
   </style>
   <div style="height: 100%; min-height: 0; display: flex; flex-direction: column;">
   <div class="panel pad" style="margin-top: 10px; padding: 10px 12px;">

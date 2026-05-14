@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, Response
@@ -21,6 +22,13 @@ COMPANION_STATUSES = frozenset(
         COMPANION_STATUS_OFFLINE,
     }
 )
+
+
+@dataclass(frozen=True)
+class SelectedCompanion:
+    """Session-independent companion identity returned with a live connection."""
+
+    id: int
 
 
 def utcnow() -> dt.datetime:
@@ -346,7 +354,7 @@ def require_online(grpc_server: Any, *, companion: Companion | None):
 
 def select_online(
     grpc_server: Any, companion_id: int | None = None
-) -> tuple[Companion, Any]:
+) -> tuple[SelectedCompanion, Any]:
     with session_scope() as session:
         repo = CompanionRepository(session)
         if companion_id:
@@ -364,7 +372,10 @@ def select_online(
             conn = grpc_server.registry.get(int(companion.id))
             if conn is None:
                 continue
-            return companion, conn
+            # Do not leak SQLAlchemy ORM instances outside the repository/session
+            # boundary. Terminal routes only need the identity plus the live
+            # gRPC connection, so return a tiny DTO that cannot become detached.
+            return SelectedCompanion(id=int(companion.id)), conn
     raise HTTPException(status_code=502, detail="No online Companion is available")
 
 

@@ -2,18 +2,20 @@
 {% extends "base.html" %}
 {% block content %}
   <style>
-    .insp-page{ display:grid; grid-template-columns: 360px 1fr; gap: 18px; align-items:start; }
-    .insp-panel{ border: 1px solid rgba(255,255,255,0.14); border-radius: 16px; background: rgba(0,0,0,0.34); overflow: hidden; }
+    .insp-page{ display:grid; grid-template-columns: 380px minmax(0, 1fr); gap: 14px; align-items:start; max-width: 1180px; margin: 0 auto; padding-top: 2px; }
+    .insp-panel{ border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--card); overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.22); }
     .insp-pad{ padding: 16px; }
-    .insp-title{ font-size: 18px; font-weight: 700; color: rgba(255,209,102,0.92); }
-    .insp-sub{ margin-top: 6px; color: rgba(215,255,233,0.58); font-size: 12px; }
+    .insp-title{ font-size: 18px; font-weight: 650; color: var(--foreground); letter-spacing: -0.02em; }
+    .insp-sub{ margin-top: 6px; color: var(--muted-foreground); font-size: 13px; line-height: 1.45; }
     .insp-list{ display:flex; flex-direction:column; gap: 10px; }
-    .insp-card{ display:block; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.03); color: inherit; text-decoration: none; }
-    .insp-card:hover{ background: rgba(255,255,255,0.05); }
-    .insp-card-title{ font-weight: 700; }
-    .insp-card-meta{ margin-top: 6px; font-size: 12px; color: rgba(215,255,233,0.58); display:flex; gap: 8px; flex-wrap:wrap; }
+    .insp-card{ display:block; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--background); color: inherit; text-decoration: none; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
+    .insp-card:hover{ background: var(--accent); border-color: color-mix(in srgb, var(--border) 50%, var(--foreground)); transform: translateY(-1px); }
+    .insp-card-title{ font-weight: 650; color: var(--foreground); }
+    .insp-card-meta{ margin-top: 8px; font-size: 12px; color: var(--muted-foreground); display:flex; gap: 6px; flex-wrap:wrap; }
+    .insp-card-meta span{ display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:2px 7px; background:var(--muted-surface); }
     .insp-form{ display:flex; flex-direction:column; gap: 12px; }
-    .insp-empty{ padding: 16px; border-radius: 14px; border: 1px dashed rgba(255,255,255,0.14); color: rgba(215,255,233,0.6); }
+    .insp-form label{ display:block; margin-bottom:6px; color:var(--muted-foreground); font-size:13px; font-weight:500; }
+    .insp-empty{ padding: 16px; border-radius: var(--radius); border: 1px dashed var(--border); color: var(--muted-foreground); background: var(--background); line-height: 1.5; }
     @media (max-width: 960px){ .insp-page{ grid-template-columns: 1fr; } }
   </style>
 

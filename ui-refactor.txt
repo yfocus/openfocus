@@ -1,0 +1,258 @@
+OpenFocus UI Refactor Plan (shadcn/ui inspired)
+
+Status
+- Design direction: shadcn classic neutral SaaS style.
+- Phase 1 implementation focus: Dashboard / Goals.
+- This document is the step-by-step implementation baseline. Update it when design or scope changes.
+- 2026-05-13 update: started Phase 1 implementation. Global neutral tokens and the first Dashboard / Goals visual pass are now being applied in base.html and goals.html.
+- 2026-05-13 update 2: extended the neutral shadcn-like visual pass to all current UI entry points: Dashboard / Goals, Inspiration list/detail, Agent Space shell, Remote Terminal panel, Memory, and Companion.
+
+1. Background and current UI baseline
+
+OpenFocus currently uses FastAPI/Jinja templates plus a small React/Vite layer for richer workspaces. Global CSS is embedded in base.html, and major pages add large page-local style blocks.
+
+Important current entry points:
+- Global shell, tokens, navigation, shared controls: openfocus/templates/base.html
+- Dashboard / Goals main UI: openfocus/templates/goals.html
+- Inspiration list: openfocus/templates/inspirations.html
+- Inspiration detail workspace: openfocus/templates/inspiration_detail.html
+- Agent Space shell and React mount: openfocus/templates/agent_space.html
+- Agent Space React implementation: frontend/src/entries/agent-space.tsx
+- Inspiration React controller: frontend/src/entries/inspiration-space.tsx
+- Memory page: openfocus/templates/memory.html
+- Companion page: openfocus/templates/companions.html
+- Terminal panel CSS/JS: openfocus/static/terminal-panel/terminal.css, openfocus/static/terminal-panel/terminal.js
+
+Current visual characteristics:
+- Predominantly black / neon cyan / yellow terminal-like style.
+- Monospace font is applied globally.
+- Most UI primitives are hand-written CSS selectors rather than reusable component classes.
+- Dashboard has a complex three-column layout with page-specific style overrides.
+- Interactions are already functional, so refactor should primarily be visual and structural, not behavioral.
+
+2. Target design language
+
+Adopt shadcn/ui's classic neutral SaaS style:
+- Neutral palette first: background / foreground / muted / border / input / card / popover tokens.
+- Reduce neon and cyberpunk accents; reserve accent colors for state, focus, and primary actions.
+- Prefer clear hierarchy, small radius, thin borders, subtle shadows, and consistent spacing.
+- Use system sans-serif for product UI; reserve monospace for code, IDs, terminal, paths, logs, and compact metadata.
+- Make the interface feel like a polished productivity dashboard rather than a terminal skin.
+- Keep dark mode as the initial/default target, but define tokens so light mode can be added later without rewriting components.
+
+3. Design tokens
+
+Create a token layer in base.html first. Suggested naming follows shadcn conventions while keeping plain CSS:
+
+Colors:
+- --background
+- --foreground
+- --card
+- --card-foreground
+- --popover
+- --popover-foreground
+- --primary
+- --primary-foreground
+- --secondary
+- --secondary-foreground
+- --muted
+- --muted-foreground
+- --accent
+- --accent-foreground
+- --destructive
+- --destructive-foreground
+- --border
+- --input
+- --ring
+- --success
+- --warning
+
+Sizing / shape:
+- --radius: 0.75rem
+- --radius-sm: 0.5rem
+- --radius-lg: 1rem
+- --space-page-x: 1rem
+- --space-page-y: 1rem
+- --topbar-height
+
+Typography:
+- --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
+- --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace
+
+Default dark palette proposal:
+- background: #09090b
+- foreground: #fafafa
+- card: #0f0f11
+- card-foreground: #fafafa
+- muted: #18181b
+- muted-foreground: #a1a1aa
+- border/input: #27272a
+- primary: #fafafa
+- primary-foreground: #09090b
+- accent: #18181b
+- accent-foreground: #fafafa
+- destructive: #ef4444
+- success: #22c55e
+- warning: #f59e0b
+- ring: #a1a1aa
+
+4. Shared primitive classes
+
+Introduce reusable CSS primitives before changing page markup heavily:
+- .of-app-shell: page container.
+- .of-topbar: sticky app navigation.
+- .of-brand: logo and product name.
+- .of-nav: horizontal nav links.
+- .of-card: card container.
+- .of-card-header / .of-card-title / .of-card-description / .of-card-content / .of-card-footer.
+- .of-button, .of-button-primary, .of-button-secondary, .of-button-ghost, .of-button-destructive, .of-button-icon.
+- .of-input, .of-textarea, .of-select.
+- .of-badge, .of-badge-secondary, .of-badge-outline, .of-badge-success, .of-badge-warning, .of-badge-destructive.
+- .of-tabs, .of-tab.
+- .of-scroll-area.
+- .of-empty-state.
+- .of-dialog / .of-modal-backdrop.
+- .of-table.
+- .of-skeleton or .of-loading-inline.
+
+Implementation rule:
+- Keep existing class names initially for behavior selectors.
+- Add new primitive classes in parallel, then gradually remove duplicated page-local visual CSS.
+- Avoid changing IDs or data attributes used by existing JavaScript.
+
+5. Global shell refactor
+
+Scope:
+- Refactor base.html global CSS and topbar.
+- Replace global monospace typography with sans-serif; preserve monospace utility classes.
+- Normalize link, button, input, textarea, select, dialog, toast, calendar, scrollbar styles.
+
+Target behavior:
+- Navigation appears as a clean shadcn-like topbar with active/hover states.
+- Brand becomes compact; logo should not dominate vertical height.
+- App content gets consistent padding and max-width rules per page type.
+- Fullscreen dashboard/workspace pages retain full-height behavior.
+
+Acceptance:
+- No broken navigation.
+- Existing New Goal and Calendar interactions still work.
+- Shared form controls look consistent across pages.
+
+6. Phase 1: Dashboard / Goals refactor
+
+Primary goal:
+Turn Dashboard into a shadcn-style productivity command center with a calm three-column layout.
+
+Information architecture:
+- Left column: Goal list and filters.
+- Center column: selected Goal/Task detail, task table, editable details, forms.
+- Right column: Next Move recommendations and event timeline.
+
+Layout target:
+- Use CSS grid with named areas where practical.
+- Left: 320px, center: minmax(0, 1fr), right: 360px on desktop.
+- Stack to single column on narrow screens.
+- Columns use .of-card shells and .of-scroll-area bodies.
+
+Visual mapping:
+- Goal cards -> compact cards/list items with title, progress badge, due/status badge.
+- Task bullets/table -> shadcn table/list rows with subtle hover.
+- Detail panel -> card header + card content + tabs/sections.
+- Actions -> button variants instead of text-only links where appropriate.
+- Next Move -> recommendation cards with title, confidence/urgency badges, reasons, and action buttons.
+- Events -> timeline list with muted metadata and small status dots.
+
+Dashboard component conventions:
+- Status badges:
+  - todo: outline/muted
+  - in_progress: warning
+  - done: success
+  - expired/destructive: destructive
+- Primary CTA: New Goal / Create Workspace / Start next move.
+- Destructive actions use destructive variant and should remain visually secondary unless dangerous.
+- Focus rings must be visible using --ring.
+
+Implementation steps for Phase 1:
+1) Update base tokens and primitive classes without changing Dashboard behavior.
+2) Replace Dashboard page-local colors with tokenized values.
+3) Convert Dashboard panels to .of-card structure while keeping current template IDs/classes.
+4) Redesign left goal list filter controls and cards.
+5) Redesign center detail header, section nav, task table, forms, and dialogs.
+6) Redesign right Next Move card and Events timeline.
+7) Verify keyboard selection, dialogs, forms, create/update/delete flows, Next Move refresh/feedback, AgentSpace links.
+8) Remove dead or duplicated CSS created by the migration.
+
+Phase 1 non-goals:
+- Do not rewrite Dashboard business logic.
+- Do not replace Jinja with React.
+- Do not change API contracts or persistence behavior.
+- Do not introduce external shadcn CLI unless separately approved; emulate the design with local CSS primitives first.
+
+7. Later phases
+
+Phase 2: Inspiration
+- Apply the same shell/card/input/button primitives to inspirations.html and inspiration_detail.html.
+- Preserve built-in planner and BYO Agent terminal mode.
+- Redesign chat bubbles, resource cards, draft cards, modal dialogs, and publish overlay.
+
+Phase 3: Agent Space / Terminal
+- Redesign workspace chrome: breadcrumb card, action buttons, file tree, preview panel, terminal panel header.
+- Keep terminal rendering stable; only adjust container chrome and surrounding tokens unless terminal readability requires token mapping.
+- Update CodeMirror theme colors to neutral tokens while preserving syntax contrast.
+
+Phase 4: Memory / Companion
+- Convert secondary pages to the shared primitives.
+- Memory: tab/list/detail/editor as cards and tabs.
+- Companion: device list as shadcn cards with badges and action buttons.
+
+Phase 5: Optional light theme
+- Add data-theme="light" token block.
+- Add theme toggle in topbar if needed.
+- Verify all status colors and terminal/code surfaces in both themes.
+
+8. Technical constraints and risks
+
+Constraints:
+- Existing templates contain inline styles and page-local style blocks; refactor should be incremental.
+- JavaScript relies on IDs/classes/data attributes in Dashboard and Inspiration; preserve behavior selectors.
+- Agent Space is React-rendered but uses global CSS variables, so token changes must be compatible with CodeMirror and terminal panel.
+- Tests focus on routes/API more than visual regression; manual browser checks are required.
+
+Risks:
+- Large CSS changes can unintentionally affect fullscreen layouts.
+- Removing monospace globally may reveal sizing/overflow issues.
+- Dialog styling differs between native dialog and custom modal-backdrop patterns.
+- Dashboard has many dynamic template sections; visual changes should be tested with empty, active, done, expired, and selected states.
+
+Mitigations:
+- Keep old behavior selectors.
+- Introduce primitives first, then migrate page by page.
+- Make small commits/patches by phase.
+- Use browser smoke tests on /goals, /inspirations, /memory, /companions and an AgentSpace page if data exists.
+- Run npm build after frontend/style changes, and poetry run pytest for backend/template regression coverage.
+
+9. Verification checklist
+
+Automated:
+- npm run build
+- poetry run pytest
+
+Manual smoke checks:
+- /goals loads and keeps three-column layout on desktop.
+- Create Goal dialog opens from topbar and page context.
+- Goal filter/sort controls still work.
+- Selecting goal/task updates center panel.
+- Create/update/delete goal/task flows still work.
+- Next Move recommendation refresh/feedback still works.
+- Event timeline remains readable.
+- Calendar dialog opens and can switch Month/Swimlane.
+- Responsive layout works at tablet/mobile widths.
+
+10. Definition of done for Phase 1
+
+- Dashboard visually matches shadcn classic neutral SaaS direction.
+- Shared tokens and primitives are documented in CSS comments or obvious class names.
+- No broken Dashboard interactions.
+- Existing tests pass, or any unrelated failures are documented.
+- Visual CSS duplication is reduced, not increased.
+- ui-refactor.txt is updated if implementation deviates from this plan.

@@ -5,10 +5,10 @@
     <style>
       /* Dashboard layout & style (match whiteboard design) */
       #dashboard.layout-3{
-        grid-template-columns: 300px 1fr 320px;
-        gap: 16px;
-        margin-top: 10px;
-        height: calc(100% - 10px);
+        grid-template-columns: 320px minmax(0, 1fr) 360px;
+        gap: 14px;
+        margin-top: 0;
+        height: 100%;
       }
       #dashboard .dash-col{
         height: 100%;
@@ -18,49 +18,51 @@
         gap: 14px;
       }
       #dashboard .panel{
-        border-radius: 10px;
-        border-color: rgba(255,255,255,0.16);
-        background: rgba(0,0,0,1);
+        border-radius: var(--radius-lg);
+        border: 1px solid var(--border);
+        background: var(--card);
+        box-shadow: 0 1px 2px rgba(0,0,0,0.22);
       }
-      #dashboard .divider{ border-color: rgba(255,255,255,0.10); }
+      #dashboard .divider{ height:1px; margin: 12px 0; background: var(--border); border:0; }
 
       #dashboard .wb-title{
-        font-size: 20px;
-        font-weight: 700;
-        color: rgba(255,191,102,0.95);
-        letter-spacing: 0.2px;
+        font-size: 18px;
+        font-weight: 650;
+        color: var(--foreground);
+        letter-spacing: -0.02em;
       }
-      #dashboard .wb-sub{ color: rgba(255,255,255,0.55); font-size: 12px; }
+      #dashboard .wb-sub{ color: var(--muted-foreground); font-size: 12px; }
 
       /* Left list */
       #dashboard #left-col{ padding: 0 2px; }
-      #dashboard .goal-controls{ display:flex; gap: 8px; align-items:flex-end; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.18); border-radius: 10px; background: transparent; }
-      #dashboard .goal-controls label{ font-size: 10px; color: rgba(215,255,233,0.55); }
-      #dashboard .goal-controls select{ width:auto; padding: 6px 8px; font-size: 12px; border-radius: 10px; }
-      #dashboard #goal-list{ display:flex; flex-direction:column; gap: 12px; }
-      #dashboard .goal-card{ margin: 0; cursor: pointer; border: 1px solid rgba(255,255,255,0.18); background: transparent; }
+      #dashboard .goal-controls{ display:flex; gap: 8px; align-items:flex-end; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+      #dashboard .goal-controls label{ font-size: 11px; color: var(--muted-foreground); font-weight: 500; }
+      #dashboard .goal-controls select{ width:auto; padding: 7px 28px 7px 9px; font-size: 12px; border-radius: calc(var(--radius) - 2px); background: var(--background); color: var(--foreground); }
+      #dashboard #goal-list{ display:flex; flex-direction:column; gap: 8px; }
+      #dashboard .goal-card{ margin: 0; cursor: pointer; border: 1px solid var(--border); background: var(--card); transition: background .15s ease, border-color .15s ease, transform .15s ease; }
+      #dashboard .goal-card:hover{ border-color: color-mix(in srgb, var(--border) 45%, var(--foreground)); background: color-mix(in srgb, var(--card) 82%, var(--foreground)); transform: translateY(-1px); }
       #dashboard .goal-head{ display:flex; align-items:center; gap: 10px; }
-      #dashboard .goal-head .gname{ flex: 1; min-width: 0; color: rgba(255,209,102,0.92); font-size: 13px; }
-      #dashboard .goal-head .gname strong{ font-weight: 700; }
-      #dashboard .goal-card.done .goal-head .gname{ color: rgba(255,255,255,0.55); }
-      #dashboard .goal-card.done:hover .gname{ text-decoration: none; color: rgba(255,255,255,0.55); }
+      #dashboard .goal-head .gname{ flex: 1; min-width: 0; color: var(--foreground); font-size: 13px; line-height: 1.35; }
+      #dashboard .goal-head .gname strong{ font-weight: 650; color: var(--muted-foreground); }
+      #dashboard .goal-card.done .goal-head .gname{ color: var(--muted-foreground); }
+      #dashboard .goal-card.done:hover .gname{ text-decoration: none; color: var(--muted-foreground); }
       #dashboard .goal-head .gmeta{ display:flex; gap: 8px; align-items:center; }
-      #dashboard .goal-head .ratio{ font-size: 12px; color: rgba(255,255,255,0.72); }
-      #dashboard .status-dot{ width: 9px; height: 9px; border-radius: 999px; display:inline-block; border: 1px solid rgba(255,255,255,0.20); }
-      #dashboard .status-dot.green{ background: rgba(71,255,181,0.85); }
-      #dashboard .status-dot.red{ background: rgba(255,59,92,0.85); }
-      #dashboard .status-dot.gray{ background: rgba(255,255,255,0.30); }
+      #dashboard .goal-head .ratio{ font-size: 11px; color: var(--muted-foreground); border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; background: var(--muted-surface); }
+      #dashboard .status-dot{ width: 8px; height: 8px; border-radius: 999px; display:inline-block; border: 1px solid var(--border); }
+      #dashboard .status-dot.green{ background: var(--success); border-color: color-mix(in srgb, var(--success) 70%, white); }
+      #dashboard .status-dot.red{ background: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 70%, white); }
+      #dashboard .status-dot.gray{ background: var(--muted-foreground); }
 
       #dashboard .task-bullets{ display:flex; flex-direction:column; gap: 6px; }
       #dashboard .task-bullet{ display:flex; align-items:center; gap: 10px; padding: 6px 8px; border-radius: 8px; }
-      #dashboard .task-bullet:hover{ background: transparent; }
-      #dashboard .task-mark{ width: 8px; height: 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.24); }
+      #dashboard .task-bullet:hover{ background: var(--accent); }
+      #dashboard .task-mark{ width: 8px; height: 8px; border-radius: 999px; border: 1px solid var(--border); }
       #dashboard .task-mark.todo{ background: transparent; }
-      #dashboard .task-mark.in_progress{ background: rgba(255,191,102,0.80); }
-      #dashboard .task-mark.done{ background: rgba(71,255,181,0.85); }
-      #dashboard .task-bullet .tname{ flex:1; min-width:0; text-align:left; padding:0; border:0; background:transparent; color: rgba(255,255,255,0.90); font-size: 12px; }
+      #dashboard .task-mark.in_progress{ background: var(--warning); }
+      #dashboard .task-mark.done{ background: var(--success); }
+      #dashboard .task-bullet .tname{ flex:1; min-width:0; text-align:left; padding:0; border:0; background:transparent; color: var(--foreground); font-size: 12px; font-weight: 400; }
       #dashboard .task-bullet:hover .tname,
-      #dashboard .goal-card:hover .gname{ text-decoration: underline; color: rgba(0,229,255,0.92); }
+      #dashboard .goal-card:hover .gname{ text-decoration: none; color: var(--foreground); }
 
       /* Center detail */
       #dashboard .detail-wrap{ position: relative; }
@@ -73,44 +75,46 @@
       #dashboard .detail-actions > a,
       #dashboard .detail-actions form > button{ display:inline-flex; align-items:center; }
       #dashboard .detail-actions .btn-danger{ padding: 8px 12px; }
-      #dashboard .detail-meta{ margin-top: 8px; display:flex; gap: 10px; flex-wrap:wrap; color: rgba(255,255,255,0.70); font-size: 12px; }
-      #dashboard .detail-meta-link{ font-size: 11px; color: rgba(215,255,233,0.72); text-decoration: none; }
-      #dashboard .detail-meta-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
+      #dashboard .detail-meta{ margin-top: 8px; display:flex; gap: 8px; flex-wrap:wrap; color: var(--muted-foreground); font-size: 12px; }
+      #dashboard .detail-meta span,
+      #dashboard .detail-meta a{ display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:3px 8px; background:var(--muted-surface); }
+      #dashboard .detail-meta-link{ font-size: 11px; color: var(--foreground); text-decoration: none; }
+      #dashboard .detail-meta-link:hover{ color: var(--foreground); text-decoration: underline; }
       #dashboard .detail-body{ margin-top: 12px; display:grid; grid-template-columns: 1fr 110px; gap: 12px; min-height: 0; }
-      #dashboard .detail-nav{ border-left: 1px solid rgba(255,255,255,0.10); padding-left: 12px; display:flex; flex-direction:column; gap: 10px; }
-      #dashboard .detail-nav button{ width: 100%; text-align:right; padding: 6px 0; border:0; background: transparent; color: rgba(255,255,255,0.70); cursor:pointer; }
-      #dashboard .detail-nav button.active{ color: rgba(255,255,255,0.95); }
+      #dashboard .detail-nav{ border-left: 1px solid var(--border); padding-left: 12px; display:flex; flex-direction:column; gap: 6px; }
+      #dashboard .detail-nav button{ width: 100%; text-align:right; padding: 7px 8px; border:0; background: transparent; color: var(--muted-foreground); cursor:pointer; border-radius: calc(var(--radius) - 2px); }
+      #dashboard .detail-nav button.active{ color: var(--foreground); background: var(--accent); }
       /* 默认只显示一个区块（避免某些导航/恢复场景下 3 个区块同时出现） */
       #dashboard .detail-sec{ padding-top: 6px; display: none; }
       #dashboard .detail-wrap .detail-sec[data-sec="basic"]{ display: block; }
-      #dashboard .detail-sec .sec-title{ color: rgba(255,255,255,0.75); font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; }
+      #dashboard .detail-sec .sec-title{ color: var(--muted-foreground); font-size: 12px; letter-spacing: 0.02em; text-transform: uppercase; }
       #dashboard .detail-sec .sec-body{ margin-top: 10px; }
 
       /* Goal tasks table */
       #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
-      #dashboard table.wb-table th{ text-align:left; color: rgba(255,191,102,0.85); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); vertical-align: middle; }
-      #dashboard table.wb-table td{ padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.88); }
-      #dashboard table.wb-table tr:hover td{ background: rgba(255,255,255,0.04); }
-      #dashboard .wb-table .tlink{ cursor:pointer; color: rgba(255,255,255,0.92); }
-      #dashboard .wb-table .muted{ color: rgba(255,255,255,0.55); }
+      #dashboard table.wb-table th{ text-align:left; color: var(--muted-foreground); font-weight: 500; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      #dashboard table.wb-table td{ padding: 10px; border-bottom: 1px solid var(--border); color: var(--foreground); }
+      #dashboard table.wb-table tr:hover td{ background: var(--accent); }
+      #dashboard .wb-table .tlink{ cursor:pointer; color: var(--foreground); }
+      #dashboard .wb-table .muted{ color: var(--muted-foreground); }
       #dashboard .sort-th{ display:inline-flex; align-items:center; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
-      #dashboard .sort-th:hover{ color: rgba(0,229,255,0.92); }
-      #dashboard .sort-arrow{ color: rgba(215,255,233,0.52); font-size: 11px; line-height: 1; }
-      #dashboard .sort-th.is-active .sort-arrow{ color: rgba(0,229,255,0.92); }
+      #dashboard .sort-th:hover{ color: var(--foreground); }
+      #dashboard .sort-arrow{ color: var(--muted-foreground); font-size: 11px; line-height: 1; }
+      #dashboard .sort-th.is-active .sort-arrow{ color: var(--foreground); }
 
       /* Right column */
       #dashboard .side-title{ display:flex; align-items:center; justify-content:space-between; gap: 10px; }
       #dashboard .side-title .k{ font-size: 13px; }
       #dashboard .side-card{
-        border-radius: 10px;
-        border: 1px solid rgba(255,255,255,0.18);
-        background: transparent;
+        border-radius: var(--radius-lg);
+        border: 1px solid var(--border);
+        background: var(--card);
         display: flex;
         flex-direction: column;
         min-height: 0;
       }
       #dashboard .side-head{ flex: 0 0 auto; }
-      #dashboard .side-card > .divider{ height: 1px; margin: 0; background: rgba(255,255,255,0.10); }
+      #dashboard .side-card > .divider{ height: 1px; margin: 0; background: var(--border); }
       #dashboard .side-body{ flex: 1 1 auto; min-height: 0; }
       #dashboard .side-body > .pad{ padding: 0 12px 12px; }
       #dashboard #next-list,
@@ -119,12 +123,12 @@
 
       /* NextMove (decision panel) */
       #dashboard .nm-wrap{ display:flex; flex-direction:column; gap: 8px; }
-      #dashboard .nm-card{ border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; background: rgba(255,255,255,0.03); padding: 12px; }
-      #dashboard .nm-k{ color: rgba(255,255,255,0.60); font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; }
-      #dashboard .nm-title{ margin-top: 6px; color: rgba(255,209,102,0.92); font-size: 13px; font-weight: 700; }
-      #dashboard .nm-sub{ margin-top: 4px; color: rgba(255,255,255,0.55); font-size: 12px; }
+      #dashboard .nm-card{ border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); padding: 12px; }
+      #dashboard .nm-k{ color: var(--muted-foreground); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+      #dashboard .nm-title{ margin-top: 6px; color: var(--foreground); font-size: 13px; font-weight: 650; }
+      #dashboard .nm-sub{ margin-top: 4px; color: var(--muted-foreground); font-size: 12px; }
       #dashboard .nm-meta{ margin-top: 10px; display:flex; gap: 8px; flex-wrap:wrap; }
-      #dashboard .nm-badge{ display:inline-flex; align-items:center; padding: 4px 8px; border-radius: 999px; font-size: 11px; color: rgba(215,255,233,0.88); background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.14); }
+      #dashboard .nm-badge{ display:inline-flex; align-items:center; padding: 4px 8px; border-radius: 999px; font-size: 11px; color: var(--foreground); background: var(--muted-surface); border: 1px solid var(--border); }
       #dashboard .nm-reasons{ margin-top: 10px; display:flex; flex-direction:column; gap: 6px; }
       #dashboard .nm-reason{ color: rgba(215,255,233,0.74); font-size: 12px; }
       #dashboard .nm-actions{ margin-top: 10px; display:flex; gap: 10px; flex-wrap:wrap; }
@@ -140,32 +144,33 @@
         gap: 10px;
         padding: 8px 10px;
         border-radius: 12px;
-        background: rgba(255,255,255,0.02);
+        background: var(--background);
+        border: 1px solid transparent;
       }
-      #dashboard .ev-item:hover{ background: rgba(255,255,255,0.04); }
+      #dashboard .ev-item:hover{ background: var(--accent); border-color: var(--border); }
       #dashboard .ev-time{ text-align:right; }
-      #dashboard .ev-clock{ font-size: 12px; font-weight: 700; color: rgba(255,209,102,0.92); }
-      #dashboard .ev-ago{ margin-top: 3px; font-size: 11px; color: rgba(215,255,233,0.55); }
+      #dashboard .ev-clock{ font-size: 12px; font-weight: 650; color: var(--foreground); }
+      #dashboard .ev-ago{ margin-top: 3px; font-size: 11px; color: var(--muted-foreground); }
       #dashboard .ev-rail{ position: relative; width: 14px; }
-      #dashboard .ev-rail::before{ content:''; position:absolute; top: 2px; bottom: 2px; left: 6px; width: 2px; background: rgba(255,255,255,0.10); border-radius: 2px; }
-      #dashboard .ev-dot{ position:absolute; top: 10px; left: 3px; width: 8px; height: 8px; border-radius: 999px; background: rgba(255,255,255,0.30); border: 1px solid rgba(255,255,255,0.25); }
+      #dashboard .ev-rail::before{ content:''; position:absolute; top: 2px; bottom: 2px; left: 6px; width: 2px; background: var(--border); border-radius: 2px; }
+      #dashboard .ev-dot{ position:absolute; top: 10px; left: 3px; width: 8px; height: 8px; border-radius: 999px; background: var(--muted-foreground); border: 1px solid var(--border); }
       #dashboard .ev-head{ display:flex; align-items:center; gap: 8px; flex-wrap:wrap; }
-      #dashboard .ev-kind{ color: rgba(255,255,255,0.80); font-size: 12px; }
-      #dashboard .unread-dot{ width: 6px; height: 6px; border-radius: 999px; background: rgba(0,229,255,0.92); display:inline-block; }
-      #dashboard .ev-unread{ box-shadow: inset 0 0 0 1px rgba(0,229,255,0.14); }
-      #dashboard .ev-tone-green .ev-dot{ background: rgba(71,255,181,0.85); border-color: rgba(71,255,181,0.60); }
-      #dashboard .ev-tone-red .ev-dot{ background: rgba(255,59,92,0.85); border-color: rgba(255,59,92,0.60); }
-      #dashboard .ev-tone-yellow .ev-dot{ background: rgba(255,191,102,0.85); border-color: rgba(255,191,102,0.60); }
-      #dashboard .ev-tone-gray .ev-dot{ background: rgba(255,255,255,0.30); border-color: rgba(255,255,255,0.25); }
+      #dashboard .ev-kind{ color: var(--foreground); font-size: 12px; }
+      #dashboard .unread-dot{ width: 6px; height: 6px; border-radius: 999px; background: var(--primary); display:inline-block; }
+      #dashboard .ev-unread{ box-shadow: inset 0 0 0 1px var(--border); }
+      #dashboard .ev-tone-green .ev-dot{ background: var(--success); border-color: color-mix(in srgb, var(--success) 70%, white); }
+      #dashboard .ev-tone-red .ev-dot{ background: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 70%, white); }
+      #dashboard .ev-tone-yellow .ev-dot{ background: var(--warning); border-color: color-mix(in srgb, var(--warning) 70%, white); }
+      #dashboard .ev-tone-gray .ev-dot{ background: var(--muted-foreground); border-color: var(--border); }
 
       #dashboard .side-item{ padding: 10px 12px; border-radius: 10px; }
-      #dashboard .side-item:hover{ background: transparent; }
-      #dashboard .side-item-title{ padding: 0; border: 0; background: transparent; text-align:left; color: rgba(255,209,102,0.92); cursor: pointer; }
-      #dashboard .side-item:hover .side-item-title{ color: rgba(0,229,255,0.92); text-decoration: underline; }
-      #dashboard .md{ margin-top: 6px; white-space: pre-wrap; color: rgba(215,255,233,0.72); font-size: 12px; }
+      #dashboard .side-item:hover{ background: var(--accent); }
+      #dashboard .side-item-title{ padding: 0; border: 0; background: transparent; text-align:left; color: var(--foreground); cursor: pointer; }
+      #dashboard .side-item:hover .side-item-title{ color: var(--foreground); text-decoration: none; }
+      #dashboard .md{ margin-top: 6px; white-space: pre-wrap; color: var(--muted-foreground); font-size: 12px; }
 
       /* Selection highlight */
-      #dashboard .selected-card{ box-shadow: none; background: rgba(255,255,255,0.04); }
+      #dashboard .selected-card{ box-shadow: 0 0 0 1px var(--ring) inset; background: var(--accent); }
       #dashboard .nav-item.selected{ border-color: transparent !important; box-shadow: none !important; background: transparent !important; }
 
       /* Text-only action links (match whiteboard) */
@@ -173,8 +178,8 @@
       #dashboard .detail-actions .btn-ghost{ font-size: 12px; line-height: 1; }
       #dashboard .detail-actions a.btn-ghost{ font-size: 12px; line-height: 1; }
       #dashboard .action-link:hover{ text-decoration: underline; }
-      #dashboard .action-danger{ color: rgba(255,59,92,0.92) !important; }
-      #dashboard .action-danger:hover{ color: rgba(255,59,92,1) !important; }
+      #dashboard .action-danger{ color: var(--destructive) !important; }
+      #dashboard .action-danger:hover{ color: var(--destructive) !important; }
 
       /* Dialogs (New Goal / New Task / AgentSpace) */
       dialog.of-dialog{
@@ -227,12 +232,12 @@
       .sw input:focus-visible + .sw-track{ outline: none; box-shadow: 0 0 0 3px rgba(0,229,255,0.14); }
       .btn-primary{
         border: 0;
-        border-radius: 12px;
-        background: rgba(255,209,102,0.92);
-        color: #1b1506;
+        border-radius: calc(var(--radius) - 2px);
+        background: var(--primary);
+        color: var(--primary-foreground);
         padding: 10px 14px;
       }
-      .btn-primary:hover{ background: rgba(255,209,102,1); }
+      .btn-primary:hover{ background: color-mix(in srgb, var(--primary) 90%, var(--background)); }
       .toggle-link{ border: 0; background: transparent; padding: 0; color: rgba(215,255,233,0.72); }
       .toggle-link:hover{ color: rgba(0,229,255,0.92); text-decoration: underline; }
 

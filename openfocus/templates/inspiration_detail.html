@@ -109,7 +109,42 @@
     .terminal-drafts .chat{ min-height:0; max-height:100%; }
     .terminal-input-mask{ position:absolute; inset:8px; z-index:12; display:flex; align-items:center; justify-content:center; border-radius:12px; background:rgba(4,9,14,0.54); backdrop-filter:blur(2px); color:rgba(255,209,102,0.96); font-weight:700; pointer-events:auto; }
     .terminal-input-mask[hidden]{ display:none; }
-    @media (max-width: 1220px){ .insp-detail{ grid-template-columns:260px 1fr; height:auto; } .insp-work-area{ grid-template-columns:1fr; height:auto; } .insp-side{ height:auto; } }
+    /* shadcn-like neutral pass */
+    .insp-detail{ grid-template-columns:320px minmax(0, 1fr); gap:14px; height:calc(100vh - 104px); }
+    .insp-shell{ border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--card); box-shadow:0 1px 2px rgba(0,0,0,0.22); }
+    .insp-shell > .divider{ background:var(--border); }
+    .insp-head{ padding:12px 14px; }
+    .insp-title{ font-size:18px; font-weight:650; color:var(--foreground); letter-spacing:-0.02em; }
+    .insp-meta,.mini,.msg-role,.empty,.waiting-note,.busy-note{ color:var(--muted-foreground); }
+    .insp-meta span,.insp-meta a{ display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:2px 7px; background:var(--muted-surface); color:var(--muted-foreground); }
+    .insp-link,.card,.draft-card,.task-row{ border:1px solid var(--border); border-radius:var(--radius); background:var(--background); }
+    .insp-link:hover,.card:hover,.task-row:hover{ background:var(--accent); }
+    .insp-link.active{ border-color:var(--ring); background:var(--accent); box-shadow:0 0 0 1px var(--ring) inset; }
+    .insp-status-dot.open{ background:var(--success); box-shadow:none; }
+    .insp-status-dot.closed{ background:var(--destructive); box-shadow:none; }
+    .insp-status-dot.published{ background:var(--muted-foreground); box-shadow:none; }
+    .insp-create-btn{ background:var(--primary); border:1px solid var(--primary); color:var(--primary-foreground); }
+    .insp-create-btn:hover{ background:color-mix(in srgb, var(--primary) 90%, var(--background)); }
+    .msg{ border:1px solid var(--border); background:var(--background); }
+    .msg.user{ background:var(--accent); border-color:color-mix(in srgb, var(--border) 50%, var(--foreground)); }
+    .msg.system{ background:color-mix(in srgb, var(--warning) 10%, var(--background)); border-color:color-mix(in srgb, var(--warning) 36%, var(--border)); }
+    .msg.error{ background:color-mix(in srgb, var(--destructive) 10%, var(--background)); border-color:color-mix(in srgb, var(--destructive) 36%, var(--border)); }
+    .composer{ border-top:1px solid var(--border); background:var(--card); }
+    .composer-tool-btn{ border:1px solid var(--border); background:var(--muted-surface); color:var(--foreground); }
+    .card-title,.draft-title{ color:var(--foreground); font-weight:650; }
+    .resource-preview,.task-row .desc{ color:var(--muted-foreground); }
+    .resource-image{ border:1px solid var(--border); background:var(--background); }
+    .resource-toggle{ color:var(--foreground); }
+    .empty{ border:1px dashed var(--border); background:var(--background); }
+    .modal-backdrop{ background:rgba(0,0,0,0.64); backdrop-filter:blur(4px); }
+    .modal-card,.publish-mask-card{ border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--popover); color:var(--popover-foreground); box-shadow:0 22px 70px rgba(0,0,0,0.45); }
+    .modal-form label{ display:block; margin-bottom:6px; color:var(--muted-foreground); font-size:13px; font-weight:500; }
+    .publish-mask{ background:rgba(0,0,0,0.48); border-radius:var(--radius-lg); }
+    .publish-mask-title{ color:var(--foreground); }
+    .insp-terminal-wrap,.terminal-drafts{ border-color:var(--border); background:var(--background); }
+    .insp-terminal-head{ border-bottom:1px solid var(--border); }
+    .terminal-input-mask{ background:rgba(0,0,0,0.56); color:var(--foreground); }
+    @media (max-width: 1220px){ .insp-detail{ grid-template-columns:280px 1fr; height:auto; } .insp-work-area{ grid-template-columns:1fr; height:auto; } .insp-side{ height:auto; } }
     @media (max-width: 840px){ .insp-detail{ grid-template-columns:1fr; height:auto; } }
   </style>
 
@@ -410,7 +445,13 @@
             <div class="insp-head">
               <div>
                 <div class="insp-title">Inspiration</div>
-                <div class="mini">Select a space on the left, or create a new one to start exploring.</div>
+                <div class="mini">
+                  {% if missing_space_id is defined %}
+                    Inspiration space #{{ missing_space_id }} no longer exists. Select a space on the left, or create a new one.
+                  {% else %}
+                    Select a space on the left, or create a new one to start exploring.
+                  {% endif %}
+                </div>
               </div>
             </div>
             <div class="divider"></div>

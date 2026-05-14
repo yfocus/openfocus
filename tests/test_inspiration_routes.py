@@ -35,6 +35,20 @@ async def test_inspiration_pages_and_nav_render(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_missing_inspiration_detail_falls_back_to_empty_state(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    from openfocus.app import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/inspirations/999999")
+        assert r.status_code == 200
+        assert "Inspiration space #999999 no longer exists" in r.text
+        assert "No Inspiration space is selected yet." in r.text
+
+
+@pytest.mark.anyio
 async def test_inspiration_detail_renders_sidebar_status_and_resource_controls(
     monkeypatch,
 ):
