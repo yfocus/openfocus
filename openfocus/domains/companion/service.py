@@ -9,7 +9,8 @@ from fastapi import HTTPException, Response
 
 from ...companion.grpc import CompanionGrpcError
 from ...db import session_scope
-from ...models import AgentSpace, Companion, Event
+from ...models import AgentSpace, Companion
+from ..events import service as event_service
 from .repository import CompanionAgentSpaceRepository, CompanionRepository
 
 COMPANION_STATUS_PENDING_CERTIFICATION = "pending_certification"
@@ -161,17 +162,17 @@ def delete_companion(grpc_server: Any, companion_id: int) -> dict:
             session.add(space)
 
         companion_repo.delete(companion)
-        session.add(
-            Event(
-                kind="companion.deleted",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={
-                    "companion_id": companion_id,
-                    "device_id": device_id,
-                    "unbound_spaces": unbound,
-                },
-            )
+        event_service.record_event(
+            session,
+            kind="companion.deleted",
+            agent="openfocus/ui",
+            task_id=None,
+            payload={
+                "companion_id": companion_id,
+                "device_id": device_id,
+                "unbound_spaces": unbound,
+            },
+            audit=False,
         )
 
     return {"ok": True, "companion_id": companion_id, "unbound_spaces": unbound}
@@ -215,13 +216,13 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
         session.add(companion)
 
         device_id = companion.device_id
-        session.add(
-            Event(
-                kind="companion.pair.attempted",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
+        event_service.record_event(
+            session,
+            kind="companion.pair.attempted",
+            agent="openfocus/ui",
+            task_id=None,
+            payload={"companion_id": companion_id, "device_id": device_id},
+            audit=False,
         )
 
     conn = grpc_server.registry.get(int(companion_id))
@@ -242,13 +243,13 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: dict) -> 
         companion.status = COMPANION_STATUS_ACTIVE
         companion.last_seen_at = now
         session.add(companion)
-        session.add(
-            Event(
-                kind="companion.paired",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
+        event_service.record_event(
+            session,
+            kind="companion.paired",
+            agent="openfocus/ui",
+            task_id=None,
+            payload={"companion_id": companion_id, "device_id": device_id},
+            audit=False,
         )
     return {"ok": True}
 
@@ -260,13 +261,13 @@ async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
             raise HTTPException(status_code=404, detail="Companion not found")
         device_id = companion.device_id
 
-        session.add(
-            Event(
-                kind="companion.pairing_code.requested",
-                agent="openfocus/ui",
-                task_id=None,
-                payload={"companion_id": companion_id, "device_id": device_id},
-            )
+        event_service.record_event(
+            session,
+            kind="companion.pairing_code.requested",
+            agent="openfocus/ui",
+            task_id=None,
+            payload={"companion_id": companion_id, "device_id": device_id},
+            audit=False,
         )
 
         if display_status(companion, grpc_server) == COMPANION_STATUS_OFFLINE:

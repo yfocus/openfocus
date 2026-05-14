@@ -173,6 +173,32 @@ class NextMoveFeedback(Base):
     )
 
 
+class AttentionItem(Base):
+    """Persistent, user-actionable notification derived from high-value events."""
+
+    __tablename__ = "attention_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_event_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+    goal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    item_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="info")
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    acted_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class InspirationSpace(Base):
     __tablename__ = "inspiration_spaces"
 

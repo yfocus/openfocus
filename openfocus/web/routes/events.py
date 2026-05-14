@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from ...db import session_scope
+from ...domains.attention import service as attention_service
 from ...domains.events import service as event_service
 from ...schemas import AgentEventIn, FocusReportIn
 
@@ -28,6 +29,38 @@ def agent_report_event(payload: AgentEventIn) -> dict:
 def recent_events(limit: int = 30) -> dict:
     with session_scope() as s:
         return event_service.recent_events_payload(s, limit=limit)
+
+
+@router.get("/api/attention/items")
+def attention_items(limit: int = 10) -> dict:
+    with session_scope() as s:
+        return attention_service.active_items_payload(s, limit=limit)
+
+
+@router.post("/api/attention/items/{item_id}/dismiss")
+def dismiss_attention_item(item_id: int) -> dict:
+    try:
+        with session_scope() as s:
+            return attention_service.set_item_status(
+                s, item_id=item_id, status=attention_service.DISMISSED_STATUS
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/attention/items/{item_id}/acted")
+def acted_attention_item(item_id: int) -> dict:
+    try:
+        with session_scope() as s:
+            return attention_service.set_item_status(
+                s, item_id=item_id, status=attention_service.ACTED_STATUS
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/api/calendar/month")

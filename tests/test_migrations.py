@@ -42,6 +42,7 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     assert "tasks" in tables
     assert "remote_terminal_sessions" in tables
     assert "companions" in tables
+    assert "attention_items" in tables
     assert version == "20260512_0001"
 
 
@@ -100,6 +101,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
             r[1]
             for r in conn.exec_driver_sql("PRAGMA table_info(remote_terminal_sessions)")
         }
+        attention_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(attention_items)")
+        }
         migration_ids = {
             str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
         }
@@ -145,6 +149,16 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         "created_at",
         "updated_at",
     }.issubset(terminal_cols)
+    assert {
+        "source_event_id",
+        "task_public_id",
+        "goal_id",
+        "item_type",
+        "severity",
+        "status",
+        "dismissed_at",
+        "acted_at",
+    }.issubset(attention_cols)
     assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
     assert terminal_rows[1][1:] == ("inspiration_space", 34, None)
     assert task_public_id_col[3] == 0
@@ -153,3 +167,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert (
         migrations.REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID in migration_ids
     )
+    assert migrations.ATTENTION_ITEMS_MIGRATION_ID in migration_ids

@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...db import session_scope
-from ...models import Event
 from ..core.types import EventSink, Json
 
 
@@ -20,11 +19,17 @@ class DbEventSink(EventSink):
         task_id: str | None = None,
     ) -> None:
         with session_scope() as s:
-            s.add(
-                Event(
-                    kind=kind,
-                    agent=agent,
-                    task_id=task_id or self.default_task_id,
-                    payload=payload or {},
-                )
+            from ...domains.events import service as event_service
+
+            event_service.record_event(
+                s,
+                kind=kind,
+                agent=agent,
+                task_id=task_id or self.default_task_id,
+                payload=payload or {},
+                audit={
+                    "kind": f"event.{kind}",
+                    "source": f"agent:{agent}",
+                    "summary": f"Agent emitted event `{kind}`.",
+                },
             )

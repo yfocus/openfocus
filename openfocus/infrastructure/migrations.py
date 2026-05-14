@@ -11,6 +11,7 @@ REMOTE_TERMINAL_OWNER_MIGRATION_ID = "20260512_remote_terminal_owner_fields"
 REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
     "20260514_remote_terminal_task_public_id_nullable"
 )
+ATTENTION_ITEMS_MIGRATION_ID = "20260514_attention_items"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -387,6 +388,40 @@ def _migrate_remote_terminal_task_public_id_nullable(conn: Any) -> None:
     conn.execute(text(f"DROP TABLE {old_table}"))
 
 
+def _migrate_attention_items(conn: Any) -> None:
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS attention_items ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "source_event_id INTEGER NOT NULL UNIQUE, "
+            "task_public_id VARCHAR(36) NOT NULL DEFAULT '', "
+            "goal_id INTEGER, "
+            "item_type VARCHAR(64) NOT NULL, "
+            "severity VARCHAR(32) NOT NULL DEFAULT 'info', "
+            "title VARCHAR(512) NOT NULL DEFAULT '', "
+            "summary VARCHAR(2000) NOT NULL DEFAULT '', "
+            "status VARCHAR(32) NOT NULL DEFAULT 'active', "
+            "payload JSON NOT NULL DEFAULT '{}', "
+            "created_at DATETIME, "
+            "dismissed_at DATETIME, "
+            "acted_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_attention_items_status_created "
+            "ON attention_items(status, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_attention_items_task "
+            "ON attention_items(task_public_id)"
+        )
+    )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -394,4 +429,5 @@ STARTUP_MIGRATIONS = [
         REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID,
         _migrate_remote_terminal_task_public_id_nullable,
     ),
+    (ATTENTION_ITEMS_MIGRATION_ID, _migrate_attention_items),
 ]

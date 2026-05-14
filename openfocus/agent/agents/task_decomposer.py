@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...db import session_scope
-from ...models import Event, Goal, Task
+from ...domains.events import service as event_service
+from ...models import Goal, Task
 from ..core.loop import AgentLoopConfig, parse_json_strict, run_tool_loop
 from ..core.types import EventSink, Json
 from ..llm.types import LLMProvider
@@ -89,17 +90,17 @@ class TaskDecomposerAgent:
                 )
                 s.add(obj)
                 s.flush()
-                s.add(
-                    Event(
-                        kind="task.created",
-                        agent=self.name,
-                        task_id=str(obj.public_id or ""),
-                        payload={
-                            "goal_id": int(obj.goal_id),
-                            "task_public_id": str(obj.public_id or ""),
-                            "title": str(obj.title or ""),
-                        },
-                    )
+                event_service.record_event(
+                    s,
+                    kind="task.created",
+                    agent=self.name,
+                    task_id=str(obj.public_id or ""),
+                    payload={
+                        "goal_id": int(obj.goal_id),
+                        "task_public_id": str(obj.public_id or ""),
+                        "title": str(obj.title or ""),
+                    },
+                    audit=False,
                 )
                 created.append(
                     {

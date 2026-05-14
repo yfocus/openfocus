@@ -51,11 +51,14 @@ def _inject_openfocus_prompt(
 ) -> str:
     head = (
         "你在 OpenFocus 的 AgentSpace 中工作。\n"
-        f"taskId={task_public_id}\n"
         f"agentSessionId={session_id}\n"
-        f"openfocusBaseUrl={base_url}\n"
-        "执行过程中请持续上报进度：POST /api/agent/events；最终结果可用 POST /api/skills/focus_report。\n"
-        "若你支持 OpenFocus 的 focus_report skill，请优先使用 skill 上报。\n"
+        f"taskId={task_public_id} · openfocus={base_url} · 进度上报: POST /api/agent/events; 最终结果: POST /api/skills/focus_report\n"
+        "事件上报只需知道：\n"
+        '- POST {openfocus}/api/agent/events：{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{"status":"running","message":"...","progress":0.5}}\n'
+        "- 可用 kind：task.started（开始）、task.progress（阶段进度）、task.completed（完成待确认）、task.failed（失败）、task.blocked（需用户/外部条件）。\n"
+        "- payload 常用字段：status、message、summary、error、reason、progress、step、total_steps、metadata；任务相关事件必须带 task_id=taskId。\n"
+        '- 最终优先 POST {openfocus}/api/skills/focus_report：{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked","task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{}}\n'
+        "- 不要按 token/日志行/无意义心跳刷屏；只在开始、阶段变化、阻塞/失败、最终结果时上报。\n"
         "---\n"
     )
     return head + str(user_prompt or "")

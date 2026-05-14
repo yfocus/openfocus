@@ -66,7 +66,7 @@ def test_goal_service_create_update_and_task_lifecycle(monkeypatch, tmp_path):
     audit_text = "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
     assert "goal.created" in audit_text
     assert "task.created" in audit_text
-    assert "task.finished" in audit_text
+    assert "task.confirmed_done" in audit_text
 
 
 def test_goal_service_missing_goal_or_task_raises_domain_error(monkeypatch, tmp_path):

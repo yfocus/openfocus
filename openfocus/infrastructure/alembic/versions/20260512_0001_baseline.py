@@ -92,6 +92,38 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
+        "attention_items",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("source_event_id", sa.Integer(), nullable=False, unique=True),
+        sa.Column(
+            "task_public_id", sa.String(length=36), nullable=False, server_default=""
+        ),
+        sa.Column("goal_id", sa.Integer(), nullable=True),
+        sa.Column("item_type", sa.String(length=64), nullable=False),
+        sa.Column(
+            "severity", sa.String(length=32), nullable=False, server_default="info"
+        ),
+        sa.Column("title", sa.String(length=512), nullable=False, server_default=""),
+        sa.Column("summary", sa.String(length=2000), nullable=False, server_default=""),
+        sa.Column(
+            "status", sa.String(length=32), nullable=False, server_default="active"
+        ),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("dismissed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("acted_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_attention_items_status_created",
+        "attention_items",
+        ["status", "created_at"],
+    )
+    op.create_index(
+        "ix_attention_items_task",
+        "attention_items",
+        ["task_public_id"],
+    )
+    op.create_table(
         "inspiration_spaces",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("title", sa.String(length=512), nullable=False, server_default=""),
@@ -304,6 +336,7 @@ def downgrade() -> None:
         "inspiration_messages",
         "inspiration_spaces",
         "next_move_feedback",
+        "attention_items",
         "next_move_runs",
         "tasks",
         "events",

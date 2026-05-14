@@ -5,11 +5,13 @@ import datetime as dt
 import json
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from ...agent.agents.attention_scheduler import AttentionSchedulerAgent
 from ...agent.storage.events import DbEventSink
-from ...models import AgentSpace, Event, NextMoveFeedback, NextMoveRun, Task
+from ...models import AgentSpace, NextMoveFeedback, NextMoveRun, Task
+from ..attention import service as attention_service
+from ..events import service as event_service
 from ..goals import service as goal_service
 from ..memory import service as memory_service
 
@@ -88,7 +90,9 @@ def response_payload(run: NextMoveRun | None) -> dict:
     items = recommendations.get("items") if isinstance(recommendations, dict) else []
     if not isinstance(items, list):
         items = []
-    items = [it for it in items if isinstance(it, dict)][:2]
+    items = _enrich_item_actions(
+        object_session(run), [it for it in items if isinstance(it, dict)][:2]
+    )
     context_summary = run.context_summary or {}
     if not isinstance(context_summary, dict):
         context_summary = {}
@@ -105,6 +109,55 @@ def response_payload(run: NextMoveRun | None) -> dict:
         "last_event_id": last_event_id,
         "sentence": _sentence(items),
     }
+
+
+def _enrich_item_actions(s: Session | None, items: list[dict]) -> list[dict]:
+    if s is None or not items:
+        return items
+    task_ids: list[str] = []
+    for item in items:
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        task_public_id = str(target.get("task_public_id") or "").strip()
+        if task_public_id:
+            task_ids.append(task_public_id)
+    spaces = (
+        {
+            sp.task_public_id
+            for sp in s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id.in_(task_ids))
+            .all()
+        }
+        if task_ids
+        else set()
+    )
+    tasks = (
+        {
+            t.public_id: t
+            for t in s.query(Task).filter(Task.public_id.in_(task_ids)).all()
+        }
+        if task_ids
+        else {}
+    )
+    for item in items:
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        task_public_id = str(target.get("task_public_id") or "").strip()
+        if task_public_id:
+            has_space = task_public_id in spaces
+            item["has_agent_space"] = has_space
+            item["agent_space_url"] = (
+                f"/tasks/{task_public_id}/agent_space" if has_space else None
+            )
+            item["action"] = attention_service.action_for_task(
+                task_public_id, has_space
+            )
+            task = tasks.get(task_public_id)
+            if task is not None and not item.get("goal_title"):
+                item["goal_id"] = int(task.goal_id)
+            continue
+        goal_id = target.get("goal_id") or item.get("goal_id")
+        if goal_id:
+            item["action"] = attention_service.action_for_goal(goal_id)
+    return items
 
 
 def generate_next_moves(
@@ -245,23 +298,38 @@ def submit_feedback(s: Session, payload: dict) -> dict:
     s.add(row)
     s.flush()
     feedback_id = int(row.id or 0)
-    s.add(
-        Event(
-            kind="next_move.not_for_now"
+    feedback_event_payload = {
+        "run_id": run_id,
+        "feedback_id": feedback_id,
+        "feedback_type": feedback_type,
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "task_title": task.title,
+        "goal_id": int(task.goal_id),
+    }
+    event_service.record_event(
+        s,
+        kind="next_move.not_for_now"
+        if feedback_type == "dismiss"
+        else "next_move.feedback",
+        agent="web",
+        task_id=task_public_id,
+        payload=feedback_event_payload,
+        audit={
+            "kind": "next_move.not_for_now"
             if feedback_type == "dismiss"
             else "next_move.feedback",
-            agent="web",
-            task_id=task_public_id,
-            payload={
+            "source": "web",
+            "summary": f"Next Move feedback for task: {task_public_id}",
+            "detail": f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
+            "goal_id": int(task.goal_id),
+            "task_public_id": task_public_id,
+            "metadata": {
                 "run_id": run_id,
-                "feedback_id": feedback_id,
-                "feedback_type": feedback_type,
                 "reason_code": reason_code,
-                "reason_text": reason_text,
-                "task_title": task.title,
-                "goal_id": int(task.goal_id),
+                "learned_summary": learned_summary,
             },
-        )
+        },
     )
     similar_rows = (
         s.query(NextMoveFeedback)
@@ -302,17 +370,4 @@ def submit_feedback(s: Session, payload: dict) -> dict:
             memory_note = "- When the user says Not for now, avoid immediately recommending the same task again and use the reason text to infer the next best alternative."
     memory_service.persist_feedback_learning(note=daily_note, memory_note=memory_note)
 
-    memory_service.try_audit_memory(
-        kind="next_move.feedback",
-        source="web",
-        summary=f"Next Move feedback for task: {task_public_id}",
-        detail=f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
-        goal_id=int(task.goal_id),
-        task_public_id=task_public_id,
-        metadata={
-            "run_id": run_id,
-            "reason_code": reason_code,
-            "learned_summary": learned_summary,
-        },
-    )
     return {"ok": True, "feedback_id": feedback_id, "task_public_id": task_public_id}

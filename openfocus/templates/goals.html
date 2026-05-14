@@ -1364,6 +1364,8 @@
 
       const openNext = t.closest('.js-open-next');
       if(openNext){
+        const url = openNext.getAttribute('data-url');
+        if(url){ location.href = url; return; }
         const pid = openNext.getAttribute('data-task');
         const gid = openNext.getAttribute('data-goal');
         if(pid) selectTask(pid, gid);
@@ -1529,6 +1531,9 @@
           const mins = Number(item?.expected_time_minutes || 0);
           const flow = String(item?.context_switch_cost || 'medium');
           const confidence = String(item?.confidence || 'medium');
+          const action = item?.action || {};
+          const actionUrl = String(action?.primary_url || '').trim();
+          const actionLabel = String(action?.primary_label || 'Open').trim() || 'Open';
           const reasons = why.map(x => `<div class="nm-reason">- ${escapeHtml(String(x || ''))}</div>`).join('');
           return `
             <div class="nm-card">
@@ -1543,7 +1548,7 @@
               </div>
               ${reasons ? `<div class="nm-reasons">${reasons}</div>` : ''}
               <div class="nm-actions">
-                <button type="button" class="btn-primary js-open-next" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}">Open</button>
+                <button type="button" class="btn-primary js-open-next" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}" data-url="${escapeHtml(actionUrl)}">${escapeHtml(actionLabel)}</button>
                 <button type="button" class="btn-ghost js-dismiss-next" data-run-id="${escapeHtml(runId)}" data-goal="${escapeHtml(gid)}" data-task="${escapeHtml(pid)}" data-title="${escapeHtml(title)}">Not for now</button>
               </div>
             </div>

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from ...models import AgentMessage, AgentSession, Event, Goal, Task
+from ...models import AgentMessage, AgentSession, Goal, Task
 from ..agent_spaces import terminals as terminal_service
+from ..events import service as event_service
 from ..memory import service as memory_service
 from .repository import AgentSpaceRepository, GoalRepository, TaskRepository
 
@@ -168,29 +169,41 @@ def infer_context_key(
     return f"goal:{goal_id}"
 
 
-def _add_goal_created_event(s: Session, goal: Goal, *, agent: str = "ui") -> None:
-    s.add(
-        Event(
-            kind="goal.created",
-            agent=agent,
-            task_id=None,
-            payload={"goal_id": int(goal.id), "title": str(goal.title or "")},
-        )
+def _add_goal_created_event(
+    s: Session,
+    goal: Goal,
+    *,
+    agent: str = "ui",
+    audit: event_service.AuditPayload = None,
+) -> None:
+    event_service.record_event(
+        s,
+        kind="goal.created",
+        agent=agent,
+        task_id=None,
+        payload={"goal_id": int(goal.id), "title": str(goal.title or "")},
+        audit=audit,
     )
 
 
-def _add_task_created_event(s: Session, task: Task, *, agent: str = "ui") -> None:
-    s.add(
-        Event(
-            kind="task.created",
-            agent=agent,
-            task_id=str(task.public_id or ""),
-            payload={
-                "goal_id": int(task.goal_id),
-                "task_public_id": str(task.public_id or ""),
-                "title": str(task.title or ""),
-            },
-        )
+def _add_task_created_event(
+    s: Session,
+    task: Task,
+    *,
+    agent: str = "ui",
+    audit: event_service.AuditPayload = None,
+) -> None:
+    event_service.record_event(
+        s,
+        kind="task.created",
+        agent=agent,
+        task_id=str(task.public_id or ""),
+        payload={
+            "goal_id": int(task.goal_id),
+            "task_public_id": str(task.public_id or ""),
+            "title": str(task.title or ""),
+        },
+        audit=audit,
     )
 
 
@@ -223,16 +236,21 @@ def create_goal(
         source_inspiration_draft_id=source_inspiration_draft_id,
     )
     goals.add(goal)
-    _add_goal_created_event(s, goal, agent=agent)
-    if audit:
-        memory_service.try_audit_memory(
-            kind="goal.created",
-            source=source,
-            summary=f"Created goal: {title_text}",
-            detail=f"Goal title:\n\n{title_text}\n\nContent:\n\n{content_text}",
-            goal_id=int(goal.id) or None,
-            metadata={"due_date": due_date.isoformat()},
-        )
+    _add_goal_created_event(
+        s,
+        goal,
+        agent=agent,
+        audit={
+            "kind": "goal.created",
+            "source": source,
+            "summary": f"Created goal: {title_text}",
+            "detail": f"Goal title:\n\n{title_text}\n\nContent:\n\n{content_text}",
+            "goal_id": int(goal.id) or None,
+            "metadata": {"due_date": due_date.isoformat()},
+        }
+        if audit
+        else False,
+    )
     return goal
 
 
@@ -292,21 +310,20 @@ def mark_goal_done(s: Session, *, goal_id: int) -> GoalResult:
     if (goal.status or "").strip() != GOAL_STATUS_DONE:
         old = (goal.status or "").strip() or GOAL_STATUS_ACTIVE
         goal.status = GOAL_STATUS_DONE
-        s.add(
-            Event(
-                kind="goal.confirmed_done_by_user",
-                agent="ui",
-                task_id=None,
-                payload={"goal_id": int(goal_id), "from": old},
-            )
-        )
-        memory_service.try_audit_memory(
-            kind="goal.finished",
-            source="web",
-            summary=f"Finished goal: {goal.title}",
-            detail=f"Goal moved from `{old}` to `{GOAL_STATUS_DONE}`.",
-            goal_id=int(goal_id),
-            metadata={"from": old, "to": GOAL_STATUS_DONE},
+        event_service.record_event(
+            s,
+            kind="goal.confirmed_done_by_user",
+            agent="ui",
+            task_id=None,
+            payload={"goal_id": int(goal_id), "from": old},
+            audit={
+                "kind": "goal.confirmed_done_by_user",
+                "source": "web",
+                "summary": f"Finished goal: {goal.title}",
+                "detail": f"Goal moved from `{old}` to `{GOAL_STATUS_DONE}`.",
+                "goal_id": int(goal_id),
+                "metadata": {"from": old, "to": GOAL_STATUS_DONE},
+            },
         )
     return GoalResult(goal_id=int(goal.id), title=str(goal.title or ""))
 
@@ -317,23 +334,20 @@ def reopen_goal(s: Session, *, goal_id: int) -> GoalResult:
         raise GoalTaskNotFound("Goal not found")
     if (goal.status or "").strip() == GOAL_STATUS_DONE:
         goal.status = GOAL_STATUS_ACTIVE
-        s.add(
-            Event(
-                kind="goal.reopened_by_user",
-                agent="ui",
-                task_id=None,
-                payload={"goal_id": int(goal_id)},
-            )
-        )
-        memory_service.try_audit_memory(
-            kind="goal.reopened",
-            source="web",
-            summary=f"Reopened goal: {goal.title}",
-            detail=(
-                f"Goal moved from `{GOAL_STATUS_DONE}` back to `{GOAL_STATUS_ACTIVE}`."
-            ),
-            goal_id=int(goal_id),
-            metadata={"to": GOAL_STATUS_ACTIVE},
+        event_service.record_event(
+            s,
+            kind="goal.reopened_by_user",
+            agent="ui",
+            task_id=None,
+            payload={"goal_id": int(goal_id)},
+            audit={
+                "kind": "goal.reopened_by_user",
+                "source": "web",
+                "summary": f"Reopened goal: {goal.title}",
+                "detail": f"Goal moved from `{GOAL_STATUS_DONE}` back to `{GOAL_STATUS_ACTIVE}`.",
+                "goal_id": int(goal_id),
+                "metadata": {"to": GOAL_STATUS_ACTIVE},
+            },
         )
     return GoalResult(goal_id=int(goal.id), title=str(goal.title or ""))
 
@@ -393,21 +407,26 @@ def create_task(
         source_inspiration_draft_id=source_inspiration_draft_id,
     )
     tasks.add(task)
-    _add_task_created_event(s, task, agent=agent)
-    if audit:
-        memory_service.try_audit_memory(
-            kind="task.created",
-            source=source,
-            summary=f"Created task: {title_text}",
-            detail=f"Task title:\n\n{title_text}\n\nContent:\n\n{content_text}",
-            goal_id=int(goal_id),
-            task_public_id=str(task.public_id or "") or None,
-            metadata={
+    _add_task_created_event(
+        s,
+        task,
+        agent=agent,
+        audit={
+            "kind": "task.created",
+            "source": source,
+            "summary": f"Created task: {title_text}",
+            "detail": f"Task title:\n\n{title_text}\n\nContent:\n\n{content_text}",
+            "goal_id": int(goal_id),
+            "task_public_id": str(task.public_id or "") or None,
+            "metadata": {
                 "task_type": task_type,
                 "estimated_minutes": estimated_minutes,
                 "context_key": context_key,
             },
-        )
+        }
+        if audit
+        else False,
+    )
     return task
 
 
@@ -463,23 +482,25 @@ def mark_task_done(
         old = task.status
         task.status = TASK_STATUS_DONE
         task.completed_at = now or memory_service.utcnow()
-        s.add(
-            Event(
-                kind="task.confirmed_done",
-                agent="ui",
-                task_id=task.public_id,
-                payload={"from": old},
-            )
+        event_service.record_event(
+            s,
+            kind="task.confirmed_done",
+            agent="ui",
+            task_id=task.public_id,
+            payload={"from": old},
+            audit={
+                "kind": "task.confirmed_done",
+                "source": "web",
+                "summary": f"Finished task: {task.title}",
+                "detail": f"Task moved from `{old}` to `{TASK_STATUS_DONE}`.",
+                "goal_id": int(task.goal_id),
+                "task_public_id": task.public_id,
+                "metadata": {"from": old, "to": TASK_STATUS_DONE},
+            },
         )
-        memory_service.try_audit_memory(
-            kind="task.finished",
-            source="web",
-            summary=f"Finished task: {task.title}",
-            detail=f"Task moved from `{old}` to `{TASK_STATUS_DONE}`.",
-            goal_id=int(task.goal_id),
-            task_public_id=task.public_id,
-            metadata={"from": old, "to": TASK_STATUS_DONE},
-        )
+        from ..attention import service as attention_service
+
+        attention_service.mark_matching_task_items_acted(s, str(task.public_id or ""))
     return TaskResult(
         task_id=int(task.id),
         task_public_id=str(task.public_id or ""),
@@ -495,24 +516,21 @@ def reopen_task(s: Session, *, task_id: int) -> TaskResult:
     if task.status == TASK_STATUS_DONE:
         task.status = TASK_STATUS_TODO
         task.completed_at = None
-        s.add(
-            Event(
-                kind="task.reopened",
-                agent="ui",
-                task_id=task.public_id,
-                payload={},
-            )
-        )
-        memory_service.try_audit_memory(
+        event_service.record_event(
+            s,
             kind="task.reopened",
-            source="web",
-            summary=f"Reopened task: {task.title}",
-            detail=(
-                f"Task moved from `{TASK_STATUS_DONE}` back to `{TASK_STATUS_TODO}`."
-            ),
-            goal_id=int(task.goal_id),
-            task_public_id=task.public_id,
-            metadata={"to": TASK_STATUS_TODO},
+            agent="ui",
+            task_id=task.public_id,
+            payload={},
+            audit={
+                "kind": "task.reopened",
+                "source": "web",
+                "summary": f"Reopened task: {task.title}",
+                "detail": f"Task moved from `{TASK_STATUS_DONE}` back to `{TASK_STATUS_TODO}`.",
+                "goal_id": int(task.goal_id),
+                "task_public_id": task.public_id,
+                "metadata": {"to": TASK_STATUS_TODO},
+            },
         )
     return TaskResult(
         task_id=int(task.id),
