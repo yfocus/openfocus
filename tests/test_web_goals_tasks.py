@@ -446,6 +446,14 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         assert 'data-sort-key="title"' in html
         assert 'data-sort-key="created-at"' in html
         assert 'data-sort-key="status"' in html
+        assert (
+            '<button type="button" class="js-detail-tab" data-tab="all">ALL</button>'
+            in html
+        )
+        assert 'class="detail-main"' in html
+        assert "<th>Action</th>" in html
+        assert 'class="btn-ghost action-link task-action js-open-agent-space"' in html
+        assert "data-no-row-open" in html
 
         order = [
             html.index("doing-mid"),
@@ -454,6 +462,55 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
             html.index("done-last"),
         ]
         assert order == sorted(order)
+
+        task_pid = rows["todo-new"].public_id
+        matched_task = re.search(
+            rf'<template id="detail-task-{re.escape(task_pid)}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
+        assert matched_task is not None
+        task_html = matched_task.group("html")
+        assert (
+            '<button type="button" class="js-detail-tab" data-tab="all">ALL</button>'
+            in task_html
+        )
+        assert 'class="detail-main"' in task_html
+        assert 'class="btn-ghost action-link js-jump-goal"' in task_html
+        assert 'data-tab="tasks">Goal</button>' in task_html
+
+        assert "activateDetailTab(root, String(defaultTab || 'all'))" in r.text
+        assert "root.classList.toggle('detail-mode-all', showAll)" in r.text
+        assert (
+            "sec.style.display = (showAll || k === requested) ? 'flex' : 'none'"
+            in r.text
+        )
+        assert "function ensureDetailTabsDefault()" in r.text
+        assert "requestAnimationFrame(()=> ensureDetailTabsDefault())" in r.text
+        assert (
+            "window.addEventListener('pageshow', ()=> ensureDetailTabsDefault())"
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-mode-all .detail-sec[data-sec="basic"]{ flex: 1 1 0; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-mode-all .detail-sec[data-sec="detail"]{ flex: 6 1 0; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-mode-all .detail-sec[data-sec="event"]{ flex: 3 1 0; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .js-detail-tab[data-tab="all"]'
+            in r.text
+        )
+        assert "#dashboard .detail-sec .sec-body" in r.text
+        assert "overflow:auto" in r.text
+        assert "initDetailTabs(defaultTab || 'all')" in r.text
+        assert "initDetailTabs('all')" in r.text
 
 
 @pytest.mark.anyio

@@ -65,7 +65,9 @@
       #dashboard .goal-card:hover .gname{ text-decoration: none; color: var(--foreground); }
 
       /* Center detail */
-      #dashboard .detail-wrap{ position: relative; }
+      #dashboard #detail-col{ overflow: hidden; }
+      #dashboard #detail{ height: 100%; min-height: 0; }
+      #dashboard .detail-wrap{ position: relative; height: 100%; min-height: 0; display:flex; flex-direction:column; overflow:hidden; }
       #dashboard .detail-head{ display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
       #dashboard .detail-title-box{ flex: 1 1 auto; min-width: 0; }
       #dashboard .detail-actions{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
@@ -80,15 +82,37 @@
       #dashboard .detail-meta a{ display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:3px 8px; background:var(--muted-surface); }
       #dashboard .detail-meta-link{ font-size: 11px; color: var(--foreground); text-decoration: none; }
       #dashboard .detail-meta-link:hover{ color: var(--foreground); text-decoration: underline; }
-      #dashboard .detail-body{ margin-top: 12px; display:grid; grid-template-columns: 1fr 110px; gap: 12px; min-height: 0; }
-      #dashboard .detail-nav{ border-left: 1px solid var(--border); padding-left: 12px; display:flex; flex-direction:column; gap: 6px; }
+      #dashboard .detail-body{ margin-top: 12px; display:grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; min-height: 0; flex:1 1 auto; overflow:hidden; }
+      #dashboard .detail-main{ min-width:0; min-height:0; height:100%; display:flex; flex-direction:column; gap: 12px; overflow:hidden; }
+      #dashboard .detail-nav{ border-left: 1px solid var(--border); padding-left: 12px; display:flex; flex-direction:column; gap: 6px; min-height:0; overflow:hidden; }
       #dashboard .detail-nav button{ width: 100%; text-align:right; padding: 7px 8px; border:0; background: transparent; color: var(--muted-foreground); cursor:pointer; border-radius: calc(var(--radius) - 2px); }
       #dashboard .detail-nav button.active{ color: var(--foreground); background: var(--accent); }
-      /* 默认只显示一个区块（避免某些导航/恢复场景下 3 个区块同时出现） */
-      #dashboard .detail-sec{ padding-top: 6px; display: none; }
-      #dashboard .detail-wrap .detail-sec[data-sec="basic"]{ display: block; }
+      /* 默认由 JS 决定区块展示；ALL 会同时展开所有区块。 */
+      #dashboard .detail-sec{
+        display: none;
+        min-height: 0;
+        overflow: hidden;
+        flex-direction: column;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: color-mix(in srgb, var(--card) 88%, var(--background));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+      }
+      #dashboard .detail-mode-all .detail-sec[data-sec="basic"]{ flex: 1 1 0; }
+      #dashboard .detail-mode-all .detail-sec[data-sec="tasks"],
+      #dashboard .detail-mode-all .detail-sec[data-sec="detail"]{ flex: 6 1 0; }
+      #dashboard .detail-mode-all .detail-sec[data-sec="event"]{ flex: 3 1 0; }
+      #dashboard .detail-mode-single .detail-sec{ flex: 1 1 0; }
+      /* JS 尚未完成初始化/浏览器恢复页面状态时，也以 ALL 作为视觉兜底。 */
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec{ display:flex; }
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="basic"]{ flex: 1 1 0; }
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="tasks"],
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="detail"]{ flex: 6 1 0; }
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="event"]{ flex: 3 1 0; }
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .js-detail-tab[data-tab="all"]{ color: var(--foreground); background: var(--accent); }
       #dashboard .detail-sec .sec-title{ color: var(--muted-foreground); font-size: 12px; letter-spacing: 0.02em; text-transform: uppercase; }
-      #dashboard .detail-sec .sec-body{ margin-top: 10px; }
+      #dashboard .detail-sec .sec-body{ margin-top: 10px; min-height:0; flex:1 1 auto; overflow:auto; padding-right: 4px; }
 
       /* Goal tasks table */
       #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -97,6 +121,8 @@
       #dashboard table.wb-table tr:hover td{ background: var(--accent); }
       #dashboard .wb-table .tlink{ cursor:pointer; color: var(--foreground); }
       #dashboard .wb-table .muted{ color: var(--muted-foreground); }
+      #dashboard .wb-table .task-actions{ text-align:right; white-space:nowrap; }
+      #dashboard .wb-table .task-action{ font-size: 12px; line-height: 1; }
       #dashboard .sort-th{ display:inline-flex; align-items:center; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
       #dashboard .sort-th:hover{ color: var(--foreground); }
       #dashboard .sort-arrow{ color: var(--muted-foreground); font-size: 11px; line-height: 1; }
@@ -362,7 +388,7 @@
                 </div>
 
                 <div class="detail-body">
-                  <div style="min-width:0;">
+                  <div class="detail-main">
                     <div class="detail-sec" data-sec="basic">
                       <div class="sec-title">Basic</div>
                       <div class="sec-body" style="white-space: pre-wrap;">{{ g.content or '—' }}</div>
@@ -381,12 +407,14 @@
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="task-id">taskId<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="agent">Agent<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
                               <th><button type="button" class="sort-th js-task-sort" data-sort-key="token">Token<span class="sort-arrow" data-sort-arrow>↕</span></button></th>
+                              <th>Action</th>
                             </tr>
                           </thead>
                           <tbody>
                             {% for t in tasks %}
                               {% set m = task_meta.get(t.public_id, {}) %}
                               {% set ui = m.get('ui_status','todo') %}
+                              {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
                               {% set st = 'Done' if ui == 'done' else ('In progress' if ui == 'in_progress' else 'Not started') %}
                               <tr class="js-open-task"
                                 data-task="{{ t.public_id }}"
@@ -406,6 +434,17 @@
                                 <td class="muted">{{ t.public_id }}</td>
                                 <td class="muted">—</td>
                                 <td class="muted">—</td>
+                                <td class="task-actions">
+                                  {% if t.status != 'done' %}
+                                    {% if sp %}
+                                      <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost action-link task-action" role="button" data-no-row-open>Space</a>
+                                    {% else %}
+                                      <button type="button" class="btn-ghost action-link task-action js-open-agent-space" data-task="{{ t.public_id }}" data-no-row-open>Create Space</button>
+                                    {% endif %}
+                                  {% else %}
+                                    <span class="muted">—</span>
+                                  {% endif %}
+                                </td>
                               </tr>
                             {% endfor %}
                           </tbody>
@@ -440,6 +479,7 @@
                   </div>
 
                   <div class="detail-nav" aria-label="Sections">
+                    <button type="button" class="js-detail-tab" data-tab="all">ALL</button>
                     <button type="button" class="js-detail-tab" data-tab="basic">Basic</button>
                     <button type="button" class="js-detail-tab" data-tab="tasks">Tasks</button>
                     <button type="button" class="js-detail-tab" data-tab="event">Event</button>
@@ -466,7 +506,7 @@
                     </div>
 
                   <div class="detail-actions">
-                    <a href="/goals?goal={{ g.id }}" class="btn-ghost action-link" role="button">Goal</a>
+                    <button type="button" class="btn-ghost action-link js-jump-goal" data-goal="{{ g.id }}" data-tab="tasks">Goal</button>
                     {% if t.status != 'done' %}
                       {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
                       {% if sp %}
@@ -503,7 +543,7 @@
                   </div>
 
                   <div class="detail-body">
-                    <div style="min-width:0;">
+                    <div class="detail-main">
                       <div class="detail-sec" data-sec="basic">
                         <div class="sec-title">Basic</div>
                         <div class="sec-body" style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
@@ -541,6 +581,7 @@
                     </div>
 
                     <div class="detail-nav" aria-label="Sections">
+                      <button type="button" class="js-detail-tab" data-tab="all">ALL</button>
                       <button type="button" class="js-detail-tab" data-tab="basic">Basic</button>
                       <button type="button" class="js-detail-tab" data-tab="detail">Detail</button>
                       <button type="button" class="js-detail-tab" data-tab="event">Event</button>
@@ -988,6 +1029,7 @@
       if(!tpl) return false;
       setDetail(tpl.innerHTML);
       initTaskTableSorters(document.getElementById('detail'));
+      requestAnimationFrame(()=> ensureDetailTabsDefault());
       return true;
     }
 
@@ -1049,22 +1091,40 @@
     function activateDetailTab(root, tab){
       if(!(root instanceof HTMLElement)) return;
       const t = String(tab || '').trim();
-      if(!t) return;
+      const requested = t || 'all';
+      const showAll = (requested.toLowerCase() === 'all');
+      const hasSection = showAll || !!root.querySelector('.detail-sec[data-sec="' + CSS.escape(requested) + '"]');
+      if(!hasSection){ activateDetailTab(root, 'all'); return; }
+      root.classList.toggle('detail-mode-all', showAll);
+      root.classList.toggle('detail-mode-single', !showAll);
       root.querySelectorAll('.detail-sec').forEach((sec)=>{
         const k = sec.getAttribute('data-sec') || '';
-        sec.style.display = (k === t) ? 'block' : 'none';
+        sec.style.display = (showAll || k === requested) ? 'flex' : 'none';
       });
       root.querySelectorAll('.js-detail-tab').forEach((btn)=>{
         const k = btn.getAttribute('data-tab') || '';
-        btn.classList.toggle('active', k === t);
+        btn.classList.toggle('active', k === requested || (showAll && k.toLowerCase() === 'all'));
       });
+    }
+
+    function ensureDetailTabsDefault(){
+      const root = document.querySelector('#detail [data-detail-root]');
+      if(!(root instanceof HTMLElement)) return;
+      const active = root.querySelector('.js-detail-tab.active');
+      const visible = Array.from(root.querySelectorAll('.detail-sec')).some((sec)=>{
+        if(!(sec instanceof HTMLElement)) return false;
+        return sec.style.display && sec.style.display !== 'none';
+      });
+      if(!active || !visible){
+        activateDetailTab(root, 'all');
+      }
     }
 
     function initDetailTabs(defaultTab){
       const root = document.querySelector('#detail [data-detail-root]');
       if(!(root instanceof HTMLElement)) return;
-      // 统一为：只展示一个区块（默认由调用方决定），不再记忆上次 tab。
-      activateDetailTab(root, String(defaultTab || 'basic'));
+      // 统一为：默认展示 ALL；调用方可显式指定某个区块（例如从 Task 返回 Goal 时直达 Tasks）。
+      activateDetailTab(root, String(defaultTab || 'all'));
     }
 
     function updateUrl(params){
@@ -1103,13 +1163,13 @@
       }
     }
 
-    function selectGoal(goalId){
+    function selectGoal(goalId, defaultTab){
       if(renderFromTemplate('detail-goal-' + goalId)){
         STATE.selected = { type:'goal', goalId: String(goalId), taskPid: null };
         setSelectedInList('goal', String(goalId));
         updateUrl({goal: goalId, task: ''});
         try{ localStorage.setItem('openfocus:last_goal', String(goalId)); }catch(_){ }
-        initDetailTabs('tasks');
+        initDetailTabs(defaultTab || 'all');
       }
     }
 
@@ -1119,7 +1179,7 @@
         setSelectedInList('task', String(taskPid));
         updateUrl({goal: goalId || '', task: taskPid});
         try{ localStorage.setItem('openfocus:last_task', String(taskPid)); }catch(_){ }
-        initDetailTabs('basic');
+        initDetailTabs('all');
       }
     }
 
@@ -1314,6 +1374,13 @@
         return;
       }
 
+      const openAgentSpace = t.closest('.js-open-agent-space');
+      if(openAgentSpace){
+        const pid = openAgentSpace.getAttribute('data-task');
+        _openAgentSpaceDialog(pid);
+        return;
+      }
+
       const flt = t.closest('.js-filter');
       if(flt){
         applyFilter(flt.getAttribute('data-goal'), flt.getAttribute('data-filter'));
@@ -1348,12 +1415,13 @@
 
       const jump = t.closest('.js-jump-goal');
       if(jump){
-        selectGoal(jump.getAttribute('data-goal'));
+        selectGoal(jump.getAttribute('data-goal'), jump.getAttribute('data-tab') || 'tasks');
         return;
       }
 
       const openTask = t.closest('.js-open-task');
       if(openTask){
+        if(t.closest('[data-no-row-open]')) return;
         const pid = openTask.getAttribute('data-task');
         if(pid && document.getElementById('detail-task-' + pid)){
           const btn = document.querySelector('.nav-item[data-type="task"][data-id="' + pid + '"]');
@@ -1397,12 +1465,6 @@
         return;
       }
 
-      const openAgentSpace = t.closest('.js-open-agent-space');
-      if(openAgentSpace){
-        const pid = openAgentSpace.getAttribute('data-task');
-        _openAgentSpaceDialog(pid);
-        return;
-      }
     });
 
     // Ajax actions: done/reopen/delete task + goal done/reopen
@@ -2066,7 +2128,9 @@
       // default focus: first goal
       const first = document.querySelector('.nav-item[data-type="goal"]');
       if(first) selectGoal(first.getAttribute('data-id'));
+      ensureDetailTabsDefault();
     })();
+    window.addEventListener('pageshow', ()=> ensureDetailTabsDefault());
 
     // init dialog submit UX
     (function(){
