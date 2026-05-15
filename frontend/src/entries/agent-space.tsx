@@ -26,6 +26,7 @@ type AgentSpaceConfig = {
   spaceId: number;
   taskPublicId: string;
   rootPath: string;
+  agentPrefix?: string;
 };
 
 type PreviewState = {
@@ -461,7 +462,11 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const el = terminalRef.current;
     if (!el || !window.OpenFocusRemoteTerminal?.mount) return;
     try {
-      window.OpenFocusRemoteTerminal.mount(el, { spaceId: config.spaceId, taskPublicId: config.taskPublicId });
+      window.OpenFocusRemoteTerminal.mount(el, {
+        spaceId: config.spaceId,
+        taskPublicId: config.taskPublicId,
+        agentPrefix: config.agentPrefix,
+      });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);

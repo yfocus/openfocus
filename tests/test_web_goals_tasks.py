@@ -33,6 +33,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
             follow_redirects=False,
         )
         assert r.status_code == 303
+        assert "tab=tasks" not in (r.headers.get("location") or "")
 
         # list contains goal
         r = await client.get("/goals")
@@ -123,6 +124,7 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
             follow_redirects=False,
         )
         assert r.status_code == 303
+        assert (r.headers.get("location") or "").endswith(f"/goals?goal={goal_id}")
 
         from openfocus.models import Task
 
@@ -314,6 +316,32 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_agent_space_view_embeds_full_agent_prefix():
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.models import AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        g = Goal(title="agent prefix goal", content="", due_date=dt.date.today())
+        s.add(g)
+        s.flush()
+        t = Task(goal_id=g.id, title="agent prefix task", content="d", status="todo")
+        s.add(t)
+        s.flush()
+        s.add(AgentSpace(task_public_id=t.public_id, root_path="/tmp/openfocus-test"))
+        public_id = t.public_id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/tasks/{public_id}/agent_space")
+        assert r.status_code == 200
+        assert '"agentPrefix":' in r.text
+        assert "task.started" in r.text
+        assert "/api/agent/events" in r.text
+        assert "/api/skills/focus_report" in r.text
+
+
+@pytest.mark.anyio
 async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
     from openfocus.app import app
 
@@ -477,10 +505,14 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         )
         assert 'class="detail-main"' in task_html
         assert 'class="btn-ghost action-link js-jump-goal"' in task_html
-        assert 'data-tab="tasks">Goal</button>' in task_html
+        assert 'data-tab="all">Goal</button>' in task_html
         assert 'data-tab="detail"' not in task_html
         assert 'data-sec="detail"' not in task_html
         assert "Add text…" not in task_html
+        assert 'class="btn-ghost action-link js-inline-task-edit"' in task_html
+        assert "data-task-actions-edit hidden" in task_html
+        assert 'id="inline-task-edit-form-' in task_html
+        assert "data-inline-task-form hidden" in task_html
 
         assert "activateDetailTab(root, String(defaultTab || 'all'))" in r.text
         assert "root.classList.toggle('detail-mode-all', showAll)" in r.text
@@ -514,6 +546,10 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         assert "overflow:auto" in r.text
         assert "initDetailTabs(defaultTab || 'all')" in r.text
         assert "initDetailTabs('all')" in r.text
+        assert "const tab = url.searchParams.get('tab');" in r.text
+        assert "selectGoal(goal, tab || 'all');" in r.text
+        assert "_startInlineTaskEdit" in r.text
+        assert "_setTaskInlineEditMode(root, true);" in r.text
 
 
 @pytest.mark.anyio

@@ -113,6 +113,12 @@
       #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .js-detail-tab[data-tab="all"]{ color: var(--foreground); background: var(--accent); }
       #dashboard .detail-sec .sec-title{ color: var(--muted-foreground); font-size: 12px; letter-spacing: 0.02em; text-transform: uppercase; }
       #dashboard .detail-sec .sec-body{ margin-top: 10px; min-height:0; flex:1 1 auto; overflow:auto; padding-right: 4px; }
+      #dashboard .detail-inline-form{ display:flex; flex-direction:column; gap: 10px; }
+      #dashboard .detail-inline-form[hidden]{ display:none !important; }
+      #dashboard .detail-inline-view[hidden]{ display:none !important; }
+      #dashboard .detail-inline-form textarea,
+      #dashboard .detail-inline-form input{ width:100%; }
+      #dashboard .detail-inline-label{ color: var(--muted-foreground); font-size: 12px; }
 
       /* Goal tasks table */
       #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -506,39 +512,44 @@
                     </div>
 
                   <div class="detail-actions">
-                    <button type="button" class="btn-ghost action-link js-jump-goal" data-goal="{{ g.id }}" data-tab="tasks">Goal</button>
-                    {% if t.status != 'done' %}
-                      {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
-                      {% if sp %}
-                          <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost action-link" role="button">Space</a>
-                      {% else %}
-                          <button type="button" class="btn-ghost action-link js-open-agent-space" data-task="{{ t.public_id }}">Create Space</button>
+                    <div data-task-actions-default style="display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center;">
+                      <button type="button" class="btn-ghost action-link js-jump-goal" data-goal="{{ g.id }}" data-tab="all">Goal</button>
+                      {% if t.status != 'done' %}
+                        {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
+                        {% if sp %}
+                            <a href="/tasks/{{ t.public_id }}/agent_space" class="btn-ghost action-link" role="button">Space</a>
+                        {% else %}
+                            <button type="button" class="btn-ghost action-link js-open-agent-space" data-task="{{ t.public_id }}">Create Space</button>
+                        {% endif %}
                       {% endif %}
-                    {% endif %}
 
-                    {% if t.status != 'done' %}
-                      <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;" class="js-action" data-action="done" data-task="{{ t.public_id }}">
-                          <button type="submit" class="btn-ghost action-link">Finish</button>
+                      {% if t.status != 'done' %}
+                        <form method="post" action="/tasks/{{ t.id }}/done" style="margin:0;" class="js-action" data-action="done" data-task="{{ t.public_id }}">
+                            <button type="submit" class="btn-ghost action-link">Finish</button>
+                        </form>
+                      {% else %}
+                        <form method="post" action="/tasks/{{ t.id }}/reopen" style="margin:0;" class="js-action" data-action="reopen" data-task="{{ t.public_id }}">
+                            <button type="submit" class="btn-ghost action-link">Reopen</button>
+                        </form>
+                      {% endif %}
+
+                      {% if t.status != 'done' %}
+                        <button type="button" class="btn-ghost action-link js-inline-task-edit"
+                          data-task-id="{{ t.id }}"
+                          data-task-public-id="{{ t.public_id }}"
+                          data-goal="{{ g.id }}"
+                          data-title="{{ t.title }}"
+                          data-content="{{ t.content }}"
+                        >Edit</button>
+                      {% endif %}
+
+                      <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('Delete this task?')">
+                        <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
                       </form>
-                    {% else %}
-                      <form method="post" action="/tasks/{{ t.id }}/reopen" style="margin:0;" class="js-action" data-action="reopen" data-task="{{ t.public_id }}">
-                          <button type="submit" class="btn-ghost action-link">Reopen</button>
-                      </form>
-                    {% endif %}
-
-                    {% if t.status != 'done' %}
-                      <button type="button" class="btn-ghost action-link js-open-task-edit"
-                        data-task-id="{{ t.id }}"
-                        data-task-public-id="{{ t.public_id }}"
-                        data-goal="{{ g.id }}"
-                        data-title="{{ t.title }}"
-                        data-content="{{ t.content }}"
-                      >Edit</button>
-                    {% endif %}
-
-                    <form method="post" action="/tasks/{{ t.id }}/delete" style="margin:0;" class="js-action" data-action="delete" data-task="{{ t.public_id }}" onsubmit="return confirm('Delete this task?')">
-                      <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
-                    </form>
+                    </div>
+                    <div data-task-actions-edit hidden>
+                      <button type="submit" class="btn-primary" form="inline-task-edit-form-{{ t.id }}">Save</button>
+                    </div>
                   </div>
                   </div>
 
@@ -546,7 +557,19 @@
                     <div class="detail-main">
                       <div class="detail-sec" data-sec="basic">
                         <div class="sec-title">Basic</div>
-                        <div class="sec-body" style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
+                        <div class="sec-body">
+                          <div class="detail-inline-view" data-task-basic-view style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
+                          <form method="post" action="/tasks/{{ t.id }}/edit" id="inline-task-edit-form-{{ t.id }}" class="detail-inline-form" data-inline-task-form hidden>
+                            <div>
+                              <label class="detail-inline-label" for="inline-task-title-{{ t.id }}">Title</label>
+                              <textarea id="inline-task-title-{{ t.id }}" name="title" rows="2" required maxlength="512" data-inline-task-title>{{ t.title }}</textarea>
+                            </div>
+                            <div>
+                              <label class="detail-inline-label" for="inline-task-content-{{ t.id }}">Content</label>
+                              <textarea id="inline-task-content-{{ t.id }}" name="content" rows="10" required maxlength="4000" data-inline-task-content>{{ t.content }}</textarea>
+                            </div>
+                          </form>
+                        </div>
                       </div>
 
                       <div class="detail-sec" data-sec="event">
@@ -792,34 +815,6 @@
     </div>
   </dialog>
 
-  <!-- Edit Task dialog -->
-  <dialog id="edit-task-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
-    <form method="dialog" style="margin:0;">
-      <div class="pad" style="padding: 14px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">Edit Task</div>
-          <button type="submit" class="btn-ghost">Close</button>
-        </div>
-      </div>
-    </form>
-    <div class="divider"></div>
-    <div class="pad" style="padding: 14px;">
-      <form method="post" action="" id="edit-task-form">
-        <div style="margin-bottom: 10px;">
-          <label class="muted" for="task-edit-title">Title (required)</label>
-          <textarea name="title" rows="2" required maxlength="512" id="task-edit-title"></textarea>
-        </div>
-        <div style="margin-bottom: 10px;">
-          <label class="muted" for="task-edit-content">Content (required)</label>
-          <textarea name="content" rows="6" required maxlength="4000" id="task-edit-content"></textarea>
-        </div>
-        <div style="display:flex; align-items:center; justify-content:flex-end; gap: 10px;">
-          <button type="submit">Save</button>
-        </div>
-      </form>
-    </div>
-  </dialog>
-
   <!-- AgentSpace dialog (create workspace from task detail) -->
   <dialog id="agent-space-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
     <form method="dialog" style="margin:0;">
@@ -994,22 +989,32 @@
       setTimeout(()=>{ try{ d?.focus(); }catch(_){ } }, 30);
     }
 
-    function _openEditTaskDialog(fromEl){
-      const dlg = document.getElementById('edit-task-dialog');
-      const form = document.getElementById('edit-task-form');
-      const id = String(fromEl?.getAttribute('data-task-id') || '').trim();
-      if(!id){ toast('Missing taskId'); return; }
-      if(form) form.action = '/tasks/' + encodeURIComponent(id) + '/edit';
+    function _setTaskInlineEditMode(root, editing){
+      if(!(root instanceof HTMLElement)) return;
+      const on = !!editing;
+      root.setAttribute('data-inline-editing', on ? '1' : '0');
+      const view = root.querySelector('[data-task-basic-view]');
+      const form = root.querySelector('[data-inline-task-form]');
+      const defaultActions = root.querySelector('[data-task-actions-default]');
+      const editActions = root.querySelector('[data-task-actions-edit]');
+      if(view instanceof HTMLElement) view.hidden = on;
+      if(form instanceof HTMLElement) form.hidden = !on;
+      if(defaultActions instanceof HTMLElement) defaultActions.hidden = on;
+      if(editActions instanceof HTMLElement) editActions.hidden = !on;
+    }
 
+    function _startInlineTaskEdit(fromEl){
+      const root = fromEl?.closest('[data-detail-root]');
+      if(!(root instanceof HTMLElement)) return;
       const title = String(fromEl?.getAttribute('data-title') || '');
       const content = String(fromEl?.getAttribute('data-content') || '');
-      const t1 = document.getElementById('task-edit-title');
-      const t2 = document.getElementById('task-edit-content');
-      if(t1) t1.value = title;
-      if(t2) t2.value = content;
-
-      try{ dlg?.showModal(); }catch(_){ }
-      setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
+      const titleEl = root.querySelector('[data-inline-task-title]');
+      const contentEl = root.querySelector('[data-inline-task-content]');
+      if(titleEl instanceof HTMLTextAreaElement) titleEl.value = title;
+      if(contentEl instanceof HTMLTextAreaElement) contentEl.value = content;
+      activateDetailTab(root, 'basic');
+      _setTaskInlineEditMode(root, true);
+      setTimeout(()=>{ try{ contentEl?.focus(); }catch(_){ } }, 30);
     }
 
     function setDetail(html){
@@ -1161,7 +1166,8 @@
       if(renderFromTemplate('detail-goal-' + goalId)){
         STATE.selected = { type:'goal', goalId: String(goalId), taskPid: null };
         setSelectedInList('goal', String(goalId));
-        updateUrl({goal: goalId, task: ''});
+        const tab = String(defaultTab || 'all').trim().toLowerCase();
+        updateUrl({goal: goalId, task: '', tab: (tab && tab !== 'all') ? tab : ''});
         try{ localStorage.setItem('openfocus:last_goal', String(goalId)); }catch(_){ }
         initDetailTabs(defaultTab || 'all');
       }
@@ -1171,7 +1177,7 @@
       if(renderFromTemplate('detail-task-' + taskPid)){
         STATE.selected = { type:'task', goalId: String(goalId || ''), taskPid: String(taskPid) };
         setSelectedInList('task', String(taskPid));
-        updateUrl({goal: goalId || '', task: taskPid});
+        updateUrl({goal: goalId || '', task: taskPid, tab: ''});
         try{ localStorage.setItem('openfocus:last_task', String(taskPid)); }catch(_){ }
         initDetailTabs('all');
       }
@@ -1365,6 +1371,8 @@
         const type = String(STATE?.selected?.type || '').trim() || 'detail';
         const key = 'openfocus:last_detail_tab:' + type;
         try{ localStorage.setItem(key, String(tab || '')); }catch(_){ }
+        if(type === 'goal') updateUrl({ tab: tab && String(tab).toLowerCase() !== 'all' ? tab : '' });
+        else updateUrl({ tab: '' });
         return;
       }
 
@@ -1409,7 +1417,7 @@
 
       const jump = t.closest('.js-jump-goal');
       if(jump){
-        selectGoal(jump.getAttribute('data-goal'), jump.getAttribute('data-tab') || 'tasks');
+        selectGoal(jump.getAttribute('data-goal'), jump.getAttribute('data-tab') || 'all');
         return;
       }
 
@@ -1453,9 +1461,9 @@
         return;
       }
 
-      const openTaskEdit = t.closest('.js-open-task-edit');
-      if(openTaskEdit){
-        _openEditTaskDialog(openTaskEdit);
+      const inlineTaskEdit = t.closest('.js-inline-task-edit');
+      if(inlineTaskEdit){
+        _startInlineTaskEdit(inlineTaskEdit);
         return;
       }
 
@@ -2090,6 +2098,7 @@
       const url = new URL(window.location.href);
       const goal = url.searchParams.get('goal');
       const task = url.searchParams.get('task');
+      const tab = url.searchParams.get('tab');
       const openNew = url.searchParams.get('new');
       if(openNew === '1'){
         try{ document.getElementById('new-goal-dialog')?.showModal(); }catch(_){ }
@@ -2101,7 +2110,7 @@
         return;
       }
       if(goal && document.getElementById('detail-goal-' + goal)){
-        selectGoal(goal);
+        selectGoal(goal, tab || 'all');
         return;
       }
       try{

@@ -148,7 +148,8 @@ Attention Inbox 不展示所有事件，只展示 Agent 上报驱动的三类空
   - `taskId=<Task.public_id>`
   - `agentSessionId=<session_id>`
   - `openfocusBaseUrl=<base_url>`
-  - 事件上报要求：按本文件 Event Spec 调用 `POST /api/agent/events`
+  - 事件上报要求：按本文件 Event Spec 调用 `POST /api/agent/events`，并在 prompt 中直接写明接口结构、字段、推荐 kind、status 合法值与 payload 常用字段
+  - 上报时机要求：Agent run 启动后必须立刻先上报 `agent.started`；开始处理 task 后必须立刻上报 `task.started`；完成时必须上报 `agent.completed`，并继续上报该 task 的最终结果（优先 `POST /api/skills/focus_report`，否则 `task.completed` / `task.failed` / `task.blocked`）
   - 最终结果上报要求：优先调用 `POST /api/skills/focus_report`
 
 ### 鉴权与可靠性

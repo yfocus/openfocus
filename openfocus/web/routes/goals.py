@@ -382,9 +382,7 @@ def create_router(
                 source="web",
             )
             created_goal_id = int(goal.id or 0)
-        return RedirectResponse(
-            url=f"/goals?goal={created_goal_id}&tab=tasks", status_code=303
-        )
+        return RedirectResponse(url=f"/goals?goal={created_goal_id}", status_code=303)
 
     @router.post("/goals/{goal_id:int}/tasks", include_in_schema=False)
     def tasks_create(
@@ -404,7 +402,7 @@ def create_router(
                 )
             except goal_service.GoalTaskNotFound:
                 raise HTTPException(status_code=404, detail="Goal not found")
-        return RedirectResponse(url=f"/goals?goal={goal_id}&tab=tasks", status_code=303)
+        return RedirectResponse(url=f"/goals?goal={goal_id}", status_code=303)
 
     @router.post("/goals/{goal_id:int}/done", include_in_schema=False)
     def goals_mark_done(goal_id: int) -> RedirectResponse:

@@ -46,19 +46,51 @@ def _openfocus_base_url(request: Request) -> str:
         return "http://127.0.0.1:8001"
 
 
+def _build_openfocus_ttyd_agent_prefix(*, base_url: str, task_public_id: str) -> str:
+    base = str(base_url or "").rstrip("/") or "http://127.0.0.1:8001"
+    task_id = str(task_public_id or "").strip()
+    parts = []
+    if task_id:
+        parts.append(f"taskId={task_id}")
+    parts.append(f"openfocusBaseUrl={base}")
+    parts.append(
+        "按 OpenFocus Event Spec 上报：启动立刻报 agent.started；开始当前任务立刻报 task.started；阶段进展/重要中间结果/阻塞/失败用 "
+        f'POST {base}/api/agent/events，JSON={{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{{"status":"running","message":"...","progress":0.5}}}}；'
+        "合法 kind=task.started|task.progress|task.completed|task.failed|task.blocked|agent.started|agent.completed；"
+        "payload 常用字段=status|message|summary|error|reason|progress|step|total_steps|metadata；"
+        "status 按 spec 使用：running|succeeded|failed|blocked|waiting|canceled|in_progress|progress|success|ok|done|completed|fail|error|timeout|denied|panic|waiting_on_someone；"
+        "完成时先报 agent.completed，再优先用 "
+        f'POST {base}/api/skills/focus_report，JSON={{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked|running","goal_id":null,"task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{{}}}}；'
+        "若 focus_report 不可用，再用 task.completed/task.failed/task.blocked；不要按 token/日志行/无意义心跳刷屏；completed/succeeded 只表示 Agent 报告完成，不会自动把任务标记为 done。"
+    )
+    return " · ".join(parts)
+
+
 def _inject_openfocus_prompt(
     *, base_url: str, task_public_id: str, session_id: str, user_prompt: str
 ) -> str:
     head = (
         "你在 OpenFocus 的 AgentSpace 中工作。\n"
         f"agentSessionId={session_id}\n"
-        f"taskId={task_public_id} · openfocus={base_url} · 进度上报: POST /api/agent/events; 最终结果: POST /api/skills/focus_report\n"
-        "事件上报只需知道：\n"
-        '- POST {openfocus}/api/agent/events：{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{"status":"running","message":"...","progress":0.5}}\n'
-        "- 可用 kind：task.started（开始）、task.progress（阶段进度）、task.completed（完成待确认）、task.failed（失败）、task.blocked（需用户/外部条件）。\n"
-        "- payload 常用字段：status、message、summary、error、reason、progress、step、total_steps、metadata；任务相关事件必须带 task_id=taskId。\n"
-        '- 最终优先 POST {openfocus}/api/skills/focus_report：{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked","task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{}}\n'
-        "- 不要按 token/日志行/无意义心跳刷屏；只在开始、阶段变化、阻塞/失败、最终结果时上报。\n"
+        f"taskId={task_public_id}\n"
+        f"openfocusBaseUrl={base_url}\n"
+        "你必须按 OpenFocus 的 Event Spec 上报，不要自定义不兼容格式。\n"
+        "接口 1：POST /api/agent/events（完整地址：{openfocusBaseUrl}/api/agent/events）\n"
+        "请求体必须是 JSON，对任务相关事件统一使用：\n"
+        '{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{"status":"running","message":"...","progress":0.5}}\n'
+        "字段规范：kind=事件类型（必填，<=128 chars）；agent=上报方标识（必填）；task_id=任务相关事件必填，且必须等于 taskId；payload=对象（必填）。\n"
+        "payload 合法常用字段：status、message、summary、error、reason、progress、step、total_steps、metadata。\n"
+        "status 合法值按 spec 使用：running | succeeded | failed | blocked | waiting | canceled | in_progress | progress | success | ok | done | completed | fail | error | timeout | denied | panic | waiting_on_someone。\n"
+        "kind 规范：task.started=任务开始；task.progress=阶段进度/重要中间结果；task.completed=Agent 认为已完成、等待用户确认；task.failed=无法完成；task.blocked=需要用户或外部条件；agent.started=一次 agent run 启动；agent.completed=一次 agent run 结束。\n"
+        "上报时机必须明确遵守：\n"
+        "1. Agent 一启动，立刻先上报 agent.started；开始处理该任务时，立刻上报 task.started。\n"
+        "2. 长任务只在有意义的阶段变化、重要进展、阻塞、失败时上报 task.progress / task.blocked / task.failed，不要按 token、日志行或无意义心跳刷屏。\n"
+        "不要按 token/日志行/无意义心跳刷屏。\n"
+        "3. 完成时必须上报 agent.completed；若本次工作针对 task，随后上报最终任务结果：优先使用 /api/skills/focus_report，若不可用再用 task.completed / task.failed / task.blocked。\n"
+        "4. task.completed / skill.focus_report(status=succeeded) 只表示 Agent 报告完成，不会自动把任务标记为 done。\n"
+        "接口 2：POST /api/skills/focus_report（完整地址：{openfocusBaseUrl}/api/skills/focus_report，推荐用于最终结果）\n"
+        '{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked|running","goal_id":null,"task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{}}\n'
+        "focus_report.status 合法值按 spec 归一化：成功=succeeded|success|ok|done|completed；失败=failed|fail|error|timeout|denied|panic；阻塞=blocked|waiting|waiting_on_someone；进行中=running|in_progress|progress。\n"
         "---\n"
     )
     return head + str(user_prompt or "")
@@ -194,6 +226,10 @@ def create_router(
                 "goal": goal,
                 "space": space,
                 "companion": companion,
+                "agent_prefix": _build_openfocus_ttyd_agent_prefix(
+                    base_url=_openfocus_base_url(request),
+                    task_public_id=str(task.public_id or ""),
+                ),
             },
         )
 

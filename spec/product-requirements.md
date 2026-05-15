@@ -99,7 +99,7 @@ flowchart TD
 13. 新建 Task（交互强约束）：
    - 新建 Task 不允许在左侧 GOALS/TASKS 栏内直接输入创建；必须与 New Goal 一样通过弹窗/对话框创建。
    - 对话框包含 `Title` 与 `Content` 两个输入框，且**两个都必填**。
-   - 保存成功后返回当前 goal 的 `Tasks` tab。
+   - 保存成功后返回当前 goal 详情，默认展示 `ALL`；只有显式指定具体分区时才跳到对应 tab。
    - 点击保存后立即落库。
 
 14. 目标详情编辑：
@@ -107,11 +107,15 @@ flowchart TD
    - 支持在目标详情内编辑（不依赖跳转到单独编辑页）。
    - 如果 goal 来自 Inspiration，`inspiration` 链接展示在 DDL / elapsed / task count 所在 meta 行，小写小字体，以链接形式跳转。
 
-15. 顶端导航栏提供 `Inspiration` 选项，点击后跳转到灵感空间列表页。
+15. Task 详情返回 Goal 的默认行为：
+   - Task 详情页点击 `Goal` 返回所属 goal 时，默认展示 goal 详情的 `ALL` 视图，而不是 `Tasks`。
+   - 只有当调用方显式指定某个分区时，才允许落到 `Basic` / `Tasks` / `Event` 等单一分区。
+
+16. 顶端导航栏提供 `Inspiration` 选项，点击后跳转到灵感空间列表页。
    - Inspiration 使用独立页面与独立 URL，不嵌在 `New Goal` 对话框里。
    - 顶部导航需同时保留 `New Goal` 与 `Inspiration` 两个入口，职责明确分离：前者负责立即创建，后者负责持续讨论与规划。
 
-16. 顶端导航栏提供Companion选项，点击后跳转到Companion管理页。
+17. 顶端导航栏提供Companion选项，点击后跳转到Companion管理页。
     - Companion page shows current registered Companion basics: `name/device_id`, related AgentSpace list, created date, and status.
     - Companion statuses in the current product are: `active`, `offline`, and `waiting for pairing` (backend state key: `pending_certification`).
     - For waiting companions, the page shows an inline pairing code input plus `Pair` button inside each card.
@@ -126,7 +130,8 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
 **视觉与交互**
 1. In Task detail, clicking `Create Space` opens a dialog to choose a workdir and a Companion.
    After AgentSpace creation succeeds, the page auto-jumps to AgentSpace. For tasks that already have a workspace, clicking `Space` opens AgentSpace.
-   - Task 详情页的 `Create Space/Space` 左侧提供一个 `Goal` 按钮，用于跳回该 task 所属 goal。
+   - Task 详情页的 `Create Space/Space` 左侧提供一个 `Goal` 按钮，用于跳回该 task 所属 goal，默认落到 goal 详情的 `ALL`。
+   - Task 详情页点击 `Edit` 时，不弹出独立窗口；而是切换到 `Basic` 选项卡直接内联编辑，同时顶部动作区临时收敛为单个 `Save` 按钮；保存后恢复普通动作按钮。
 2. AgentSpace uses the current three-column layout: `FILES` + `PREVIEW` + `TERMINAL`.
    - `FILES` is a read-only tree.
    - `PREVIEW` is read-only preview for code / markdown / image files.

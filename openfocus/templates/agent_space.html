@@ -100,7 +100,7 @@
   </div>
 
   {% if space %}
-  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "rootPath": {{ space.root_path|tojson }}}'>
+  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "rootPath": {{ space.root_path|tojson }}, "agentPrefix": {{ agent_prefix|tojson }}}'>
     <div class="muted" style="padding: 12px;">Loading AgentSpace…</div>
   </div>
 
