@@ -478,6 +478,9 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         assert 'class="detail-main"' in task_html
         assert 'class="btn-ghost action-link js-jump-goal"' in task_html
         assert 'data-tab="tasks">Goal</button>' in task_html
+        assert 'data-tab="detail"' not in task_html
+        assert 'data-sec="detail"' not in task_html
+        assert "Add text…" not in task_html
 
         assert "activateDetailTab(root, String(defaultTab || 'all'))" in r.text
         assert "root.classList.toggle('detail-mode-all', showAll)" in r.text
@@ -496,7 +499,7 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
             in r.text
         )
         assert (
-            '#dashboard .detail-mode-all .detail-sec[data-sec="detail"]{ flex: 6 1 0; }'
+            '#dashboard .detail-wrap[data-detail-kind="task"].detail-mode-all .detail-sec[data-sec="basic"]{ flex: 6 1 0; }'
             in r.text
         )
         assert (

@@ -48,7 +48,8 @@ flowchart TD
 2. Information density follows the current implementation:
    - Left goal cards show a truncated goal `title`, a done/total ratio, and a status dot.
    - Goal detail shows original `title`/`content`, DDL, elapsed time, related tasks, and related events.
-   - Task detail shows original title/content, DDL, elapsed time, stable `taskId`, and related events.
+   - Task detail shows original `title`/`content`, DDL, elapsed time, stable `taskId`, and related events.
+   - Task detail must not introduce a separate `detail` field/section beyond `content`; if the UI uses sub-sections, they should only organize the existing task content and event history.
    - Task status must remain visually distinguishable (`todo` / `in progress` / `done`).
 3. Dashboard 采用纵向**三栏布局**：左侧「目标列表」+ 中间「详情」+ 右侧「辅助栏」。
    - 参考 ChatGPT/OpenAI 的页面体验：Dashboard 主体容器不滚动（或尽量不出现整页滚动条），滚动发生在各自栏内。
@@ -92,6 +93,7 @@ flowchart TD
    - Task 是否完成必须由人确认：在 Task detail 里提供 `Finish` 按钮。
    - 已完成任务在 Task detail 里提供 `Reopen` 按钮，用于恢复到未完成状态。
    - 「任务详情」需要展示与该 task 相关的事件列表（最近若干条），用于用户复核 Agent 产出与上报内容。
+   - 「任务详情」中的正文展示统一来自 task `content`；不得再出现仅显示占位文案的独立 `Detail` tab / section。
 12. 文案约束：避免出现调试风格的长句与键值对（例如 `status=... priority=... importance=... created ... ago`），页面只保留对用户有用的信息密度与更简洁的表达。
 
 13. 新建 Task（交互强约束）：

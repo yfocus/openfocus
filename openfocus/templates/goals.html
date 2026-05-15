@@ -100,16 +100,16 @@
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
       }
       #dashboard .detail-mode-all .detail-sec[data-sec="basic"]{ flex: 1 1 0; }
-      #dashboard .detail-mode-all .detail-sec[data-sec="tasks"],
-      #dashboard .detail-mode-all .detail-sec[data-sec="detail"]{ flex: 6 1 0; }
+      #dashboard .detail-mode-all .detail-sec[data-sec="tasks"]{ flex: 6 1 0; }
       #dashboard .detail-mode-all .detail-sec[data-sec="event"]{ flex: 3 1 0; }
+      #dashboard .detail-wrap[data-detail-kind="task"].detail-mode-all .detail-sec[data-sec="basic"]{ flex: 6 1 0; }
       #dashboard .detail-mode-single .detail-sec{ flex: 1 1 0; }
       /* JS 尚未完成初始化/浏览器恢复页面状态时，也以 ALL 作为视觉兜底。 */
       #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec{ display:flex; }
       #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="basic"]{ flex: 1 1 0; }
-      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="tasks"],
-      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="detail"]{ flex: 6 1 0; }
+      #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="tasks"]{ flex: 6 1 0; }
       #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="event"]{ flex: 3 1 0; }
+      #dashboard .detail-wrap[data-detail-kind="task"]:not(.detail-mode-all):not(.detail-mode-single) .detail-sec[data-sec="basic"]{ flex: 6 1 0; }
       #dashboard .detail-wrap:not(.detail-mode-all):not(.detail-mode-single) .js-detail-tab[data-tab="all"]{ color: var(--foreground); background: var(--accent); }
       #dashboard .detail-sec .sec-title{ color: var(--muted-foreground); font-size: 12px; letter-spacing: 0.02em; text-transform: uppercase; }
       #dashboard .detail-sec .sec-body{ margin-top: 10px; min-height:0; flex:1 1 auto; overflow:auto; padding-right: 4px; }
@@ -493,7 +493,7 @@
               {% set ui = m.get('ui_status','todo') %}
               {% set task_status = 'Done' if ui == 'done' else ('In progress' if ui == 'in_progress' else 'Not started') %}
               <template id="detail-task-{{ t.public_id }}">
-                <div class="pad detail-wrap" data-detail-root>
+                <div class="pad detail-wrap" data-detail-root data-detail-kind="task">
                   <div class="detail-head">
                     <div class="detail-title-box">
                       <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if t.status == 'done' else 'rgba(255,255,255,0.92)' }};">{{ t.title }}</div>
@@ -549,11 +549,6 @@
                         <div class="sec-body" style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
                       </div>
 
-                      <div class="detail-sec" data-sec="detail">
-                        <div class="sec-title">Detail</div>
-                        <div class="sec-body" style="color: rgba(255,255,255,0.55);">Add text…</div>
-                      </div>
-
                       <div class="detail-sec" data-sec="event">
                         <div class="sec-title">Event</div>
                         <div class="sec-body">
@@ -583,7 +578,6 @@
                     <div class="detail-nav" aria-label="Sections">
                       <button type="button" class="js-detail-tab" data-tab="all">ALL</button>
                       <button type="button" class="js-detail-tab" data-tab="basic">Basic</button>
-                      <button type="button" class="js-detail-tab" data-tab="detail">Detail</button>
                       <button type="button" class="js-detail-tab" data-tab="event">Event</button>
                     </div>
                   </div>
