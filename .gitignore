@@ -23,6 +23,7 @@ __pycache__/
 *.pyi
 *.pyi[cod]
 node_modules/
+openfocus/static/dist/
 
 .coverage
 htmlcov/

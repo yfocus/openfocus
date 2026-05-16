@@ -97,9 +97,12 @@ npm install
 npm run build
 ```
 
+OpenFocus 会直接从 `openfocus/static/dist` 提供前端静态资源，因此启动服务前必须先构建前端；如果修改了前端源码，也需要重新执行构建。
+
 **启动 OpenFocus**
 
 ```shell
+npm run build
 make serve
 ```
 
@@ -134,6 +137,8 @@ make check
 npm run dev
 npm run build
 ```
+
+如果你不是通过 `npm run dev` 进行前端开发，那么在执行 `make serve` 前请先运行 `npm run build`，确保 `/static/dist` 中的资源是最新的。
 
 ## 目录结构
 

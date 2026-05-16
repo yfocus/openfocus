@@ -97,9 +97,12 @@ npm install
 npm run build
 ```
 
+OpenFocus serves frontend assets from `openfocus/static/dist`, so you must build the frontend before starting the app and rebuild it after frontend source changes.
+
 **Start OpenFocus**
 
 ```shell
+npm run build
 make serve
 ```
 
@@ -136,6 +139,8 @@ Frontend development:
 npm run dev
 npm run build
 ```
+
+If you are not using `npm run dev`, rebuild with `npm run build` before `make serve` so `/static/dist` contains up-to-date assets.
 
 ## Directory Structure
 
