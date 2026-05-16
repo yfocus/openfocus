@@ -337,6 +337,18 @@ def create_router(
                     s.query(Task).filter(Task.public_id == sel_task_pid).one_or_none()
                 )
 
+            last_start_agent_command = ""
+            last_agent_space = (
+                s.query(AgentSpace)
+                .filter(AgentSpace.start_agent_command != "")
+                .order_by(AgentSpace.id.desc())
+                .first()
+            )
+            if last_agent_space is not None:
+                last_start_agent_command = str(
+                    getattr(last_agent_space, "start_agent_command", "") or ""
+                )
+
         default_due = dt.date.today() + dt.timedelta(days=1)
         return templates.TemplateResponse(
             request,
@@ -357,6 +369,7 @@ def create_router(
                 "default_due": default_due.isoformat(),
                 "goal_filter": goal_filter,
                 "goal_sort": goal_sort,
+                "last_start_agent_command": last_start_agent_command,
             },
         )
 

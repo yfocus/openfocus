@@ -337,6 +337,9 @@ class AgentSpace(Base):
     agent_type: Mapped[str] = mapped_column(
         String(64), nullable=False, default="trae-cli"
     )
+    start_agent_command: Mapped[str] = mapped_column(
+        String(2000), nullable=False, default=""
+    )
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)

@@ -18,6 +18,68 @@ def test_migration_service_records_baseline_on_current_schema(tmp_path):
         assert migrations.STARTUP_SCHEMA_MIGRATION_ID in ids
 
 
+def test_migration_service_adds_agent_space_start_command_after_applied_baseline(
+    tmp_path,
+):
+    from openfocus.infrastructure import migrations
+    from openfocus.models import Base
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'legacy_agent_space.db'}", future=True
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE agent_spaces ("
+                "id INTEGER PRIMARY KEY, "
+                "task_public_id VARCHAR(36) NOT NULL UNIQUE, "
+                "companion_id INTEGER, "
+                "root_path VARCHAR(4000) NOT NULL, "
+                "agent_type VARCHAR(64) NOT NULL DEFAULT 'trae-cli', "
+                "created_at DATETIME, "
+                "updated_at DATETIME"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO agent_spaces "
+                "(id, task_public_id, companion_id, root_path, agent_type) "
+                "VALUES (1, 'task-public-id', 7, '/tmp/ws', 'trae-cli')"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE schema_migrations ("
+                "id VARCHAR(128) PRIMARY KEY, "
+                "applied_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL"
+                ")"
+            )
+        )
+        conn.execute(
+            text("INSERT INTO schema_migrations (id) VALUES (:id)"),
+            {"id": migrations.STARTUP_SCHEMA_MIGRATION_ID},
+        )
+
+    migrations.initialize_database(engine, Base)
+
+    with engine.begin() as conn:
+        agent_space_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)")
+        }
+        row = conn.execute(
+            text("SELECT start_agent_command FROM agent_spaces WHERE id = 1")
+        ).one()
+        migration_ids = {
+            str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
+        }
+
+    assert "start_agent_command" in agent_space_cols
+    assert row[0] == ""
+    assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids
+
+
 def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     from alembic import command
     from alembic.config import Config
@@ -101,6 +163,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
             r[1]
             for r in conn.exec_driver_sql("PRAGMA table_info(remote_terminal_sessions)")
         }
+        agent_space_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_spaces)")
+        }
         attention_cols = {
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(attention_items)")
         }
@@ -134,6 +199,7 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     )
     assert {"mode", "workspace_path"}.issubset(insp_space_cols)
     assert {"external_path", "source"}.issubset(insp_res_cols)
+    assert {"companion_id", "start_agent_command"}.issubset(agent_space_cols)
     assert {
         "owner_type",
         "owner_id",
@@ -168,3 +234,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         migrations.REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID in migration_ids
     )
     assert migrations.ATTENTION_ITEMS_MIGRATION_ID in migration_ids
+    assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids

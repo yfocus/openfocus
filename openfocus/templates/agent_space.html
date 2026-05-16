@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15">
+  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=16">
   <style>
     .agent-preview-content { height: 100%; min-height: 0; }
     .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: var(--radius); background: var(--background); border: 1px solid var(--border); }
@@ -100,11 +100,11 @@
   </div>
 
   {% if space %}
-  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "rootPath": {{ space.root_path|tojson }}, "agentPrefix": {{ agent_prefix|tojson }}}'>
+  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "rootPath": {{ space.root_path|tojson }}, "agentPrefix": {{ agent_prefix|tojson }}, "startAgentCommand": {{ (space.start_agent_command or "")|tojson }}}'>
     <div class="muted" style="padding: 12px;">Loading AgentSpace…</div>
   </div>
 
-  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=15"></script>
+  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=16"></script>
   <script type="module" src="/static/dist/assets/agent-space.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=1"></script>
   {% endif %}
   </div>

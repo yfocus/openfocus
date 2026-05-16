@@ -221,6 +221,12 @@ def upgrade() -> None:
             nullable=False,
             server_default="trae-cli",
         ),
+        sa.Column(
+            "start_agent_command",
+            sa.String(length=2000),
+            nullable=False,
+            server_default="",
+        ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )

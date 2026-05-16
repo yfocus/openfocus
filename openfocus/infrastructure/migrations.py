@@ -12,6 +12,7 @@ REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
     "20260514_remote_terminal_task_public_id_nullable"
 )
 ATTENTION_ITEMS_MIGRATION_ID = "20260514_attention_items"
+AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -194,6 +195,13 @@ def _migrate_startup_schema_baseline(conn: Any) -> None:
     space_cols = _table_columns(conn, "agent_spaces")
     if "companion_id" not in space_cols:
         conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
+    if "start_agent_command" not in space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE agent_spaces ADD COLUMN start_agent_command "
+                "VARCHAR(2000) NOT NULL DEFAULT ''"
+            )
+        )
 
 
 def _migrate_remote_terminal_owner_fields(conn: Any) -> None:
@@ -422,6 +430,22 @@ def _migrate_attention_items(conn: Any) -> None:
     )
 
 
+def _migrate_agent_space_start_command(conn: Any) -> None:
+    space_cols = _table_columns(conn, "agent_spaces")
+    if not space_cols:
+        return
+    if "companion_id" not in space_cols:
+        conn.execute(text("ALTER TABLE agent_spaces ADD COLUMN companion_id INTEGER"))
+        space_cols.append("companion_id")
+    if "start_agent_command" not in space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE agent_spaces ADD COLUMN start_agent_command "
+                "VARCHAR(2000) NOT NULL DEFAULT ''"
+            )
+        )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -430,4 +454,5 @@ STARTUP_MIGRATIONS = [
         _migrate_remote_terminal_task_public_id_nullable,
     ),
     (ATTENTION_ITEMS_MIGRATION_ID, _migrate_attention_items),
+    (AGENT_SPACE_START_COMMAND_MIGRATION_ID, _migrate_agent_space_start_command),
 ]

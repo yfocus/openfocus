@@ -250,6 +250,9 @@ def create_router(
                     "task_public_id": space.task_public_id,
                     "companion_id": getattr(space, "companion_id", None),
                     "root_path": space.root_path,
+                    "start_agent_command": str(
+                        getattr(space, "start_agent_command", "") or ""
+                    ),
                 },
             }
 
@@ -258,6 +261,7 @@ def create_router(
         root_path = str((payload.root_path or "").strip())
         if not root_path:
             raise HTTPException(status_code=400, detail="root_path is required")
+        start_agent_command = str((payload.start_agent_command or "").strip())
 
         with session_scope() as s:
             task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
@@ -282,6 +286,7 @@ def create_router(
                 existing.companion_id = int(payload.companion_id)
                 existing.root_path = root_path
                 existing.agent_type = "trae-cli"  # 统一落库为 trae-cli
+                existing.start_agent_command = start_agent_command
                 s.add(existing)
                 s.flush()
                 space = existing
@@ -291,11 +296,38 @@ def create_router(
                     companion_id=int(payload.companion_id),
                     root_path=root_path,
                     agent_type="trae-cli",
+                    start_agent_command=start_agent_command,
                 )
                 s.add(space)
                 s.flush()
 
         return {"ok": True, "space_id": space.id}
+
+    @router.get("/api/agent_spaces/{space_id}/start_agent_command")
+    def get_start_agent_command(space_id: int) -> dict:
+        sp, _ = _load_space_and_optional_companion(space_id)
+        return {
+            "ok": True,
+            "start_agent_command": str(getattr(sp, "start_agent_command", "") or ""),
+        }
+
+    @router.put("/api/agent_spaces/{space_id}/start_agent_command")
+    def update_start_agent_command(space_id: int, payload: dict) -> dict:
+        raw = ""
+        if isinstance(payload, dict):
+            raw = str(
+                payload.get("start_agent_command") or payload.get("command") or ""
+            )
+        command = raw.strip()
+        if len(command) > 2000:
+            raise HTTPException(status_code=400, detail="command is too long (<=2000)")
+        with session_scope() as s:
+            sp = s.get(AgentSpace, int(space_id))
+            if sp is None:
+                raise HTTPException(status_code=404, detail="AgentSpace not found")
+            sp.start_agent_command = command
+            s.add(sp)
+        return {"ok": True, "start_agent_command": command}
 
     @router.delete("/api/tasks/{task_public_id}/agent_space")
     async def delete_agent_space(task_public_id: str) -> dict:

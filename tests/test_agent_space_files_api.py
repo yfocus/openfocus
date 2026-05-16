@@ -124,7 +124,11 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 # create agent space bound to companion
                 r = await client.post(
                     f"/api/tasks/{task_pid}/agent_space",
-                    json={"companion_id": cid, "root_path": str(tmp_path / "ws")},
+                    json={
+                        "companion_id": cid,
+                        "root_path": str(tmp_path / "ws"),
+                        "start_agent_command": "coco -y",
+                    },
                 )
                 assert r.status_code == 200
 
@@ -132,6 +136,21 @@ def test_companion_grpc_connect_pair_choose_directory_and_create_agent_space(tmp
                 assert r.status_code == 200
                 space = r.json()["space"]
                 assert space["companion_id"] == cid
+                assert space["start_agent_command"] == "coco -y"
+
+                space_id = int(space["id"])
+                r = await client.put(
+                    f"/api/agent_spaces/{space_id}/start_agent_command",
+                    json={"start_agent_command": "trae-cli --yes"},
+                )
+                assert r.status_code == 200
+                assert r.json()["start_agent_command"] == "trae-cli --yes"
+
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/start_agent_command"
+                )
+                assert r.status_code == 200
+                assert r.json()["start_agent_command"] == "trae-cli --yes"
         finally:
             stop.set()
             await asyncio.wait_for(comp_task, timeout=5.0)

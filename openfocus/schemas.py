@@ -44,3 +44,6 @@ class AgentSpaceCreateIn(BaseModel):
     root_path: str = Field(
         min_length=1, max_length=4000, description="本地工作目录（绝对路径）"
     )
+    start_agent_command: str = Field(
+        default="", max_length=2000, description="Prompt Zone 的 Start Agent 启动命令"
+    )

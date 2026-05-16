@@ -27,6 +27,7 @@ type AgentSpaceConfig = {
   taskPublicId: string;
   rootPath: string;
   agentPrefix?: string;
+  startAgentCommand?: string;
 };
 
 type PreviewState = {
@@ -466,13 +467,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         spaceId: config.spaceId,
         taskPublicId: config.taskPublicId,
         agentPrefix: config.agentPrefix,
+        startAgentCommand: config.startAgentCommand || '',
       });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);
       window.alert(`Terminal initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [config.spaceId, config.taskPublicId]);
+  }, [config.agentPrefix, config.spaceId, config.startAgentCommand, config.taskPublicId]);
 
   useEffect(() => {
     const copyButton = document.getElementById('space-copy-task');

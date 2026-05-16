@@ -43,6 +43,8 @@
     const apiBase = String(opts && opts.apiBase ? opts.apiBase : `/api/agent_spaces/${spaceId}/terminals`).replace(/\/+$/, '');
     const mode = String(opts && opts.mode ? opts.mode : 'agent_space');
     const isInspiration = mode === 'inspiration';
+    const commandApi = String(opts && opts.commandApi ? opts.commandApi : `/api/agent_spaces/${spaceId}/start_agent_command`).replace(/\/+$/, '');
+    let startAgentCommand = String(opts && opts.startAgentCommand ? opts.startAgentCommand : '').trim();
     const goalResources = Array.isArray(opts && opts.goalResources)
       ? opts.goalResources.map((r)=> ({ id: Number(r && r.id ? r.id : 0), title: String(r && r.title ? r.title : '') })).filter((r)=> r.id && r.title)
       : [];
@@ -119,7 +121,7 @@
           <div class="rt-side-title">Prompt Zone</div>
           ${isInspiration ? '' : '<label class="rt-agent-switch" title="Enable Agent Mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">Agent Mode</span></label>'}
           <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button>'}
+          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="Run the configured agent command in a new terminal and turn on Agent Mode.">Start Agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="Edit Start Agent command" aria-label="Edit Start Agent command">✏</button></div>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
       </div>
@@ -134,6 +136,8 @@
     const mouseText = $('#rt-mouse-text', rootEl);
     const btnLessons = $('#rt-lessons', rootEl);
     const btnCustom = $('#rt-custom', rootEl);
+    const btnStartAgent = $('#rt-start-agent', rootEl);
+    const btnStartAgentEdit = $('#rt-start-agent-edit', rootEl);
     const btnDraftSummary = $('#rt-draft-summary', rootEl);
     const btnCreateGoal = $('#rt-create-goal', rootEl);
     const createGoalModal = $('#rt-create-goal-modal', rootEl);
@@ -149,6 +153,16 @@
     function setStatus(s){ if(statusEl) statusEl.textContent = String(s||'—'); }
 
     function activeTerminal(){ return terminals.get(activeId) || null; }
+
+    function startAgentCommandLabel(){
+      const cmd = String(startAgentCommand || '').trim();
+      return cmd ? `Start Agent: ${cmd}` : 'Set Start Agent command';
+    }
+
+    function applyStartAgentUi(){
+      if(btnStartAgent) btnStartAgent.title = startAgentCommandLabel();
+      if(btnStartAgentEdit) btnStartAgentEdit.title = startAgentCommandLabel();
+    }
 
     function applyAgentUi(){
       const it = activeTerminal();
@@ -193,6 +207,29 @@
       await injectInputBytes(it, enc.encode(payload));
       if(opts2.focus !== false) focusActive();
       return true;
+    }
+
+    async function saveStartAgentCommand(command){
+      const next = String(command || '').trim();
+      if(next.length > 2000) throw new Error('command is too long (<=2000)');
+      const data = await fetchJson(commandApi, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start_agent_command: next }),
+      });
+      startAgentCommand = String(data && typeof data.start_agent_command !== 'undefined' ? data.start_agent_command : next).trim();
+      applyStartAgentUi();
+      try{ localStorage.setItem('openfocus:last_start_agent_command', startAgentCommand); }catch(_){ }
+      return startAgentCommand;
+    }
+
+    async function editStartAgentCommand(){
+      const cur = String(startAgentCommand || '').trim();
+      const next = prompt('Start Agent command', cur || 'coco -y');
+      if(next === null) return '';
+      const saved = await saveStartAgentCommand(next);
+      toast(saved ? 'Start Agent command saved' : 'Start Agent command cleared');
+      return saved;
     }
 
     function pasteToActive(text){
@@ -297,6 +334,28 @@
         applyMouseUi();
         syncTtydAgentMode(it);
       }
+    }
+
+    function enableAgentModeForTerminal(it){
+      if(isInspiration || !it) return;
+      it.__agent_mode = true;
+      saveAgentMode(it.terminalId, true);
+      applyAgentUi();
+      syncTtydAgentMode(it);
+    }
+
+    async function startAgent(){
+      if(isInspiration) return;
+      let cmd = String(startAgentCommand || '').trim();
+      if(!cmd){
+        cmd = await editStartAgentCommand();
+        if(!cmd) return;
+      }
+      const it = await createNew();
+      if(!it){ toast('terminal unavailable'); return; }
+      enableAgentModeForTerminal(it);
+      await injectPromptToTerminal(it, cmd, { bracketedPaste: false, submit: true, focus: true });
+      toast('Agent started');
     }
 
     function isNameTaken(name, exceptTid){
@@ -430,9 +489,11 @@
         if(!it) throw new Error('ttyd embed_url missing');
         activate(tid);
         setStatus('ready');
+        return it;
       }catch(e){
         setStatus('start failed');
         alert('创建终端失败：' + String(e && e.message ? e.message : e));
+        return null;
       }
     }
 
@@ -506,6 +567,12 @@
     });
     btnLessons?.addEventListener('click', ()=> pasteToActive(buildPasteText('lessons')));
     btnCustom?.addEventListener('click', ()=> pasteToActive(buildPasteText('custom')));
+    btnStartAgent?.addEventListener('click', ()=> {
+      void startAgent().catch((err)=> toast(String(err && err.message ? err.message : err || 'start failed')));
+    });
+    btnStartAgentEdit?.addEventListener('click', ()=> {
+      void editStartAgentCommand().catch((err)=> toast(String(err && err.message ? err.message : err || 'save failed')));
+    });
     btnDraftSummary?.addEventListener('click', ()=> {
       void injectPromptToTerminal(activeTerminal(), buildPasteText('draft_summary'), { bracketedPaste: false, submit: false, focus: true })
         .then((ok)=>{ if(ok) toast('Summary prompt sent'); })
@@ -544,6 +611,7 @@
     initialLoadPromise = loadExisting();
     applyAgentUi();
     applyMouseUi();
+    applyStartAgentUi();
     return api;
   }
 

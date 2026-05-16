@@ -886,6 +886,14 @@
         <input type="text" id="agent-space-root" placeholder="/Users/..." style="width:100%;" />
       </div>
 
+      <div class="dlg-field">
+        <div class="dlg-label">
+          <label for="agent-space-start-command">Start Agent command</label>
+        </div>
+        <input type="text" id="agent-space-start-command" placeholder="coco -y" value="{{ (last_start_agent_command or '')|e }}" style="width:100%;" />
+        <div class="muted" style="margin-top: 6px; font-size: 12px;">Optional. Leave empty and fill it later from Prompt Zone.</div>
+      </div>
+
       <div class="dlg-footer">
         <span></span>
         <button type="button" id="agent-space-create" class="btn-primary">Save</button>
@@ -1916,6 +1924,8 @@
     // AgentSpace dialog wiring
     const AGENT_SPACE_STATE = { taskPid: '', companionId: '' };
     const AGENT_SPACE_LAST_COMPANION_KEY = 'openfocus:last_companion_id';
+    const AGENT_SPACE_LAST_START_COMMAND_KEY = 'openfocus:last_start_agent_command';
+    const AGENT_SPACE_SERVER_LAST_START_COMMAND = {{ (last_start_agent_command or '')|tojson }};
     function _openAgentSpaceDialog(taskPid){
       const pid = String(taskPid || '').trim();
       if(!pid){ toast('Missing taskId'); return; }
@@ -1927,6 +1937,11 @@
       if(err) err.textContent = '';
       const root = document.getElementById('agent-space-root');
       if(root) root.value = '';
+      const commandInput = document.getElementById('agent-space-start-command');
+      if(commandInput){
+        const localLast = String(localStorage.getItem(AGENT_SPACE_LAST_START_COMMAND_KEY) || '').trim();
+        commandInput.value = localLast || String(AGENT_SPACE_SERVER_LAST_START_COMMAND || '').trim();
+      }
       AGENT_SPACE_STATE.companionId = '';
       refreshCompanionsForAgentSpace();
       try{ dlg?.showModal(); }catch(_){ }
@@ -2020,6 +2035,7 @@
     async function _createAgentSpace(){
       const pid = String(AGENT_SPACE_STATE.taskPid || '').trim();
       const root = String(document.getElementById('agent-space-root')?.value || '').trim();
+      const startAgentCommand = String(document.getElementById('agent-space-start-command')?.value || '').trim();
       const cid = String(document.getElementById('agent-space-companion')?.value || AGENT_SPACE_STATE.companionId || '').trim();
       const err = document.getElementById('agent-space-err');
       const hint = document.getElementById('agent-space-hint');
@@ -2032,12 +2048,13 @@
         const r = await fetch('/api/tasks/' + encodeURIComponent(pid) + '/agent_space', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ companion_id: Number(cid), root_path: root })
+          body: JSON.stringify({ companion_id: Number(cid), root_path: root, start_agent_command: startAgentCommand })
         });
         if(!r.ok){
           const txt = await r.text().catch(()=> '');
           throw new Error(txt || ('HTTP ' + r.status));
         }
+        if(startAgentCommand) localStorage.setItem(AGENT_SPACE_LAST_START_COMMAND_KEY, startAgentCommand);
         // 创建成功后跳转到 AgentSpace 页面
         location.href = '/tasks/' + encodeURIComponent(pid) + '/agent_space';
       }catch(e){

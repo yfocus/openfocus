@@ -112,6 +112,42 @@
   padding:8px 10px;
 }
 
+.rt-start-agent-row{
+  margin-top:auto;
+  display:flex;
+  align-items:stretch;
+  gap:6px;
+  width:100%;
+}
+
+.rt-start-agent-row .rt-start-agent-btn{
+  flex:1 1 auto;
+  min-width:0;
+  padding:8px 4px;
+  font-size:11px;
+  line-height:1;
+  white-space:nowrap;
+}
+
+.rt-start-agent-row .rt-start-agent-edit{
+  flex:0 0 32px;
+  width:32px;
+  padding:7px 0;
+  border-color:color-mix(in srgb, var(--primary) 78%, var(--border));
+  background:color-mix(in srgb, var(--primary) 18%, transparent);
+  color:var(--primary);
+  font-size:15px;
+  font-weight:800;
+  line-height:1;
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--primary) 16%, transparent) inset;
+}
+
+.rt-start-agent-row .rt-start-agent-edit:hover{
+  border-color:var(--primary);
+  background:color-mix(in srgb, var(--primary) 28%, transparent);
+  color:var(--primary);
+}
+
 .rt-goal-picker{
   display:flex;
   flex-direction:column;
