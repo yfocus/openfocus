@@ -37,6 +37,10 @@
     return String(s||'').trim();
   }
 
+  // Inspired by the PUA Proactivity Engine skill:
+  // https://mcpmarket.com/tools/skills/pua-proactivity-engine
+  const PUA_PROACTIVITY_PROMPT = 'You are a P8-level senior engineer and the final owner of this task: be proactive, drive the work end-to-end, do not stop at superficial fixes or unverified guesses, do not ask the user to intervene until you have exhausted available investigation paths, inspect source code and dependencies, consult official documentation when needed, identify and verify the root cause, escalate your reasoning when repeated attempts fail, try alternative paths, and validate every fix with appropriate tests, builds, runtime checks, or API/curl verification before reporting completion.';
+
   function mount(rootEl, opts){
     const spaceId = Number(opts && opts.spaceId ? opts.spaceId : 0);
     const taskPublicId = String(opts && opts.taskPublicId ? opts.taskPublicId : '').trim();
@@ -101,6 +105,7 @@
       const k = String(kind || 'context');
       if(k === 'draft_summary') return `[OpenFocus Summary Request] ${String(opts && opts.draftSummaryPrompt ? opts.draftSummaryPrompt : '')}`;
       if(k === 'lessons') return `[OpenFocus Lessons]\n${prefix}`;
+      if(k === 'pua') return PUA_PROACTIVITY_PROMPT;
       if(k === 'custom') return `[OpenFocus Context]\n${prefix}`;
       return prefix;
     }
@@ -121,7 +126,7 @@
           <div class="rt-side-title">Prompt Zone</div>
           ${isInspiration ? '' : '<label class="rt-agent-switch" title="Enable Agent Mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">Agent Mode</span></label>'}
           <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="Run the configured agent command in a new terminal and turn on Agent Mode.">Start Agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="Edit Start Agent command" aria-label="Edit Start Agent command">✏</button></div>'}
+          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-pua" title="Inject a proactivity escalation prompt into the active terminal.">PUA</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="Run the configured agent command in a new terminal and turn on Agent Mode.">Start Agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="Edit Start Agent command" aria-label="Edit Start Agent command">✏</button></div>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
       </div>
@@ -135,6 +140,7 @@
     const mouseSwitch = $('#rt-mouse-switch', rootEl);
     const mouseText = $('#rt-mouse-text', rootEl);
     const btnLessons = $('#rt-lessons', rootEl);
+    const btnPua = $('#rt-pua', rootEl);
     const btnCustom = $('#rt-custom', rootEl);
     const btnStartAgent = $('#rt-start-agent', rootEl);
     const btnStartAgentEdit = $('#rt-start-agent-edit', rootEl);
@@ -235,8 +241,15 @@
     function pasteToActive(text){
       const s = String(text || '');
       if(!s) return;
-      void injectPromptToTerminal(activeTerminal(), s, { bracketedPaste: true, focus: true }).catch(()=>{
-        try{ navigator.clipboard.writeText(s); toast('注入失败，已复制'); }catch(_){ }
+      void injectPromptToTerminal(activeTerminal(), s, { bracketedPaste: true, focus: true }).catch((err)=>{
+        try{ console.warn('OpenFocus prompt injection failed:', err); }catch(_){ }
+        try{
+          void navigator.clipboard.writeText(s)
+            .then(()=> toast('Auto-injection failed. Prompt copied to clipboard; paste it into the terminal manually.'))
+            .catch(()=> toast('Auto-injection failed, and copying to clipboard also failed. Please refresh and try again.'));
+        }catch(_){
+          toast('Auto-injection failed, and copying to clipboard also failed. Please refresh and try again.');
+        }
       });
     }
 
@@ -566,6 +579,7 @@
         .finally(()=> focusActive());
     });
     btnLessons?.addEventListener('click', ()=> pasteToActive(buildPasteText('lessons')));
+    btnPua?.addEventListener('click', ()=> pasteToActive(buildPasteText('pua')));
     btnCustom?.addEventListener('click', ()=> pasteToActive(buildPasteText('custom')));
     btnStartAgent?.addEventListener('click', ()=> {
       void startAgent().catch((err)=> toast(String(err && err.message ? err.message : err || 'start failed')));
