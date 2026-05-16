@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -25,6 +26,34 @@ from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
 
 LOG = logging.getLogger("openfocus.companion")
+
+_CONNECT_BACKOFF_INITIAL_SECONDS = 0.2
+_CONNECT_BACKOFF_MAX_SECONDS = 5.0
+_CONNECT_STABLE_RESET_SECONDS = 30.0
+_CONNECT_LOG_LIMIT_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class _ConnectOnceResult:
+    connected: bool
+    stable: bool
+    reason: str = ""
+    detail: str = ""
+
+
+class _LogRateLimiter:
+    def __init__(self, *, interval_seconds: float) -> None:
+        self.interval_seconds = max(0.0, float(interval_seconds or 0.0))
+        self._last_by_key: dict[str, dt.datetime] = {}
+
+    def should_log(self, key: str, *, now: dt.datetime | None = None) -> bool:
+        k = str(key or "default")
+        t = now or _utcnow()
+        last = self._last_by_key.get(k)
+        if last is None or (t - last).total_seconds() >= self.interval_seconds:
+            self._last_by_key[k] = t
+            return True
+        return False
 
 
 def _setup_logging() -> None:
@@ -1133,6 +1162,23 @@ def _read_raw(
     return str(rel_path or ""), raw, mime
 
 
+async def _sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
+    wait_s = max(0.0, float(seconds or 0.0))
+    if wait_s <= 0 or stop_event.is_set():
+        return
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=wait_s)
+    except TimeoutError:
+        return
+
+
+def _connect_log_key(result: _ConnectOnceResult) -> str:
+    detail = (result.detail or "").strip()
+    if len(detail) > 160:
+        detail = detail[:160]
+    return f"{result.reason}:{detail}:{result.connected}:{result.stable}"
+
+
 async def run_companion(
     *, grpc_addr: str | None = None, stop_event: asyncio.Event | None = None
 ) -> None:
@@ -1148,34 +1194,72 @@ async def run_companion(
         raise RuntimeError("OPENFOCUS_SERVER_GRPC_ADDR is empty")
 
     stop_event = stop_event or asyncio.Event()
-    backoff = 0.2
+    backoff = _CONNECT_BACKOFF_INITIAL_SECONDS
+    log_limiter = _LogRateLimiter(interval_seconds=_CONNECT_LOG_LIMIT_SECONDS)
 
     while not stop_event.is_set():
         try:
-            LOG.info(
-                "连接 OpenFocus gRPC：addr=%s device_id=%s companion_id=%s",
-                addr,
-                RUNTIME.device_id,
-                int(getattr(RUNTIME, "server_companion_id", 0) or 0) or "—",
-            )
-            await _connect_once(addr, stop_event)
-            backoff = 0.2
+            if log_limiter.should_log("connect-attempt"):
+                LOG.info(
+                    "连接 OpenFocus gRPC：addr=%s device_id=%s companion_id=%s",
+                    addr,
+                    RUNTIME.device_id,
+                    int(getattr(RUNTIME, "server_companion_id", 0) or 0) or "—",
+                )
+
+            result = await _connect_once(addr, stop_event)
+            if stop_event.is_set():
+                return
+
+            if result.stable:
+                # 已经稳定在线一段时间，下一次断线后从较小延迟开始恢复。
+                backoff = _CONNECT_BACKOFF_INITIAL_SECONDS
+
+            retry_in = backoff
+            if log_limiter.should_log(_connect_log_key(result)):
+                LOG.warning(
+                    "OpenFocus gRPC 连接结束，将重试：reason=%s connected=%s stable=%s detail=%s retry_in=%.1fs",
+                    result.reason or "unknown",
+                    bool(result.connected),
+                    bool(result.stable),
+                    result.detail or "",
+                    retry_in,
+                )
+            await _sleep_or_stop(stop_event, retry_in)
+            backoff = min(backoff * 2, _CONNECT_BACKOFF_MAX_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            retry_in = backoff
             try:
-                LOG.exception("连接异常，将重试：%s", e)
+                if log_limiter.should_log(
+                    f"exception:{type(e).__name__}:{str(e)[:160]}"
+                ):
+                    LOG.exception("连接异常，将重试：%s retry_in=%.1fs", e, retry_in)
             except Exception:
                 pass
             # 断线/失败：指数退避重连
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 5.0)
+            await _sleep_or_stop(stop_event, retry_in)
+            backoff = min(backoff * 2, _CONNECT_BACKOFF_MAX_SECONDS)
 
 
-async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
+async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceResult:
     out_q: asyncio.Queue[pb2.ClientToServer] = asyncio.Queue()
     agent_mgr = _AgentManager()
     term_mgr = _TerminalManager()
+    connected = False
+    connected_at: float | None = None
+
+    def _result(*, reason: str, detail: str = "") -> _ConnectOnceResult:
+        stable = False
+        if connected and connected_at is not None:
+            stable = (
+                asyncio.get_running_loop().time() - connected_at
+                >= _CONNECT_STABLE_RESET_SECONDS
+            )
+        return _ConnectOnceResult(
+            connected=connected, stable=stable, reason=reason, detail=detail
+        )
 
     hello = pb2.Hello(
         device_id=RUNTIME.device_id,
@@ -1186,7 +1270,7 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
     )
     await out_q.put(pb2.ClientToServer(hello=hello))
     try:
-        LOG.info(
+        LOG.debug(
             "发送 hello：name=%s capabilities=%s has_token=%s",
             RUNTIME.name,
             ",".join(_capabilities()),
@@ -1231,6 +1315,8 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
             async for msg in call:
                 which = msg.WhichOneof("msg")
                 if which == "welcome":
+                    connected = True
+                    connected_at = asyncio.get_running_loop().time()
                     cid = int(msg.welcome.companion_id or 0)
                     if cid > 0 and cid != RUNTIME.server_companion_id:
                         RUNTIME.server_companion_id = cid
@@ -1595,21 +1681,16 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
                         )
                     await out_q.put(pb2.ClientToServer(terminal_mouse_mode_resp=resp))
                     continue
+            return _result(reason="stream_completed")
         except grpc.aio.AioRpcError as e:
             # 连接断开/服务端关闭
-            try:
-                LOG.warning(
-                    "gRPC 连接断开：code=%s detail=%s",
-                    getattr(e, "code", lambda: None)(),
-                    getattr(e, "details", lambda: "")(),
-                )
-            except Exception:
-                pass
-            return
+            code = getattr(e, "code", lambda: None)()
+            detail = getattr(e, "details", lambda: "")()
+            return _result(reason=str(code or "grpc_error"), detail=str(detail or ""))
         except asyncio.CancelledError:
             # stop_event 触发的 call.cancel() 会导致本地 CANCELLED，这里视为正常退出。
             if stop_event.is_set():
-                return
+                return _result(reason="stopped")
             raise
         except Exception as e:
             try:
@@ -1619,6 +1700,8 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> None:
             raise
         finally:
             cancel_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await cancel_task
 
 
 def _print_banner() -> None:
