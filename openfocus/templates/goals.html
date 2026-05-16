@@ -70,13 +70,15 @@
       #dashboard .detail-wrap{ position: relative; height: 100%; min-height: 0; display:flex; flex-direction:column; overflow:hidden; }
       #dashboard .detail-head{ display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
       #dashboard .detail-title-box{ flex: 1 1 auto; min-width: 0; }
-      #dashboard .detail-actions{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
+      #dashboard .detail-actions{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:flex-start; }
       #dashboard .detail-actions{ flex: 0 0 auto; }
-      #dashboard .detail-actions > form{ display:inline-flex; align-items:center; margin:0; }
-      #dashboard .detail-actions > button,
-      #dashboard .detail-actions > a,
-      #dashboard .detail-actions form > button{ display:inline-flex; align-items:center; }
+      #dashboard .detail-actions [hidden]{ display:none !important; }
       #dashboard .detail-actions .btn-danger{ padding: 8px 12px; }
+      #dashboard .detail-actions-cluster{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
+      #dashboard .detail-actions-cluster > form{ display:inline-flex; align-items:center; margin:0; }
+      #dashboard .detail-actions-cluster > button,
+      #dashboard .detail-actions-cluster > a,
+      #dashboard .detail-actions-cluster form > button{ display:inline-flex; align-items:center; margin:0; }
       #dashboard .detail-meta{ margin-top: 8px; display:flex; gap: 8px; flex-wrap:wrap; color: var(--muted-foreground); font-size: 12px; }
       #dashboard .detail-meta span,
       #dashboard .detail-meta a{ display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:3px 8px; background:var(--muted-surface); }
@@ -118,7 +120,53 @@
       #dashboard .detail-inline-view[hidden]{ display:none !important; }
       #dashboard .detail-inline-form textarea,
       #dashboard .detail-inline-form input{ width:100%; }
+      #dashboard .detail-inline-form textarea,
+      #dashboard .detail-inline-form input[type="date"]{ width:100%; box-sizing:border-box; }
       #dashboard .detail-inline-label{ color: var(--muted-foreground); font-size: 12px; }
+      #dashboard .detail-inline-row{ display:grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+      #dashboard .detail-actions-cluster .action-link,
+      #dashboard .detail-actions-cluster .detail-action-save{
+        padding:0 !important;
+        border:0 !important;
+        border-radius:0 !important;
+        background:transparent !important;
+        min-height:auto;
+        font-family: inherit;
+        font-size:12px;
+        font-weight:500;
+        line-height:1;
+        text-decoration:none;
+        box-shadow:none;
+        appearance:none;
+        -webkit-appearance:none;
+      }
+      #dashboard .detail-actions-cluster .action-link{ color: var(--muted-foreground); }
+      #dashboard .detail-actions-cluster .action-link:hover,
+      #dashboard .detail-actions-cluster .detail-action-save:hover{ text-decoration:underline; background:transparent !important; }
+      #dashboard .detail-actions-cluster .action-link:hover{ color: var(--foreground); }
+      #dashboard .detail-actions-cluster .action-link:focus-visible,
+      #dashboard .detail-actions-cluster .detail-action-save:focus-visible{ outline:none; box-shadow:none; text-decoration:underline; }
+      #dashboard .detail-action-save{ color: var(--foreground); }
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-goal-actions-default],
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-task-actions-default]{ display:none !important; }
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-goal-actions-edit],
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-task-actions-edit]{ display:flex !important; }
+      #dashboard .detail-wrap[data-inline-editing="0"] [data-goal-actions-edit],
+      #dashboard .detail-wrap[data-inline-editing="0"] [data-task-actions-edit]{ display:none !important; }
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-goal-basic-view],
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-task-basic-view]{ display:none !important; }
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-inline-goal-form],
+      #dashboard .detail-wrap[data-inline-editing="1"] [data-inline-task-form]{ display:flex !important; }
+      #dashboard .detail-wrap[data-detail-kind="goal"] .detail-sec[data-sec="basic"] .sec-body,
+      #dashboard .detail-wrap[data-detail-kind="task"] .detail-sec[data-sec="basic"] .sec-body{ display:flex; flex-direction:column; }
+      #dashboard .detail-wrap[data-detail-kind="goal"][data-inline-editing="1"] .detail-sec[data-sec="basic"] .sec-body,
+      #dashboard .detail-wrap[data-detail-kind="task"][data-inline-editing="1"] .detail-sec[data-sec="basic"] .sec-body{ overflow:hidden; }
+      #dashboard .detail-wrap[data-detail-kind="goal"] [data-inline-goal-form],
+      #dashboard .detail-wrap[data-detail-kind="task"] [data-inline-task-form]{ flex:1 1 auto; min-height:0; }
+      #dashboard .detail-inline-field{ display:flex; flex-direction:column; gap: 6px; min-height:0; }
+      #dashboard .detail-inline-field[data-inline-grow="1"]{ flex:1 1 auto; }
+      #dashboard .detail-wrap[data-detail-kind="goal"] [data-inline-goal-content]{ flex:1 1 auto; min-height:240px; }
+      #dashboard .detail-wrap[data-detail-kind="task"] [data-inline-task-content]{ flex:1 1 auto; min-height:320px; }
 
       /* Goal tasks table */
       #dashboard table.wb-table{ width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -353,7 +401,7 @@
 
             <!-- Detail templates (for center pane) -->
             <template id="detail-goal-{{ g.id }}">
-              <div class="pad detail-wrap" data-detail-root>
+              <div class="pad detail-wrap" data-detail-root data-detail-kind="goal" data-inline-editing="0">
                 <div class="detail-head">
                   <div class="detail-title-box">
                     <div class="wb-title" title="{{ g.title }}" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if g.status == 'done' else 'rgba(255,209,102,0.92)' }};">{{ g.title }}</div>
@@ -367,29 +415,34 @@
                     </div>
                   </div>
                   <div class="detail-actions">
-                    {% if g.status != 'done' %}
-                      <button type="button" class="btn-ghost action-link js-open-new-task" data-goal="{{ g.id }}">New Task</button>
-                    {% endif %}
-                    {% if g.status == 'done' %}
-                      <form method="post" action="/goals/{{ g.id }}/reopen" style="margin:0;" class="js-action" data-action="goal_reopen" data-goal="{{ g.id }}">
-                        <button type="submit" class="btn-ghost action-link">Reopen</button>
+                    <div class="detail-actions-cluster" data-goal-actions-default>
+                      {% if g.status != 'done' %}
+                        <button type="button" class="btn-ghost action-link js-open-new-task" data-goal="{{ g.id }}">New Task</button>
+                      {% endif %}
+                      {% if g.status == 'done' %}
+                        <form method="post" action="/goals/{{ g.id }}/reopen" style="margin:0;" class="js-action" data-action="goal_reopen" data-goal="{{ g.id }}">
+                          <button type="submit" class="btn-ghost action-link">Reopen</button>
+                        </form>
+                      {% else %}
+                        <form method="post" action="/goals/{{ g.id }}/done" style="margin:0;" class="js-action" data-action="goal_done" data-goal="{{ g.id }}">
+                          <button type="submit" class="btn-ghost action-link">Finish</button>
+                        </form>
+                      {% endif %}
+                      {% if g.status != 'done' %}
+                        <button type="button" class="btn-ghost action-link js-inline-goal-edit"
+                          data-goal="{{ g.id }}"
+                          data-title="{{ g.title }}"
+                          data-content="{{ g.content }}"
+                          data-due="{{ g.due_date }}"
+                        >Edit</button>
+                      {% endif %}
+                      <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('Delete this goal?')">
+                        <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
                       </form>
-                    {% else %}
-                      <form method="post" action="/goals/{{ g.id }}/done" style="margin:0;" class="js-action" data-action="goal_done" data-goal="{{ g.id }}">
-                        <button type="submit" class="btn-ghost action-link">Finish</button>
-                      </form>
-                    {% endif %}
-                    {% if g.status != 'done' %}
-                      <button type="button" class="btn-ghost action-link js-open-goal-edit"
-                        data-goal="{{ g.id }}"
-                        data-title="{{ g.title }}"
-                        data-content="{{ g.content }}"
-                        data-due="{{ g.due_date }}"
-                      >Edit</button>
-                    {% endif %}
-                    <form method="post" action="/goals/{{ g.id }}/delete" style="margin:0;" onsubmit="return confirm('Delete this goal?')">
-                      <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
-                    </form>
+                    </div>
+                    <div class="detail-actions-cluster" data-goal-actions-edit hidden>
+                      <button type="submit" class="detail-action-save" form="inline-goal-edit-form-{{ g.id }}">Save</button>
+                    </div>
                   </div>
                 </div>
 
@@ -397,7 +450,28 @@
                   <div class="detail-main">
                     <div class="detail-sec" data-sec="basic">
                       <div class="sec-title">Basic</div>
-                      <div class="sec-body" style="white-space: pre-wrap;">{{ g.content or '—' }}</div>
+                      <div class="sec-body">
+                        <div class="detail-inline-view" data-goal-basic-view style="white-space: pre-wrap;">{{ g.content or '—' }}</div>
+                        <form method="post" action="/goals/{{ g.id }}/edit" id="inline-goal-edit-form-{{ g.id }}" class="detail-inline-form" data-inline-goal-form hidden>
+                          <div class="detail-inline-field">
+                            <label class="detail-inline-label" for="inline-goal-title-{{ g.id }}">Title</label>
+                            <textarea id="inline-goal-title-{{ g.id }}" name="title" rows="3" required maxlength="2000" data-inline-goal-title>{{ g.title }}</textarea>
+                          </div>
+                          <div class="detail-inline-field" data-inline-grow="1">
+                            <label class="detail-inline-label" for="inline-goal-content-{{ g.id }}">Content</label>
+                            <textarea id="inline-goal-content-{{ g.id }}" name="content" rows="8" required maxlength="4000" data-inline-goal-content>{{ g.content }}</textarea>
+                          </div>
+                          <div class="detail-inline-row">
+                            <div class="detail-inline-field">
+                              <label class="detail-inline-label" for="inline-goal-due-{{ g.id }}">DDL</label>
+                              <input id="inline-goal-due-{{ g.id }}" type="date" name="due_date" required value="{{ g.due_date }}" data-inline-goal-due />
+                            </div>
+                          </div>
+                          <input type="hidden" name="status" value="active" />
+                          <input type="hidden" name="priority" value="normal" />
+                          <input type="hidden" name="importance" value="normal" />
+                        </form>
+                      </div>
                     </div>
 
                     <div class="detail-sec" data-sec="tasks">
@@ -499,7 +573,7 @@
               {% set ui = m.get('ui_status','todo') %}
               {% set task_status = 'Done' if ui == 'done' else ('In progress' if ui == 'in_progress' else 'Not started') %}
               <template id="detail-task-{{ t.public_id }}">
-                <div class="pad detail-wrap" data-detail-root data-detail-kind="task">
+                <div class="pad detail-wrap" data-detail-root data-detail-kind="task" data-inline-editing="0">
                   <div class="detail-head">
                     <div class="detail-title-box">
                       <div class="wb-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color: {{ 'rgba(255,255,255,0.55)' if t.status == 'done' else 'rgba(255,255,255,0.92)' }};">{{ t.title }}</div>
@@ -512,7 +586,7 @@
                     </div>
 
                   <div class="detail-actions">
-                    <div data-task-actions-default style="display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center;">
+                    <div class="detail-actions-cluster" data-task-actions-default>
                       <button type="button" class="btn-ghost action-link js-jump-goal" data-goal="{{ g.id }}" data-tab="all">Goal</button>
                       {% if t.status != 'done' %}
                         {% set sp = (agent_spaces_by_task.get(t.public_id) if agent_spaces_by_task else None) %}
@@ -547,8 +621,8 @@
                         <button type="submit" class="btn-ghost action-link action-danger">Delete</button>
                       </form>
                     </div>
-                    <div data-task-actions-edit hidden>
-                      <button type="submit" class="btn-primary" form="inline-task-edit-form-{{ t.id }}">Save</button>
+                    <div class="detail-actions-cluster" data-task-actions-edit hidden>
+                      <button type="submit" class="detail-action-save" form="inline-task-edit-form-{{ t.id }}">Save</button>
                     </div>
                   </div>
                   </div>
@@ -560,11 +634,11 @@
                         <div class="sec-body">
                           <div class="detail-inline-view" data-task-basic-view style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
                           <form method="post" action="/tasks/{{ t.id }}/edit" id="inline-task-edit-form-{{ t.id }}" class="detail-inline-form" data-inline-task-form hidden>
-                            <div>
+                            <div class="detail-inline-field">
                               <label class="detail-inline-label" for="inline-task-title-{{ t.id }}">Title</label>
                               <textarea id="inline-task-title-{{ t.id }}" name="title" rows="2" required maxlength="512" data-inline-task-title>{{ t.title }}</textarea>
                             </div>
-                            <div>
+                            <div class="detail-inline-field" data-inline-task-content-wrap data-inline-grow="1">
                               <label class="detail-inline-label" for="inline-task-content-{{ t.id }}">Content</label>
                               <textarea id="inline-task-content-{{ t.id }}" name="content" rows="10" required maxlength="4000" data-inline-task-content>{{ t.content }}</textarea>
                             </div>
@@ -776,45 +850,6 @@
     </div>
   </dialog>
 
-  <!-- Edit Goal dialog -->
-  <dialog id="edit-goal-dialog" class="panel" style="max-width: 720px; width: calc(100% - 24px);">
-    <form method="dialog" style="margin:0;">
-      <div class="pad" style="padding: 14px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-          <div class="k">Edit Goal</div>
-          <button type="submit" class="btn-ghost">Close</button>
-        </div>
-      </div>
-    </form>
-    <div class="divider"></div>
-    <div class="pad" style="padding: 14px;">
-      <form method="post" action="" id="edit-goal-form">
-        <div style="margin-bottom: 10px;">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap: 10px;">
-            <label class="muted">Title (required)</label>
-          </div>
-          <textarea name="title" rows="3" required maxlength="2000" id="goal-edit-title"></textarea>
-        </div>
-        <div style="margin-bottom: 10px;">
-          <label class="muted">Content (required)</label>
-          <textarea name="content" rows="4" required maxlength="4000" id="goal-edit-content"></textarea>
-        </div>
-        <div class="row">
-          <div>
-            <label class="muted">DDL</label>
-            <input type="date" name="due_date" required id="goal-edit-due" />
-          </div>
-          <div style="display:flex; align-items:end; justify-content:flex-end; gap: 10px;">
-            <button type="submit">Save</button>
-          </div>
-        </div>
-        <input type="hidden" name="status" value="active" id="goal-edit-status" />
-        <input type="hidden" name="priority" value="normal" id="goal-edit-priority" />
-        <input type="hidden" name="importance" value="normal" id="goal-edit-importance" />
-      </form>
-    </div>
-  </dialog>
-
   <!-- AgentSpace dialog (create workspace from task detail) -->
   <dialog id="agent-space-dialog" class="of-dialog" style="max-width: 720px; width: calc(100% - 24px);">
     <form method="dialog" style="margin:0;">
@@ -967,26 +1002,35 @@
       setTimeout(()=>{ try{ t2?.focus(); }catch(_){ } }, 30);
     }
 
-    function _openEditGoalDialog(fromEl){
-      const dlg = document.getElementById('edit-goal-dialog');
-      const form = document.getElementById('edit-goal-form');
-      const gid = String(fromEl?.getAttribute('data-goal') || '').trim();
-      if(!gid){ toast('Missing goalId'); return; }
-      if(form) form.action = '/goals/' + encodeURIComponent(gid) + '/edit';
+    function _setGoalInlineEditMode(root, editing){
+      if(!(root instanceof HTMLElement)) return;
+      const on = !!editing;
+      root.setAttribute('data-inline-editing', on ? '1' : '0');
+      const view = root.querySelector('[data-goal-basic-view]');
+      const form = root.querySelector('[data-inline-goal-form]');
+      const defaultActions = root.querySelector('[data-goal-actions-default]');
+      const editActions = root.querySelector('[data-goal-actions-edit]');
+      if(view instanceof HTMLElement) view.hidden = on;
+      if(form instanceof HTMLElement) form.hidden = !on;
+      if(defaultActions instanceof HTMLElement) defaultActions.hidden = on;
+      if(editActions instanceof HTMLElement) editActions.hidden = !on;
+    }
 
+    function _startInlineGoalEdit(fromEl){
+      const root = fromEl?.closest('[data-detail-root]');
+      if(!(root instanceof HTMLElement)) return;
       const title = String(fromEl?.getAttribute('data-title') || '');
       const content = String(fromEl?.getAttribute('data-content') || '');
       const due = String(fromEl?.getAttribute('data-due') || '');
-
-      const c = document.getElementById('goal-edit-title');
-      const d = document.getElementById('goal-edit-content');
-      const du = document.getElementById('goal-edit-due');
-      if(c) c.value = title;
-      if(d) d.value = content;
-      if(du) du.value = due;
-
-      try{ dlg?.showModal(); }catch(_){ }
-      setTimeout(()=>{ try{ d?.focus(); }catch(_){ } }, 30);
+      const titleEl = root.querySelector('[data-inline-goal-title]');
+      const contentEl = root.querySelector('[data-inline-goal-content]');
+      const dueEl = root.querySelector('[data-inline-goal-due]');
+      if(titleEl instanceof HTMLTextAreaElement) titleEl.value = title;
+      if(contentEl instanceof HTMLTextAreaElement) contentEl.value = content;
+      if(dueEl instanceof HTMLInputElement) dueEl.value = due;
+      activateDetailTab(root, 'basic');
+      _setGoalInlineEditMode(root, true);
+      setTimeout(()=>{ try{ contentEl?.focus(); }catch(_){ } }, 30);
     }
 
     function _setTaskInlineEditMode(root, editing){
@@ -1455,9 +1499,9 @@
         return;
       }
 
-      const openGoalEdit = t.closest('.js-open-goal-edit');
-      if(openGoalEdit){
-        _openEditGoalDialog(openGoalEdit);
+      const inlineGoalEdit = t.closest('.js-inline-goal-edit');
+      if(inlineGoalEdit){
+        _startInlineGoalEdit(inlineGoalEdit);
         return;
       }
 

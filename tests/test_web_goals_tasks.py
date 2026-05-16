@@ -479,6 +479,13 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
             in html
         )
         assert 'class="detail-main"' in html
+        assert 'data-detail-kind="goal"' in html
+        assert 'class="detail-actions-cluster" data-goal-actions-default' in html
+        assert 'class="btn-ghost action-link js-inline-goal-edit"' in html
+        assert "data-goal-actions-edit hidden" in html
+        assert 'id="inline-goal-edit-form-' in html
+        assert "data-inline-goal-form hidden" in html
+        assert 'class="detail-action-save" form="inline-goal-edit-form-' in html
         assert "<th>Action</th>" in html
         assert 'class="btn-ghost action-link task-action js-open-agent-space"' in html
         assert "data-no-row-open" in html
@@ -506,6 +513,7 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         assert 'class="detail-main"' in task_html
         assert 'class="btn-ghost action-link js-jump-goal"' in task_html
         assert 'data-tab="all">Goal</button>' in task_html
+        assert 'class="detail-actions-cluster" data-task-actions-default' in task_html
         assert 'data-tab="detail"' not in task_html
         assert 'data-sec="detail"' not in task_html
         assert "Add text…" not in task_html
@@ -513,7 +521,12 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         assert "data-task-actions-edit hidden" in task_html
         assert 'id="inline-task-edit-form-' in task_html
         assert "data-inline-task-form hidden" in task_html
+        assert 'data-inline-task-content-wrap data-inline-grow="1"' in task_html
+        assert 'class="detail-action-save" form="inline-task-edit-form-' in task_html
 
+        assert "function _setGoalInlineEditMode(root, editing)" in r.text
+        assert "function _startInlineGoalEdit(fromEl)" in r.text
+        assert "_setGoalInlineEditMode(root, true);" in r.text
         assert "activateDetailTab(root, String(defaultTab || 'all'))" in r.text
         assert "root.classList.toggle('detail-mode-all', showAll)" in r.text
         assert (
@@ -544,10 +557,61 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
         )
         assert "#dashboard .detail-sec .sec-body" in r.text
         assert "overflow:auto" in r.text
+        assert (
+            "#dashboard .detail-actions-cluster{ display:flex; gap: 12px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }"
+            in r.text
+        )
+        assert "#dashboard .detail-actions-cluster .action-link," in r.text
+        assert (
+            "#dashboard .detail-actions-cluster .action-link{ color: var(--muted-foreground); }"
+            in r.text
+        )
+        assert "#dashboard .detail-action-save{ color: var(--foreground); }" in r.text
+        assert (
+            '#dashboard .detail-wrap[data-inline-editing="1"] [data-goal-actions-default],'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-inline-editing="1"] [data-task-actions-default]{ display:none !important; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-inline-editing="1"] [data-goal-actions-edit],'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-inline-editing="1"] [data-task-actions-edit]{ display:flex !important; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="goal"] .detail-sec[data-sec="basic"] .sec-body,'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="goal"][data-inline-editing="1"] .detail-sec[data-sec="basic"] .sec-body,'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="goal"] [data-inline-goal-content]{ flex:1 1 auto; min-height:240px; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="task"] .detail-sec[data-sec="basic"] .sec-body{ display:flex; flex-direction:column; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="task"][data-inline-editing="1"] .detail-sec[data-sec="basic"] .sec-body{ overflow:hidden; }'
+            in r.text
+        )
+        assert (
+            '#dashboard .detail-wrap[data-detail-kind="task"] [data-inline-task-content]{ flex:1 1 auto; min-height:320px; }'
+            in r.text
+        )
         assert "initDetailTabs(defaultTab || 'all')" in r.text
         assert "initDetailTabs('all')" in r.text
         assert "const tab = url.searchParams.get('tab');" in r.text
         assert "selectGoal(goal, tab || 'all');" in r.text
+        assert "const inlineGoalEdit = t.closest('.js-inline-goal-edit');" in r.text
         assert "_startInlineTaskEdit" in r.text
         assert "_setTaskInlineEditMode(root, true);" in r.text
 
