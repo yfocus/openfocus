@@ -105,6 +105,7 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     assert "remote_terminal_sessions" in tables
     assert "companions" in tables
     assert "attention_items" in tables
+    assert "agent_space_prompts" in tables
     assert version == "20260512_0001"
 
 
@@ -169,6 +170,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         attention_cols = {
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(attention_items)")
         }
+        prompt_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_space_prompts)")
+        }
         migration_ids = {
             str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
         }
@@ -225,6 +229,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         "dismissed_at",
         "acted_at",
     }.issubset(attention_cols)
+    assert {"title", "content", "enabled", "created_at", "updated_at"}.issubset(
+        prompt_cols
+    )
     assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
     assert terminal_rows[1][1:] == ("inspiration_space", 34, None)
     assert task_public_id_col[3] == 0
@@ -235,3 +242,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     )
     assert migrations.ATTENTION_ITEMS_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids
+    assert migrations.AGENT_SPACE_PROMPTS_MIGRATION_ID in migration_ids

@@ -231,6 +231,15 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
+        "agent_space_prompts",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("title", sa.String(length=160), nullable=False, server_default=""),
+        sa.Column("content", sa.Text(), nullable=False, server_default=""),
+        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_table(
         "agent_sessions",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("session_id", sa.String(length=64), nullable=False, unique=True),
@@ -335,6 +344,7 @@ def downgrade() -> None:
         "remote_terminal_sessions",
         "agent_messages",
         "agent_sessions",
+        "agent_space_prompts",
         "agent_spaces",
         "inspiration_publish_records",
         "inspiration_drafts",

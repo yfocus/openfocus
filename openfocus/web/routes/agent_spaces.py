@@ -23,13 +23,14 @@ from ...models import (
     AgentMessage,
     AgentSession,
     AgentSpace,
+    AgentSpacePrompt,
     Companion,
     Goal,
     RemoteTerminalOutput,
     RemoteTerminalSession,
     Task,
 )
-from ...schemas import AgentSpaceCreateIn
+from ...schemas import AgentSpaceCreateIn, AgentSpacePromptIn
 
 _TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
@@ -98,6 +99,15 @@ def _inject_openfocus_prompt(
 
 def _load_space_and_optional_companion(space_id: int):
     return companion_service.load_space_and_optional_companion(space_id)
+
+
+def _agent_space_prompt_payload(prompt: AgentSpacePrompt) -> dict:
+    return {
+        "id": int(prompt.id),
+        "title": str(prompt.title or ""),
+        "content": str(prompt.content or ""),
+        "enabled": bool(prompt.enabled),
+    }
 
 
 def _require_companion_online(*, grpc_server: CompanionGrpcServer, comp):
@@ -186,6 +196,96 @@ def create_router(
     rewrite_ttyd_input_for_agent_mode,
 ) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/agent_space_prompts", response_class=HTMLResponse)
+    def agent_space_prompts_view(request: Request) -> HTMLResponse:
+        with session_scope() as s:
+            prompts = (
+                s.query(AgentSpacePrompt)
+                .order_by(AgentSpacePrompt.enabled.desc(), AgentSpacePrompt.id.desc())
+                .all()
+            )
+            items = [_agent_space_prompt_payload(p) for p in prompts]
+        return templates.TemplateResponse(
+            request,
+            "agent_space_prompts.html",
+            {"prompts": items},
+        )
+
+    @router.get("/api/agent_space_prompts")
+    def list_agent_space_prompts(enabled_only: bool = True) -> dict:
+        with session_scope() as s:
+            q = s.query(AgentSpacePrompt)
+            if enabled_only:
+                q = q.filter(AgentSpacePrompt.enabled == True)  # noqa: E712
+            prompts = q.order_by(AgentSpacePrompt.id.desc()).all()
+            items = [_agent_space_prompt_payload(p) for p in prompts]
+        return {"ok": True, "items": items}
+
+    @router.post("/api/agent_space_prompts")
+    def create_agent_space_prompt(payload: AgentSpacePromptIn) -> dict:
+        title = str(payload.title or "").strip()
+        content = str(payload.content or "").strip()
+        if not title or not content:
+            raise HTTPException(
+                status_code=400, detail="title and content are required"
+            )
+        with session_scope() as s:
+            prompt = AgentSpacePrompt(
+                title=title,
+                content=content,
+                enabled=bool(payload.enabled),
+            )
+            s.add(prompt)
+            s.flush()
+            item = _agent_space_prompt_payload(prompt)
+        return {"ok": True, "item": item}
+
+    @router.put("/api/agent_space_prompts/{prompt_id}")
+    def update_agent_space_prompt(prompt_id: int, payload: AgentSpacePromptIn) -> dict:
+        title = str(payload.title or "").strip()
+        content = str(payload.content or "").strip()
+        if not title or not content:
+            raise HTTPException(
+                status_code=400, detail="title and content are required"
+            )
+        with session_scope() as s:
+            prompt = s.get(AgentSpacePrompt, int(prompt_id))
+            if prompt is None:
+                raise HTTPException(
+                    status_code=404, detail="AgentSpace prompt not found"
+                )
+            prompt.title = title
+            prompt.content = content
+            prompt.enabled = bool(payload.enabled)
+            s.add(prompt)
+            s.flush()
+            item = _agent_space_prompt_payload(prompt)
+        return {"ok": True, "item": item}
+
+    @router.patch("/api/agent_space_prompts/{prompt_id}/enabled")
+    def update_agent_space_prompt_enabled(prompt_id: int, payload: dict) -> dict:
+        enabled = bool(payload.get("enabled")) if isinstance(payload, dict) else False
+        with session_scope() as s:
+            prompt = s.get(AgentSpacePrompt, int(prompt_id))
+            if prompt is None:
+                raise HTTPException(
+                    status_code=404, detail="AgentSpace prompt not found"
+                )
+            prompt.enabled = enabled
+            s.add(prompt)
+            s.flush()
+            item = _agent_space_prompt_payload(prompt)
+        return {"ok": True, "item": item}
+
+    @router.delete("/api/agent_space_prompts/{prompt_id}")
+    def delete_agent_space_prompt(prompt_id: int) -> dict:
+        with session_scope() as s:
+            prompt = s.get(AgentSpacePrompt, int(prompt_id))
+            if prompt is None:
+                return {"ok": True}
+            s.delete(prompt)
+        return {"ok": True}
 
     def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
         return companion_service.require_online(grpc_server, companion=comp)

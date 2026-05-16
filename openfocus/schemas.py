@@ -47,3 +47,9 @@ class AgentSpaceCreateIn(BaseModel):
     start_agent_command: str = Field(
         default="", max_length=2000, description="Prompt Zone 的 Start Agent 启动命令"
     )
+
+
+class AgentSpacePromptIn(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=20000)
+    enabled: bool = True

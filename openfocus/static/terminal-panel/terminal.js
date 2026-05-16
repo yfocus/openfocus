@@ -48,7 +48,9 @@
     const mode = String(opts && opts.mode ? opts.mode : 'agent_space');
     const isInspiration = mode === 'inspiration';
     const commandApi = String(opts && opts.commandApi ? opts.commandApi : `/api/agent_spaces/${spaceId}/start_agent_command`).replace(/\/+$/, '');
+    const promptApi = String(opts && opts.promptApi ? opts.promptApi : '/api/agent_space_prompts').replace(/\/+$/, '');
     let startAgentCommand = String(opts && opts.startAgentCommand ? opts.startAgentCommand : '').trim();
+    let customPrompts = [];
     const goalResources = Array.isArray(opts && opts.goalResources)
       ? opts.goalResources.map((r)=> ({ id: Number(r && r.id ? r.id : 0), title: String(r && r.title ? r.title : '') })).filter((r)=> r.id && r.title)
       : [];
@@ -106,7 +108,6 @@
       if(k === 'draft_summary') return `[OpenFocus Summary Request] ${String(opts && opts.draftSummaryPrompt ? opts.draftSummaryPrompt : '')}`;
       if(k === 'lessons') return `[OpenFocus Lessons]\n${prefix}`;
       if(k === 'pua') return PUA_PROACTIVITY_PROMPT;
-      if(k === 'custom') return `[OpenFocus Context]\n${prefix}`;
       return prefix;
     }
 
@@ -123,10 +124,10 @@
           <div class="rt-body" id="rt-body"></div>
         </div>
         <div class="rt-side">
-          <div class="rt-side-title">Prompt Zone</div>
-          ${isInspiration ? '' : '<label class="rt-agent-switch" title="Enable Agent Mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">Agent Mode</span></label>'}
+          <div class="rt-side-title">prompt zone</div>
+          ${isInspiration ? '' : '<label class="rt-agent-switch" title="enable agent mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">agent mode</span></label>'}
           <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="Send the Summary instructions as plain text into this terminal without pressing Enter.">Summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="Choose a resource and generate a reviewable Goal/Tasks draft from it.">Create Goal</button>' : '<button type="button" class="btn-ghost" id="rt-lessons">Draw Lessons</button><button type="button" class="btn-ghost" id="rt-pua" title="Inject a proactivity escalation prompt into the active terminal.">PUA</button><button type="button" class="btn-ghost" id="rt-custom">Custom</button><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="Run the configured agent command in a new terminal and turn on Agent Mode.">Start Agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="Edit Start Agent command" aria-label="Edit Start Agent command">✏</button></div>'}
+          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><button type="button" class="btn-ghost" id="rt-lessons">draw lessons</button><button type="button" class="btn-ghost" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal and turn on agent mode.">start agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button></div>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
       </div>
@@ -141,7 +142,7 @@
     const mouseText = $('#rt-mouse-text', rootEl);
     const btnLessons = $('#rt-lessons', rootEl);
     const btnPua = $('#rt-pua', rootEl);
-    const btnCustom = $('#rt-custom', rootEl);
+    const customPromptsEl = $('#rt-custom-prompts', rootEl);
     const btnStartAgent = $('#rt-start-agent', rootEl);
     const btnStartAgentEdit = $('#rt-start-agent-edit', rootEl);
     const btnDraftSummary = $('#rt-draft-summary', rootEl);
@@ -168,6 +169,36 @@
     function applyStartAgentUi(){
       if(btnStartAgent) btnStartAgent.title = startAgentCommandLabel();
       if(btnStartAgentEdit) btnStartAgentEdit.title = startAgentCommandLabel();
+    }
+
+    function renderCustomPrompts(){
+      if(isInspiration || !customPromptsEl) return;
+      if(!customPrompts.length){
+        customPromptsEl.innerHTML = '<div class="rt-prompt-empty">no prompts</div>';
+        return;
+      }
+      customPromptsEl.innerHTML = customPrompts.map((p)=> {
+        const id = Number(p && p.id ? p.id : 0);
+        const title = esc(String(p && p.title ? p.title : 'Prompt'));
+        const content = esc(String(p && p.content ? p.content : ''));
+        return `<button type="button" class="btn-ghost rt-prompt-btn" data-prompt-id="${id}" title="${title}: ${content}">${title}</button>`;
+      }).join('');
+    }
+
+    async function loadCustomPrompts(){
+      if(isInspiration || !customPromptsEl) return;
+      try{
+        const data = await fetchJson(promptApi);
+        customPrompts = Array.isArray(data && data.items) ? data.items : [];
+      }catch(_){
+        customPrompts = [];
+      }
+      renderCustomPrompts();
+    }
+
+    function customPromptText(prompt){
+      const content = String(prompt && prompt.content ? prompt.content : '').trim();
+      return content ? content.replace(/\s+/g, ' ').trim() : '';
     }
 
     function applyAgentUi(){
@@ -580,7 +611,13 @@
     });
     btnLessons?.addEventListener('click', ()=> pasteToActive(buildPasteText('lessons')));
     btnPua?.addEventListener('click', ()=> pasteToActive(buildPasteText('pua')));
-    btnCustom?.addEventListener('click', ()=> pasteToActive(buildPasteText('custom')));
+    customPromptsEl?.addEventListener('click', (e)=> {
+      const target = e && e.target && e.target.closest ? e.target.closest('[data-prompt-id]') : null;
+      if(!target) return;
+      const id = Number(target.getAttribute('data-prompt-id') || 0);
+      const prompt = customPrompts.find((p)=> Number(p && p.id ? p.id : 0) === id);
+      pasteToActive(customPromptText(prompt));
+    });
     btnStartAgent?.addEventListener('click', ()=> {
       void startAgent().catch((err)=> toast(String(err && err.message ? err.message : err || 'start failed')));
     });
@@ -626,6 +663,7 @@
     applyAgentUi();
     applyMouseUi();
     applyStartAgentUi();
+    void loadCustomPrompts();
     return api;
   }
 

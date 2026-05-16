@@ -13,6 +13,7 @@ REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
 )
 ATTENTION_ITEMS_MIGRATION_ID = "20260514_attention_items"
 AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
+AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -446,6 +447,21 @@ def _migrate_agent_space_start_command(conn: Any) -> None:
         )
 
 
+def _migrate_agent_space_prompts(conn: Any) -> None:
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS agent_space_prompts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "title VARCHAR(160) NOT NULL DEFAULT '', "
+            "content TEXT NOT NULL DEFAULT '', "
+            "enabled BOOLEAN NOT NULL DEFAULT 1, "
+            "created_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -455,4 +471,5 @@ STARTUP_MIGRATIONS = [
     ),
     (ATTENTION_ITEMS_MIGRATION_ID, _migrate_attention_items),
     (AGENT_SPACE_START_COMMAND_MIGRATION_ID, _migrate_agent_space_start_command),
+    (AGENT_SPACE_PROMPTS_MIGRATION_ID, _migrate_agent_space_prompts),
 ]

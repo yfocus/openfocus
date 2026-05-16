@@ -1,0 +1,172 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+{% extends "base.html" %}
+{% block content %}
+  <style>
+    .prompt-page{ max-width: 1040px; margin: 18px auto; display:grid; grid-template-columns:minmax(320px, 420px) minmax(360px, 1fr); gap:14px; }
+    .prompt-card{ border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--card); min-width:0; }
+    .prompt-card-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px; }
+    .prompt-card-title{ font-weight:700; }
+    .prompt-card-sub{ color:var(--muted-foreground); font-size:12px; margin-top:4px; }
+    .prompt-list{ display:flex; flex-direction:column; gap:8px; padding:14px; }
+    .prompt-item{ border:1px solid var(--border); border-radius:var(--radius); background:var(--background); padding:10px; cursor:pointer; text-align:left; color:var(--foreground); }
+    .prompt-item:hover,.prompt-item.on{ border-color:var(--primary); box-shadow:0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent) inset; }
+    .prompt-item-title{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:650; }
+    .prompt-status{ font-size:11px; color:var(--muted-foreground); }
+    .prompt-item-summary{ margin-top:6px; color:var(--muted-foreground); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .prompt-form{ padding:14px; display:flex; flex-direction:column; gap:12px; }
+    .prompt-form input,.prompt-form textarea{ width:100%; box-sizing:border-box; }
+    .prompt-form textarea{ min-height:300px; resize:vertical; }
+    .prompt-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .prompt-actions-spacer{ flex:1 1 auto; }
+    .prompt-switch{ display:inline-flex; align-items:center; gap:8px; color:var(--muted-foreground); font-size:13px; cursor:pointer; user-select:none; }
+    .prompt-switch input{ position:absolute; opacity:0; width:1px; height:1px; overflow:hidden; }
+    .prompt-switch-track{ position:relative; width:34px; height:18px; border-radius:999px; border:1px solid var(--border); background:var(--muted-surface); transition:background 120ms ease,border-color 120ms ease; }
+    .prompt-switch-track::after{ content:''; position:absolute; top:50%; left:2px; width:14px; height:14px; border-radius:999px; transform:translateY(-50%); background:var(--foreground); transition:left 120ms ease,background 120ms ease; }
+    .prompt-switch input:checked + .prompt-switch-track{ border-color:color-mix(in srgb, var(--success) 56%, var(--border)); background:color-mix(in srgb, var(--success) 20%, var(--muted-surface)); }
+    .prompt-switch input:checked + .prompt-switch-track::after{ left:18px; background:var(--success); }
+    .prompt-switch input:checked ~ .prompt-switch-text{ color:var(--success); }
+    @media (max-width: 900px){ .prompt-page{ grid-template-columns:1fr; } }
+  </style>
+
+  <div class="prompt-page" data-initial="{{ prompts|tojson|forceescape }}">
+    <section class="prompt-card">
+      <div class="prompt-card-head">
+        <div>
+          <div class="prompt-card-title">AgentSpace Prompts</div>
+          <div class="prompt-card-sub">Enabled prompts appear automatically in every AgentSpace Prompt Zone.</div>
+        </div>
+        <button type="button" class="btn-primary" id="prompt-new">New</button>
+      </div>
+      <div class="divider" style="margin:0;"></div>
+      <div class="prompt-list" id="prompt-list"></div>
+    </section>
+
+    <section class="prompt-card">
+      <div class="prompt-card-head">
+        <div>
+          <div class="prompt-card-title" id="prompt-editor-title">New Prompt</div>
+          <div class="prompt-card-sub">Write reusable instructions for command-line agents.</div>
+        </div>
+      </div>
+      <div class="divider" style="margin:0;"></div>
+      <form class="prompt-form" id="prompt-form">
+        <input type="hidden" id="prompt-id" value="" />
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="prompt-title">Title</label></div>
+          <input type="text" id="prompt-title" maxlength="160" required placeholder="e.g. Review current changes" />
+        </div>
+        <div class="dlg-field">
+          <div class="dlg-label"><label for="prompt-content">Prompt</label></div>
+          <textarea id="prompt-content" maxlength="20000" required placeholder="Tell the agent what to do..."></textarea>
+        </div>
+        <div class="prompt-actions">
+          <label class="prompt-switch" title="Show in Prompt Zone. Existing prompts are updated immediately.">
+            <input type="checkbox" id="prompt-enabled" checked />
+            <span class="prompt-switch-track" aria-hidden="true"></span>
+            <span class="prompt-switch-text">Show in Prompt Zone</span>
+          </label>
+          <span class="prompt-actions-spacer"></span>
+          <button type="button" class="btn-ghost" id="prompt-delete">Delete</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <script>
+    (function(){
+      const page = document.querySelector('.prompt-page');
+      const listEl = document.getElementById('prompt-list');
+      const form = document.getElementById('prompt-form');
+      const idEl = document.getElementById('prompt-id');
+      const titleEl = document.getElementById('prompt-title');
+      const contentEl = document.getElementById('prompt-content');
+      const enabledEl = document.getElementById('prompt-enabled');
+      const editorTitle = document.getElementById('prompt-editor-title');
+      const btnNew = document.getElementById('prompt-new');
+      const btnDelete = document.getElementById('prompt-delete');
+      let prompts = [];
+      try{ prompts = JSON.parse(page?.getAttribute('data-initial') || '[]') || []; }catch(_){ prompts = []; }
+      let selectedId = 0;
+
+      function escapeHtml(s){ return String(s ?? '').replace(/[&<>"']/g, (c)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c)); }
+      function toast2(s){ if(typeof window.toast === 'function') window.toast(s); }
+      async function api(url, opts){
+        const r = await fetch(url, opts);
+        if(!r.ok){ throw new Error(await r.text().catch(()=> '') || ('HTTP ' + r.status)); }
+        return await r.json();
+      }
+      function upsertPrompt(item){
+        const idx = prompts.findIndex((p)=> Number(p.id) === Number(item.id));
+        if(idx >= 0) prompts[idx] = item; else prompts.unshift(item);
+      }
+      function render(){
+        if(!listEl) return;
+        if(!prompts.length){ listEl.innerHTML = '<div class="muted">No prompts yet.</div>'; return; }
+        listEl.innerHTML = prompts.map((p)=> '<button type="button" class="prompt-item ' + (Number(p.id) === selectedId ? 'on' : '') + '" data-id="' + Number(p.id) + '"><div class="prompt-item-title"><span>' + escapeHtml(p.title || 'Untitled') + '</span><span class="prompt-status">' + (p.enabled ? 'shown' : 'hidden') + '</span></div><div class="prompt-item-summary">' + escapeHtml(String(p.content || '').replace(/\s+/g, ' ').slice(0, 160)) + '</div></button>').join('');
+      }
+      function selectPrompt(id){
+        selectedId = Number(id || 0);
+        const p = prompts.find((x)=> Number(x.id) === selectedId);
+        if(p){
+          idEl.value = String(p.id || '');
+          titleEl.value = String(p.title || '');
+          contentEl.value = String(p.content || '');
+          enabledEl.checked = !!p.enabled;
+          editorTitle.textContent = 'Edit Prompt';
+          btnDelete.style.display = '';
+        }else{
+          idEl.value = '';
+          titleEl.value = '';
+          contentEl.value = '';
+          enabledEl.checked = true;
+          editorTitle.textContent = 'New Prompt';
+          btnDelete.style.display = 'none';
+        }
+        render();
+        try{ titleEl.focus(); }catch(_){}
+      }
+      listEl?.addEventListener('click', (e)=> {
+        const btn = e.target && e.target.closest ? e.target.closest('.prompt-item') : null;
+        if(btn) selectPrompt(btn.getAttribute('data-id'));
+      });
+      btnNew?.addEventListener('click', ()=> selectPrompt(0));
+      form?.addEventListener('submit', async (e)=> {
+        e.preventDefault();
+        const id = String(idEl.value || '').trim();
+        const payload = { title: String(titleEl.value || '').trim(), content: String(contentEl.value || '').trim(), enabled: !!enabledEl.checked };
+        if(!payload.title || !payload.content){ toast2('Title and Prompt are required'); return; }
+        const data = await api(id ? ('/api/agent_space_prompts/' + encodeURIComponent(id)) : '/api/agent_space_prompts', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const item = data.item;
+        upsertPrompt(item);
+        selectPrompt(item.id);
+        toast2('Saved');
+      });
+      enabledEl?.addEventListener('change', async ()=> {
+        const id = String(idEl.value || '').trim();
+        if(!id) return;
+        const previous = !enabledEl.checked;
+        try{
+          const data = await api('/api/agent_space_prompts/' + encodeURIComponent(id) + '/enabled', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!enabledEl.checked }) });
+          upsertPrompt(data.item);
+          render();
+          toast2(enabledEl.checked ? 'Shown in Prompt Zone' : 'Hidden from Prompt Zone');
+        }catch(err){
+          enabledEl.checked = previous;
+          toast2(String(err && err.message ? err.message : err || 'update failed'));
+        }
+      });
+      btnDelete?.addEventListener('click', async ()=> {
+        const id = String(idEl.value || '').trim();
+        if(!id) return;
+        if(!confirm('Delete this AgentSpace prompt?')) return;
+        await api('/api/agent_space_prompts/' + encodeURIComponent(id), { method: 'DELETE' });
+        prompts = prompts.filter((p)=> Number(p.id) !== Number(id));
+        selectPrompt(0);
+        toast2('Deleted');
+      });
+      render();
+      selectPrompt(prompts[0]?.id || 0);
+    })();
+  </script>
+{% endblock %}
