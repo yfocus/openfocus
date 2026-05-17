@@ -33,6 +33,7 @@ class CompanionGrpcError(RuntimeError):
 # Agent 输出（AgentChunk）为流式事件：通过监听器回调转发到 HTTP/SSE 层。
 _AGENT_CHUNK_LISTENERS: list[Callable[[pb2.AgentChunk], None]] = []
 _TERMINAL_OUTPUT_LISTENERS: list[Callable[[pb2.TerminalOutput], None]] = []
+_RUNTIME_SIGNAL_LISTENERS: list[Callable[[pb2.AgentRuntimeSignal], None]] = []
 
 
 def add_agent_chunk_listener(listener: Callable[[pb2.AgentChunk], None]) -> None:
@@ -43,6 +44,12 @@ def add_terminal_output_listener(
     listener: Callable[[pb2.TerminalOutput], None],
 ) -> None:
     _TERMINAL_OUTPUT_LISTENERS.append(listener)
+
+
+def add_runtime_signal_listener(
+    listener: Callable[[pb2.AgentRuntimeSignal], None],
+) -> None:
+    _RUNTIME_SIGNAL_LISTENERS.append(listener)
 
 
 @dataclass
@@ -344,6 +351,7 @@ class CompanionConnection:
         terminal_id: str,
         root_path: str,
         base_path: str = "",
+        task_public_id: str = "",
         timeout_seconds: float = 10.0,
     ) -> pb2.TerminalStartResponse:
         rid = str(uuid.uuid4())
@@ -356,6 +364,7 @@ class CompanionConnection:
                     terminal_id=str(terminal_id or ""),
                     root_path=str(root_path or ""),
                     base_path=str(base_path or ""),
+                    task_public_id=str(task_public_id or ""),
                 )
             )
         )
@@ -553,6 +562,16 @@ class CompanionConnection:
             for cb in list(_AGENT_CHUNK_LISTENERS):
                 try:
                     cb(ch)
+                except Exception:
+                    pass
+            return
+        if which == "runtime_signal":
+            sig: pb2.AgentRuntimeSignal = msg.runtime_signal
+            if not int(sig.companion_id or 0):
+                sig.companion_id = int(self.companion_id)
+            for cb in list(_RUNTIME_SIGNAL_LISTENERS):
+                try:
+                    cb(sig)
                 except Exception:
                     pass
             return

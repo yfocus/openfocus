@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from ...db import session_scope
+from ...domains.agent_activity import service as agent_activity_service
 from ...domains.attention import service as attention_service
 from ...domains.events import service as event_service
 from ...schemas import AgentEventIn, FocusReportIn
@@ -35,6 +36,21 @@ def recent_events(limit: int = 30) -> dict:
 def attention_items(limit: int = 10) -> dict:
     with session_scope() as s:
         return attention_service.active_items_payload(s, limit=limit)
+
+
+@router.get("/api/agent_activity/summary")
+def agent_activity_summary(limit: int = 30) -> dict:
+    with session_scope() as s:
+        return agent_activity_service.summary_payload(s, limit=limit)
+
+
+@router.post("/api/agent_activity/items/{item_id}/dismiss")
+def dismiss_agent_activity_item(item_id: int) -> dict:
+    try:
+        with session_scope() as s:
+            return agent_activity_service.dismiss_activity(s, activity_id=item_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/api/attention/items/{item_id}/dismiss")

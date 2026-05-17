@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm():
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import AttentionItem, Event, Goal, Task
+    from openfocus.models import AttentionItem, Event, Goal, Task, TaskAgentActivity
 
     # seed goal + task
     with session_scope() as s:
@@ -43,17 +43,15 @@ async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm
         ev = s.query(Event).order_by(Event.id.desc()).first()
         assert ev is not None
         assert ev.task_id == public_id
-        item = s.query(AttentionItem).one()
-        assert item.task_public_id == public_id
-        assert item.item_type == "completion_reported"
-        assert item.status == "active"
+        assert s.query(AttentionItem).count() == 0
+        assert s.query(TaskAgentActivity).count() == 0
 
 
 @pytest.mark.anyio
 async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm():
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import AttentionItem, Event, Goal, Task
+    from openfocus.models import AttentionItem, Event, Goal, Task, TaskAgentActivity
 
     with session_scope() as s:
         g = Goal(title="g2", content="", due_date=dt.date.today())
@@ -89,16 +87,15 @@ async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm
         assert t2.status == "todo"
         ev = s.query(Event).order_by(Event.id.desc()).first()
         assert ev.kind == "skill.focus_report"
-        item = s.query(AttentionItem).one()
-        assert item.task_public_id == public_id
-        assert item.item_type == "completion_reported"
-        assert "pending confirmation" in item.summary
+        assert s.query(AttentionItem).count() == 0
+        assert s.query(TaskAgentActivity).count() == 0
 
 
 @pytest.mark.anyio
 async def test_attention_api_dismiss_and_acted_state():
     from openfocus.app import app
     from openfocus.db import session_scope
+    from openfocus.domains.events import service as event_service
     from openfocus.models import AgentSpace, AttentionItem, Goal, Task
 
     with session_scope() as s:
@@ -110,19 +107,25 @@ async def test_attention_api_dismiss_and_acted_state():
         s.flush()
         public_id = t.public_id
         s.add(AgentSpace(task_public_id=public_id, root_path="/tmp/openfocus-test"))
+        event_service.record_event(
+            s,
+            kind="agent.completed",
+            agent="attention_scheduler",
+            payload={
+                "result": {
+                    "items": [
+                        {
+                            "target": {"task_public_id": public_id},
+                            "title": "next move",
+                            "why": ["do this next"],
+                        }
+                    ]
+                }
+            },
+        )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.post(
-            "/api/agent/events",
-            json={
-                "kind": "task.completed",
-                "agent": "coco",
-                "task_id": public_id,
-                "payload": {"message": "done"},
-            },
-        )
-        assert r.status_code == 200
         r = await client.get("/api/attention/items")
         assert r.status_code == 200
         body = r.json()
@@ -139,16 +142,23 @@ async def test_attention_api_dismiss_and_acted_state():
         assert r.status_code == 200
         assert r.json()["count"] == 0
 
-        r = await client.post(
-            "/api/agent/events",
-            json={
-                "kind": "task.completed",
-                "agent": "coco",
-                "task_id": public_id,
-                "payload": {"message": "done again"},
-            },
-        )
-        assert r.status_code == 200
+        with session_scope() as s:
+            event_service.record_event(
+                s,
+                kind="agent.completed",
+                agent="attention_scheduler",
+                payload={
+                    "result": {
+                        "items": [
+                            {
+                                "target": {"task_public_id": public_id},
+                                "title": "next move again",
+                                "why": ["do this next again"],
+                            }
+                        ]
+                    }
+                },
+            )
         r = await client.get("/api/attention/items")
         item = r.json()["items"][0]
         r = await client.post(f"/api/attention/items/{item['id']}/acted")
@@ -162,10 +172,11 @@ async def test_attention_api_dismiss_and_acted_state():
 
 
 @pytest.mark.anyio
-async def test_attention_tracks_running_then_finished_buckets():
+async def test_runtime_activity_tracks_running_waiting_then_review_ready():
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import AttentionItem, Goal, Task
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import AgentTurn, Goal, Task, TaskAgentActivity
 
     with session_scope() as s:
         g = Goal(title="agent state goal", content="", due_date=dt.date.today())
@@ -176,69 +187,140 @@ async def test_attention_tracks_running_then_finished_buckets():
         s.flush()
         public_id = t.public_id
 
+    def emit(kind: str, payload: dict) -> None:
+        with session_scope() as s:
+            result = agent_activity_service.handle_runtime_signal(
+                s,
+                kind=kind,
+                agent_runtime="coco",
+                turn_id="turn-1",
+                task_public_id=public_id,
+                source="test",
+                payload=payload,
+            )
+            assert result["ok"] is True
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.post(
-            "/api/agent/events",
-            json={
-                "kind": "task.started",
-                "agent": "coco",
-                "task_id": public_id,
-                "payload": {"status": "running", "message": "working"},
-            },
-        )
-        assert r.status_code == 200
-        r = await client.get("/api/attention/items")
+        emit("runtime.turn.started", {"message": "working"})
+        r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert body["count"] == 1
         assert len(body["buckets"]["running"]) == 1
         running = body["buckets"]["running"][0]
         assert running["type"] == "running"
         assert running["bucket"] == "running"
+        assert running["agent_runtime"] == "coco"
+        assert running["agent_name"] == "coco"
         assert running["state_since"]
         assert isinstance(running["state_age_seconds"], int)
 
-        r = await client.post(
-            "/api/agent/events",
-            json={
-                "kind": "task.progress",
-                "agent": "coco",
-                "task_id": public_id,
-                "payload": {"status": "running", "message": "still working"},
-            },
-        )
-        assert r.status_code == 200
-        r = await client.get("/api/attention/items")
+        emit("runtime.turn.waiting_for_approval", {"message": "needs approval"})
+        r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert body["count"] == 1
-        assert len(body["buckets"]["running"]) == 1
-        assert body["buckets"]["running"][0]["summary"].startswith("still working")
+        assert len(body["buckets"]["running"]) == 0
+        assert len(body["buckets"]["waiting"]) == 1
+        assert body["buckets"]["waiting"][0]["type"] == "waiting"
+        assert body["buckets"]["waiting"][0]["waiting_kind"].endswith("approval")
 
-        r = await client.post(
-            "/api/agent/events",
-            json={
-                "kind": "task.completed",
-                "agent": "coco",
-                "task_id": public_id,
-                "payload": {"status": "succeeded", "summary": "done"},
-            },
-        )
-        assert r.status_code == 200
-        r = await client.get("/api/attention/items")
+        emit("runtime.turn.completed", {"status": "succeeded", "summary": "done"})
+        r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert len(body["buckets"]["running"]) == 0
-        assert len(body["buckets"]["completed"]) == 1
-        assert body["buckets"]["completed"][0]["type"] == "completion_reported"
+        assert len(body["buckets"]["waiting"]) == 1
+        assert body["buckets"]["waiting"][0]["type"] == "review_ready"
 
     with session_scope() as s:
-        running_items = (
-            s.query(AttentionItem)
-            .filter(AttentionItem.task_public_id == public_id)
-            .filter(AttentionItem.item_type == "running")
-            .all()
+        turn = s.query(AgentTurn).filter(AgentTurn.turn_id == "turn-1").one()
+        assert turn.state == "completed"
+        activity = (
+            s.query(TaskAgentActivity)
+            .filter(TaskAgentActivity.task_public_id == public_id)
+            .one()
         )
-        assert running_items
-        assert all(item.status == "acted" for item in running_items)
+        assert activity.state == "review_ready"
+
+
+@pytest.mark.anyio
+async def test_runtime_session_start_does_not_create_activity_and_can_correlate_turn():
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import AgentRuntimeSession, Goal, Task, TaskAgentActivity
+
+    with session_scope() as s:
+        g = Goal(title="runtime session goal", content="", due_date=dt.date.today())
+        s.add(g)
+        s.flush()
+        t = Task(goal_id=g.id, title="runtime session task", content="d", status="todo")
+        s.add(t)
+        s.flush()
+        public_id = t.public_id
+
+    with session_scope() as s:
+        result = agent_activity_service.handle_runtime_signal(
+            s,
+            raw_kind="SessionStart",
+            agent_runtime="codex",
+            session_id="sess-rt-1",
+            task_public_id=public_id,
+            source="test",
+            payload={"message": "attached"},
+        )
+        assert result["state"] == "ignored_for_activity"
+        assert s.query(TaskAgentActivity).count() == 0
+        sess = (
+            s.query(AgentRuntimeSession)
+            .filter(AgentRuntimeSession.session_id == "sess-rt-1")
+            .one()
+        )
+        assert sess.state == "idle"
+        assert sess.task_public_id == public_id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with session_scope() as s:
+            result = agent_activity_service.handle_runtime_signal(
+                s,
+                raw_kind="UserPromptSubmit",
+                agent_runtime="codex",
+                session_id="sess-rt-1",
+                source="test",
+                payload={"message": "work on it"},
+            )
+            assert result["activity_state"] == "running"
+
+        r = await client.get("/api/agent_activity/summary")
+        body = r.json()
+        assert body["counts"]["running"] == 1
+        assert body["buckets"]["running"][0]["task_public_id"] == public_id
+
+
+def test_runtime_activity_signal_without_active_turn_stays_journal_only():
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import AgentTurn, Event, Goal, Task, TaskAgentActivity
+
+    with session_scope() as s:
+        g = Goal(title="activity goal", content="", due_date=dt.date.today())
+        s.add(g)
+        s.flush()
+        t = Task(goal_id=g.id, title="activity task", content="d", status="todo")
+        s.add(t)
+        s.flush()
+        result = agent_activity_service.handle_runtime_signal(
+            s,
+            raw_kind="PreToolUse",
+            agent_runtime="coco",
+            task_public_id=t.public_id,
+            source="test",
+            payload={"message": "tool starting"},
+        )
+        assert result["state"] == "activity_without_turn"
+        assert s.query(AgentTurn).count() == 0
+        assert s.query(TaskAgentActivity).count() == 0
+        assert s.query(Event).filter(Event.kind == "runtime.turn.activity").count() == 1
 
 
 def test_agent_completed_next_move_event_sink_creates_attention_item(

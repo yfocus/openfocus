@@ -18,6 +18,8 @@ def _isolate_db(tmp_path):
     # 每个测试使用独立 SQLite 文件，避免互相污染
     os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "test.db")
     os.environ.pop("OPENFOCUS_DB_URL", None)
+    os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
+    os.environ["OPENFOCUS_HOOK_SOCK"] = str(tmp_path / "hooks.sock")
 
     # 清理 engine 缓存（如果之前有 import 过）
     try:

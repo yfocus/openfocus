@@ -106,6 +106,9 @@ npm run build
 make serve
 ```
 
+`make serve` loads configuration from the repository root `.env` before starting
+the OpenFocus service.
+
 Then open:
 
 ```text
@@ -123,6 +126,113 @@ make companion
 This target loads configuration from the repository root `.env` before starting the companion.
 
 Then pair it from the Companion page in OpenFocus.
+
+**Install agent runtime hooks**
+
+OpenFocus tracks Coco and Codex turns through local hooks. The installer backs up
+existing Coco/Codex hook configuration before writing changes:
+
+```shell
+sh scripts/install_agent_hooks.py
+```
+
+By default the OpenFocus instance id is `default`. Put the instance id in the
+repo-root `.env` file so the OpenFocus service, Companion, and hook installer all
+read the same value automatically:
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+Then start each process without repeating the instance env vars:
+
+```shell
+make serve
+make companion
+sh scripts/install_agent_hooks.py
+```
+
+Existing shell environment variables still take precedence over values in
+`.env`. You can also point to a specific env file with `OPENFOCUS_ENV_FILE`, and
+disable dotenv loading with `OPENFOCUS_DOTENV=0`.
+
+The default instance uses:
+
+- hook socket: `~/.openfocus/hooks.sock`
+- hook spool directory: `/tmp/openfocus-agent-hooks-<uid>/default`
+
+For multiple OpenFocus instances, give each instance a stable
+`OPENFOCUS_INSTANCE_ID` in that instance's env file. Use a separate checkout/cwd
+with its own `.env`, or set `OPENFOCUS_ENV_FILE` to a different env file for the
+second instance. Named instances use isolated defaults:
+
+- hook socket: `~/.openfocus/hooks-<OPENFOCUS_INSTANCE_ID>.sock`
+- hook spool directory: `/tmp/openfocus-agent-hooks-<uid>/<OPENFOCUS_INSTANCE_ID>`
+
+Example `.env` for a development instance:
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+Example env file for a second debug instance:
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=debug
+OPENFOCUS_PORT=8002
+OPENFOCUS_GRPC_PORT=17892
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17892
+```
+
+If you override `OPENFOCUS_HOOK_SOCK` or `OPENFOCUS_HOOK_SPOOL_DIR`, use the same
+values for Companion and `scripts/install_agent_hooks.py`.
+
+**Codex hook trust**
+
+Codex does not execute newly registered hooks until you explicitly trust them in
+the Codex TUI. After installing hooks, start Codex in an OpenFocus Agent Space or
+terminal, run:
+
+```text
+/hooks
+```
+
+Trust the OpenFocus entries for these Codex events:
+
+- `SessionStart`: session correlation.
+- `UserPromptSubmit`: turn start/running state.
+- `PermissionRequest`: waiting-for-approval state.
+- `Stop`: turn completed/review-ready state.
+
+Codex will only send hook events to OpenFocus after these entries are trusted.
+
+**Coco hook registration**
+
+Coco supports multiple hooks, so the installer appends an OpenFocus block to the
+Coco config instead of replacing existing hooks. The default config path is
+`~/.trae/traecli.yaml`; override it with `--coco-config` if needed.
+
+The OpenFocus Coco block registers these events:
+
+- `pre_tool_use`
+- `post_tool_use`
+- `post_tool_use_failure`
+- `user_prompt_submit`
+- `stop`
+- `subagent_start`
+- `subagent_stop`
+- `session_start`
+- `session_end`
+- `pre_compact`
+- `post_compact`
+- `notification`
+- `permission_request`
 
 ## Development
 

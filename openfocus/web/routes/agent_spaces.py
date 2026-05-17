@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...db import session_scope
+from ...domains.agent_activity import service as agent_activity_service
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
@@ -556,6 +557,7 @@ def create_router(
                 terminal_id=terminal_id,
                 root_path=str(sp.root_path or ""),
                 base_path=ttyd_base_path,
+                task_public_id=str(sp.task_public_id or ""),
                 timeout_seconds=10.0,
             )
         except CompanionGrpcError as e:
@@ -1273,6 +1275,9 @@ def create_router(
             )
             if sess is None or int(sess.space_id) != int(sp.id):
                 raise HTTPException(status_code=404, detail="Agent session not found")
+            sess_agent_type = str(sess.agent_type or "agent")
+            sess_task_public_id = str(sess.task_public_id or "")
+            sess_companion_id = int(sess.companion_id) if sess.companion_id else None
 
             user_msg = AgentMessage(
                 session_id=sid, role="user", content=user_text, request_id="", done=True
@@ -1284,6 +1289,17 @@ def create_router(
                 session_id=sid, role="assistant", content="", request_id=rid, done=False
             )
             s.add(asst_msg)
+            agent_activity_service.handle_runtime_signal(
+                s,
+                kind="runtime.turn.started",
+                agent_runtime=sess_agent_type,
+                session_id=sid,
+                turn_id=rid,
+                task_public_id=sess_task_public_id,
+                companion_id=sess_companion_id,
+                source="openfocus.agent_session.send",
+                payload={"message": "Prompt submitted from OpenFocus AgentSpace."},
+            )
             s.flush()
 
         injected = _inject_openfocus_prompt(
@@ -1321,6 +1337,17 @@ def create_router(
                     m.done = True
                     m.error = str(e)
                     s.add(m)
+                agent_activity_service.handle_runtime_signal(
+                    s,
+                    kind="runtime.turn.failed",
+                    agent_runtime=sess_agent_type,
+                    session_id=sid,
+                    turn_id=rid,
+                    task_public_id=sess_task_public_id,
+                    companion_id=sess_companion_id,
+                    source="openfocus.agent_session.send",
+                    payload={"error": str(e)},
+                )
             _agent_sse_publish(
                 sid,
                 {

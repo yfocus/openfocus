@@ -182,6 +182,25 @@ message AgentChunk {
   string error = 6;
 }
 
+message AgentRuntimeSignal {
+  string signal_id = 1;
+  string kind = 2;
+  string raw_kind = 3;
+  string agent_runtime = 4;
+  string session_id = 5;
+  string turn_id = 6;
+  string task_public_id = 7;
+  string terminal_id = 8;
+  int64 companion_id = 9;
+  string cwd = 10;
+  string tty = 11;
+  int64 ppid = 12;
+  double runtime_ts = 13;
+  string source = 14;
+  string payload_json = 15;
+  bool payload_truncated = 16;
+}
+
 message AgentListSessionsRequest {
   string request_id = 1;
 }
@@ -206,6 +225,7 @@ message TerminalStartRequest {
   string terminal_id = 2;
   string root_path = 3;
   string base_path = 4;
+  string task_public_id = 5;
 }
 
 message TerminalStartResponse {
@@ -327,6 +347,7 @@ message ClientToServer {
     AgentSendResponse agent_send_resp = 22;
     AgentChunk agent_chunk = 23;
     AgentListSessionsResponse agent_list_sessions_resp = 24;
+    AgentRuntimeSignal runtime_signal = 40;
 
     TerminalStartResponse terminal_start_resp = 30;
     TerminalStopResponse terminal_stop_resp = 31;

@@ -20,6 +20,7 @@ from .domains.inspirations import publishing as inspiration_publishing
 from .domains.inspirations import resources as inspiration_resources
 from .domains.inspirations import service as inspiration_service
 from .domains.memory import service as memory_service
+from .infrastructure import env as env_config
 from .infrastructure import llm_config, streaming
 from .infrastructure import migrations as migration_service
 from .models import Base
@@ -32,6 +33,8 @@ from .web.routes import memory as memory_routes
 from .web.routes import recommendations as recommendation_routes
 
 _LOG = logging.getLogger(__name__)
+
+env_config.load_dotenv_once()
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -71,12 +74,13 @@ COMPANION_GRPC = CompanionGrpcServer()
 # 在模块加载时即安装监听器：即便测试/部署选择手动启动 gRPC server，AgentChunk 也能被持久化与 SSE 转发。
 streaming.install_agent_chunk_listener_once()
 streaming.install_terminal_listener_once()
+streaming.install_runtime_signal_listener_once()
 
 
 # App-level dependency wiring. Business rules live in domain services;
 # this module only assembles FastAPI, lifecycle hooks, and route dependencies.
 _utcnow = memory_service.utcnow
-_DOTENV_LOADED = llm_config._DOTENV_LOADED
+_DOTENV_LOADED = env_config._DOTENV_LOADED
 _term_subscribe = streaming.terminal_event_hub.subscribe
 _term_unsubscribe = streaming.terminal_event_hub.unsubscribe
 _inspiration_fallback_draft = inspiration_drafts.fallback_draft
@@ -84,6 +88,8 @@ _inspiration_fallback_draft = inspiration_drafts.fallback_draft
 
 def _load_dotenv_once() -> None:
     global _DOTENV_LOADED
+    if not _DOTENV_LOADED:
+        env_config._DOTENV_LOADED = False
     llm_config._DOTENV_LOADED = bool(_DOTENV_LOADED)
     llm_config.load_dotenv_once()
     _DOTENV_LOADED = llm_config._DOTENV_LOADED
@@ -215,6 +221,7 @@ def _startup() -> None:
 @app.on_event("startup")
 async def _startup_companion_grpc() -> None:
     streaming.install_agent_chunk_listener_once()
+    streaming.install_runtime_signal_listener_once()
     # 测试里可能希望手动控制启动/端口
     if os.environ.get("OPENFOCUS_GRPC_AUTOSTART", "1") == "0":
         return

@@ -428,6 +428,118 @@ class AgentMessage(Base):
     )
 
 
+class AgentRuntimeSession(Base):
+    """Runtime session state derived from Companion/runtime signals."""
+
+    __tablename__ = "agent_runtime_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    agent_runtime: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terminal_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    workspace_root: Mapped[str] = mapped_column(
+        String(4000), nullable=False, default=""
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="idle")
+    last_signal_kind: Mapped[str] = mapped_column(
+        String(128), nullable=False, default=""
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    started_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    last_seen_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    ended_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class AgentTurn(Base):
+    """Normalized agent runtime turn derived from Companion/runtime signals."""
+
+    __tablename__ = "agent_turns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, default=lambda: str(uuid.uuid4())
+    )
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    agent_runtime: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    task_public_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terminal_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    last_signal_kind: Mapped[str] = mapped_column(
+        String(128), nullable=False, default=""
+    )
+    summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    error: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    state_started_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    last_activity_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
+class TaskAgentActivity(Base):
+    """Current runtime activity read model for a task."""
+
+    __tablename__ = "task_agent_activity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_public_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    active_turn_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    agent_runtime: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    companion_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terminal_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="info")
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    state_started_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    last_activity_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
+    )
+    dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+        onupdate=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+
 class RemoteTerminalSession(Base):
     """远程终端会话元信息（用于 tab 管理与 owner 生命周期清理）。"""
 

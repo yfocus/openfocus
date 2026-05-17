@@ -6,7 +6,7 @@ import warnings
 
 try:
     from . import companion_rpc_pb2 as companion__rpc__pb2
-except ImportError:  # pragma: no cover
+except ImportError:
     import companion_rpc_pb2 as companion__rpc__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'

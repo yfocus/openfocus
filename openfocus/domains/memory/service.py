@@ -31,6 +31,20 @@ def utcnow() -> dt.datetime:
     return _utcnow()
 
 
+def _local_time(ts: dt.datetime) -> dt.datetime:
+    if ts.tzinfo is None:
+        return ts
+    return ts.astimezone()
+
+
+def _local_day(ts: dt.datetime) -> str:
+    return _local_time(ts).date().isoformat()
+
+
+def _local_filename_ts(ts: dt.datetime) -> str:
+    return _local_time(ts).strftime("%Y-%m-%d_%H-%M-%S")
+
+
 def config_from_env() -> MemoryConfig:
     def _read_int(name: str, default: int, min_value: int) -> int:
         raw = str(os.environ.get(name) or "").strip()
@@ -358,14 +372,14 @@ def ensure_daily_file(day: str) -> Path:
 
 
 def start_audit_file_unlocked(state: dict, now: dt.datetime, cfg: MemoryConfig) -> dict:
-    day = now.date().isoformat()
+    day = _local_day(now)
     day_dir = audit_root() / day
     day_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.md"
+    filename = f"{_local_filename_ts(now)}.md"
     path = day_dir / filename
     counter = 1
     while path.exists():
-        filename = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_{counter}.md"
+        filename = f"{_local_filename_ts(now)}_{counter}.md"
         path = day_dir / filename
         counter += 1
     write_text_atomic(path, render_audit_header(started_at=now, cfg=cfg))
@@ -410,7 +424,7 @@ def finalize_day_unlocked(day: str, state: dict) -> None:
 
 
 def finalize_due_days_unlocked(state: dict, now: dt.datetime) -> None:
-    today = now.date().isoformat()
+    today = _local_day(now)
     finalized = {str(x) for x in state.get("finalized_days") or [] if str(x).strip()}
     for path in sorted(daily_root().glob("*.md")):
         day = path.stem
@@ -455,7 +469,7 @@ def rotate_current_audit_unlocked(
     path = path_from_rel(rel)
     if path.exists():
         entries_data = extract_json_blocks(read_text(path))
-        day = str(current.get("day") or started_at.date().isoformat())
+        day = str(current.get("day") or _local_day(started_at))
         daily_path = ensure_daily_file(day)
         started_iso = iso(started_at)
         ended_iso = iso(now)
@@ -640,7 +654,7 @@ def persist_feedback_learning(
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.timezone.utc)
     with _LOCK:
-        daily_path = daily_root() / f"{now.date().isoformat()}.md"
+        daily_path = daily_root() / f"{_local_day(now)}.md"
         existing_daily = read_text(daily_path)
         if note and note not in existing_daily:
             prefix = (

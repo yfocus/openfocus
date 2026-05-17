@@ -106,6 +106,9 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     assert "companions" in tables
     assert "attention_items" in tables
     assert "agent_space_prompts" in tables
+    assert "agent_runtime_sessions" in tables
+    assert "agent_turns" in tables
+    assert "task_agent_activity" in tables
     assert version == "20260512_0001"
 
 
@@ -173,6 +176,16 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         prompt_cols = {
             r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_space_prompts)")
         }
+        turn_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(agent_turns)")
+        }
+        activity_cols = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(task_agent_activity)")
+        }
+        runtime_session_cols = {
+            r[1]
+            for r in conn.exec_driver_sql("PRAGMA table_info(agent_runtime_sessions)")
+        }
         migration_ids = {
             str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
         }
@@ -232,6 +245,13 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert {"title", "content", "enabled", "created_at", "updated_at"}.issubset(
         prompt_cols
     )
+    assert {"turn_id", "session_id", "task_public_id", "state"}.issubset(turn_cols)
+    assert {"task_public_id", "active_turn_id", "state", "dismissed_at"}.issubset(
+        activity_cols
+    )
+    assert {"session_id", "agent_runtime", "task_public_id", "state"}.issubset(
+        runtime_session_cols
+    )
     assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
     assert terminal_rows[1][1:] == ("inspiration_space", 34, None)
     assert task_public_id_col[3] == 0
@@ -243,3 +263,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert migrations.ATTENTION_ITEMS_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_PROMPTS_MIGRATION_ID in migration_ids
+    assert migrations.AGENT_ACTIVITY_MIGRATION_ID in migration_ids

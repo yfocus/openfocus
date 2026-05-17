@@ -277,6 +277,7 @@ def report_agent_event(
         agent=agent,
         task_id=task_id,
         payload=payload,
+        create_attention=False,
         audit={
             "kind": f"event.{kind}",
             "source": f"agent:{agent}",
@@ -304,6 +305,7 @@ def report_focus_result(s: Session, report: Any) -> dict:
         agent=report.agent,
         task_id=report.task_public_id,
         payload=payload,
+        create_attention=False,
         audit={
             "kind": "skill.focus_report",
             "source": f"agent:{report.agent}",

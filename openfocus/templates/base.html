@@ -478,10 +478,13 @@
       .attention-pop-icon.running::before{ content:""; width:13px; height:13px; border-radius:999px; display:block; border:2px solid color-mix(in srgb, var(--warning) 28%, var(--border)); border-top-color:var(--warning); animation: spin .8s linear infinite; }
       .attention-pop-content{ min-width:0; }
       .attention-pop-item-title{ color: var(--foreground); font-size:13px; font-weight:650; }
-      .attention-pop-meta{ margin-top:4px; color:var(--muted-foreground); font-size:11px; }
+      .attention-pop-meta{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted-foreground); font-size:11px; }
+      .attention-pop-meta-row{ margin-top:4px; display:flex; gap:6px; align-items:center; min-width:0; }
+      .attention-pop-agent{ flex:0 0 auto; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border:1px solid color-mix(in srgb, var(--ring) 32%, var(--border)); border-radius:999px; padding:1px 6px; color:var(--foreground); background:color-mix(in srgb, var(--ring) 10%, transparent); font-size:10px; line-height:16px; font-weight:650; }
       .attention-pop-state{ margin-top:5px; color:var(--muted-foreground); font-size:11px; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
       .attention-pop-state .state-dot{ width:7px; height:7px; border-radius:999px; background:var(--muted-foreground); display:inline-block; }
       .attention-pop-state.running .state-dot{ background:var(--warning); }
+      .attention-pop-state.waiting .state-dot{ background:var(--success); }
       .attention-pop-state.completed .state-dot{ background:var(--success); }
       .attention-pop-state.next_move .state-dot{ background:var(--primary); }
       .attention-pop-summary{ margin-top:6px; color:var(--muted-foreground); font-size:12px; }
@@ -588,14 +591,14 @@
         <div class="attention-pop-head">
           <div>
             <div class="attention-pop-title">Attention Inbox</div>
-            <div class="attention-pop-sub">Badge: R = running, W = waiting input</div>
+            <div class="attention-pop-sub">Badge: R = running, W = waiting / review</div>
           </div>
           <button type="button" class="btn-ghost" id="attention-hide" title="Hide for this session">Hide</button>
         </div>
         <div class="divider" style="margin:0;"></div>
         <div class="attention-pop-body" id="attention-pop-body"><div class="muted">loading...</div></div>
       </div>
-      <button type="button" class="attention-fab" id="attention-fab" aria-label="Open attention inbox" title="Attention Inbox · R=running W=waiting · drag to move">
+      <button type="button" class="attention-fab" id="attention-fab" aria-label="Open attention inbox" title="Attention Inbox · R=running W=waiting/review · drag to move">
         <span class="attention-fab-icon" aria-hidden="true">◎</span>
         <span class="attention-fab-text">Inbox</span>
       </button>
@@ -746,10 +749,11 @@
           if(!id) return;
           try{ await fetch('/api/attention/items/' + encodeURIComponent(id) + '/acted', { method:'POST' }); }catch(_){ }
         }
-        async function dismiss(id){
-          if(!id) return;
+        async function dismiss(id, url){
+          url = String(url || ('/api/attention/items/' + encodeURIComponent(id) + '/dismiss'));
+          if(!id && !url) return;
           try{
-            await fetch('/api/attention/items/' + encodeURIComponent(id) + '/dismiss', { method:'POST' });
+            await fetch(url, { method:'POST' });
             await load();
           }catch(_){ toast('dismiss failed'); }
         }
@@ -757,6 +761,15 @@
           const b = String(it?.bucket || '');
           if(b === 'running') return 'Running';
           if(b === 'next_move') return 'Recommended';
+          if(String(it?.type || '') === 'review_ready') return 'Review ready';
+          if(String(it?.type || '') === 'waiting') {
+            const wk = String(it?.waiting_kind || '');
+            if(wk.indexOf('approval') >= 0) return 'Waiting approval';
+            if(wk.indexOf('confirmation') >= 0) return 'Waiting confirmation';
+            return 'Waiting input';
+          }
+          if(String(it?.type || '') === 'stale') return 'Stale';
+          if(String(it?.type || '') === 'canceled') return 'Canceled';
           if(String(it?.type || '') === 'failed') return 'Failed';
           if(String(it?.type || '') === 'blocked') return 'Waiting input';
           return 'Completed';
@@ -771,12 +784,15 @@
           if(b === 'next_move') return 'next';
           return 'dot';
         }
+        function agentLabel(it){
+          return String(it?.agent_name || it?.agent_runtime || '').trim();
+        }
         function updateBadge(runningCount, waitingCount){
           const r = Number(runningCount || 0);
           const w = Number(waitingCount || 0);
           if(r > 0 || w > 0){
-            badge.innerHTML = '<span class="attention-fab-badge-chip running" title="Running spaces">R ' + esc2(String(Math.min(r, 99))) + '</span>'
-              + '<span class="attention-fab-badge-chip waiting" title="Waiting input / finished spaces">W ' + esc2(String(Math.min(w, 99))) + '</span>';
+            badge.innerHTML = '<span class="attention-fab-badge-chip running" title="Running agent turns">R ' + esc2(String(Math.min(r, 99))) + '</span>'
+              + '<span class="attention-fab-badge-chip waiting" title="Waiting / review-ready agent turns">W ' + esc2(String(Math.min(w, 99))) + '</span>';
             badge.style.display = 'flex';
           }else{
             badge.innerHTML = '';
@@ -791,34 +807,36 @@
           const primaryLabel = String(action.primary_label || 'Open');
           const bucket = String(it.bucket || 'completed');
           const dur = durationText(it);
+          const agent = agentLabel(it);
+          const dismissUrl = String(it.dismiss_url || ('/api/attention/items/' + encodeURIComponent(String(it.id || '')) + '/dismiss'));
           return '<div class="attention-pop-item ' + esc2(String(it.severity || 'info')) + '">'
             + '<span class="attention-pop-icon ' + esc2(iconClass(it)) + '" aria-hidden="true"></span>'
             + '<div class="attention-pop-content">'
             + '<div class="attention-pop-item-title">' + esc2(it.title || it.task_title || 'Untitled') + '</div>'
-            + '<div class="attention-pop-meta">' + esc2(it.goal_title || 'No goal') + '</div>'
+            + '<div class="attention-pop-meta-row">' + (agent ? ('<span class="attention-pop-agent" title="Agent">' + esc2(agent) + '</span>') : '') + '<div class="attention-pop-meta">' + esc2(it.goal_title || 'No goal') + '</div></div>'
             + '<div class="attention-pop-state ' + esc2(bucket) + '"><span>' + esc2(stateLabel(it)) + '</span>' + (dur ? ('<span>· ' + esc2(dur) + '</span>') : '') + '</div>'
             + (it.summary ? ('<div class="attention-pop-summary">' + esc2(it.summary) + '</div>') : '')
             + '<div class="attention-pop-actions">'
             + (primaryUrl ? ('<a class="btn-primary" role="button" href="' + esc2(primaryUrl) + '">' + esc2(primaryLabel) + '</a>') : '')
-            + (opts.dismiss ? ('<button type="button" class="btn-ghost js-pop-att-dismiss" data-id="' + esc2(it.id) + '">Dismiss</button>') : '')
+            + (opts.dismiss ? ('<button type="button" class="btn-ghost js-pop-att-dismiss" data-id="' + esc2(it.id) + '" data-url="' + esc2(dismissUrl) + '">Dismiss</button>') : '')
             + '</div></div></div>';
         }
         function render(att){
           const items = Array.isArray(att?.items) ? att.items : [];
           const buckets = att?.buckets || {};
           const running = Array.isArray(buckets.running) ? buckets.running : items.filter(x => x?.bucket === 'running');
-          const completed = Array.isArray(buckets.completed) ? buckets.completed : items.filter(x => x?.bucket === 'completed');
+          const waiting = Array.isArray(buckets.waiting) ? buckets.waiting : (Array.isArray(buckets.completed) ? buckets.completed : items.filter(x => x?.bucket === 'waiting' || x?.bucket === 'completed'));
           const nextItems = Array.isArray(buckets.next_move) ? buckets.next_move : items.filter(x => x?.bucket === 'next_move');
-          updateBadge(running.length, completed.length);
+          updateBadge(running.length, waiting.length);
           let html = '';
           if(running.length){
             html += '<div class="attention-pop-section"><div class="attention-pop-k">Running spaces</div>';
             for(const it of running) html += renderItem(it, { dismiss:true });
             html += '</div>';
           }
-          if(completed.length){
-            html += '<div class="attention-pop-section"><div class="attention-pop-k">Finished / waiting for input</div>';
-            for(const it of completed) html += renderItem(it, { dismiss:true });
+          if(waiting.length){
+            html += '<div class="attention-pop-section"><div class="attention-pop-k">Waiting / review</div>';
+            for(const it of waiting) html += renderItem(it, { dismiss:true });
             html += '</div>';
           }
           html += '<div class="attention-pop-section"><div class="attention-pop-k">NextMove recommendations</div>';
@@ -829,7 +847,7 @@
         }
         async function load(){
           try{
-            const a = await fetch('/api/attention/items?limit=30', { cache:'no-store' }).then(r=> r.ok ? r.json() : {items:[], count:0, buckets:{}});
+            const a = await fetch('/api/agent_activity/summary?limit=30', { cache:'no-store' }).then(r=> r.ok ? r.json() : {items:[], count:0, buckets:{}});
             render(a);
           }catch(_){ body.innerHTML = '<div class="muted">failed to load.</div>'; }
         }
@@ -901,7 +919,7 @@
           const t = e.target;
           if(!(t instanceof HTMLElement)) return;
           const dis = t.closest('.js-pop-att-dismiss');
-          if(dis){ void dismiss(dis.getAttribute('data-id')); return; }
+          if(dis){ void dismiss(dis.getAttribute('data-id'), dis.getAttribute('data-url')); return; }
           const act = t.closest('.js-pop-att-act');
           if(act){
             const url = act.getAttribute('data-url') || '';

@@ -106,6 +106,8 @@ npm run build
 make serve
 ```
 
+`make serve` 会在启动 OpenFocus service 前加载仓库根目录的 `.env`。
+
 然后打开：
 
 ```text
@@ -120,7 +122,111 @@ http://127.0.0.1:8001/goals
 poetry run python -m openfocus.companion
 ```
 
+Companion 会在启动时加载仓库根目录的 `.env`；使用 `make companion` 时也会加载同一个文件。
+
 然后在 OpenFocus 的 Companion 页面完成配对。
+
+**安装 Agent runtime hooks**
+
+OpenFocus 通过本地 hook 跟踪 Coco 和 Codex turn。安装脚本会在写入前备份已有的
+Coco/Codex hook 配置：
+
+```shell
+sh scripts/install_agent_hooks.py
+```
+
+OpenFocus 实例 id 默认是 `default`。把实例 id 写进仓库根目录的 `.env`，OpenFocus
+service、Companion 和 hook installer 就会自动读取同一个值：
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+之后启动时不需要在每条命令前重复设置实例相关环境变量：
+
+```shell
+make serve
+make companion
+sh scripts/install_agent_hooks.py
+```
+
+已有的 shell 环境变量优先级高于 `.env`。也可以通过 `OPENFOCUS_ENV_FILE` 指向指定
+env 文件，通过 `OPENFOCUS_DOTENV=0` 禁用 dotenv 加载。
+
+默认实例使用：
+
+- hook socket：`~/.openfocus/hooks.sock`
+- hook spool 目录：`/tmp/openfocus-agent-hooks-<uid>/default`
+
+如果同时运行多个 OpenFocus 实例，每个实例都需要在自己的 env 文件中设置一个稳定的
+`OPENFOCUS_INSTANCE_ID`。可以使用独立 checkout/cwd 中的 `.env`，也可以用
+`OPENFOCUS_ENV_FILE` 为第二个实例指定另一份 env 文件。命名实例会使用隔离的默认路径：
+
+- hook socket：`~/.openfocus/hooks-<OPENFOCUS_INSTANCE_ID>.sock`
+- hook spool 目录：`/tmp/openfocus-agent-hooks-<uid>/<OPENFOCUS_INSTANCE_ID>`
+
+开发实例 `.env` 示例：
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+第二个调试实例 env 文件示例：
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=debug
+OPENFOCUS_PORT=8002
+OPENFOCUS_GRPC_PORT=17892
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17892
+```
+
+如果你手动覆盖 `OPENFOCUS_HOOK_SOCK` 或 `OPENFOCUS_HOOK_SPOOL_DIR`，Companion
+和 `scripts/install_agent_hooks.py` 必须使用同一组值。
+
+**Codex hook 信任**
+
+Codex 不会执行新注册的 hook，直到你在 Codex TUI 中显式信任它。安装 hooks 后，
+在 OpenFocus Agent Space 或 terminal 中启动 Codex，然后执行：
+
+```text
+/hooks
+```
+
+信任以下 Codex 事件对应的 OpenFocus entries：
+
+- `SessionStart`：关联 session。
+- `UserPromptSubmit`：识别 turn 启动和 running 状态。
+- `PermissionRequest`：识别 waiting-for-approval 状态。
+- `Stop`：识别 turn completed / review-ready 状态。
+
+完成 trust 后，Codex 才会把 hook events 发送给 OpenFocus。
+
+**Coco hook 注册**
+
+Coco 支持多个 hooks，所以安装脚本会向 Coco 配置追加 OpenFocus block，而不是替换已有
+hooks。默认配置路径是 `~/.trae/traecli.yaml`；如需覆盖，使用 `--coco-config`。
+
+OpenFocus Coco block 会注册这些事件：
+
+- `pre_tool_use`
+- `post_tool_use`
+- `post_tool_use_failure`
+- `user_prompt_submit`
+- `stop`
+- `subagent_start`
+- `subagent_stop`
+- `session_start`
+- `session_end`
+- `pre_compact`
+- `post_compact`
+- `notification`
+- `permission_request`
 
 ## 开发命令
 

@@ -22,19 +22,21 @@
 
 ---
 
-## Event Spec：统一事件与 Audit Memory
+## Event Spec：统一事件、Runtime Activity 与 Audit Memory
 
-OpenFocus 把“发生了什么”统一建模为事件：
+OpenFocus 将外部 Agent 报告和本机 runtime 状态分开处理：
 
-- **events 表**：面向产品展示与高价值提醒的结构化事件流。Recent Events 直接读取这里；Attention Inbox 只从其中一部分高价值事件派生。
+- **events 表**：面向产品展示、Task history 与审计的结构化 journal。Recent Events 直接读取这里。
+- **agent_turns / task_agent_activity**：面向悬浮球和当前运行态的 runtime read model，只由 OpenFocus/Companion 可信 runtime signal 驱动。
 - **audit memory**：面向回忆、总结与长期记忆的细粒度审计日志。它记录更多细节，例如终端 I/O、Agent Session chunk、Inspiration 回合等。
 
-二者不是两套语义：**audit memory 与 events 表都记录 OpenFocus 上发生的事件，只是记录粒度和消费场景不同**。设计原则：
+`/api/agent/events` 与 `focus_report` 仍然用于 Agent/Skill 报告，但它们默认不再改变 session/task/agent 当前状态。设计原则：
 
 1. `kind` 使用同一套命名体系：`domain.object.action` 或 `domain.action`，例如 `task.progress`、`agent.completed`、`inspiration.draft_generated`。
 2. events 表保存展示所需的稳定子集；audit memory 保存更完整、更频繁的明细。
 3. 写入 events 的 Agent/Skill 事件必须同步沉淀到 audit memory；只进入 audit memory 的高频/内部事件不要求同步进入 events。
 4. Task 是否真正完成始终由用户确认；任何 `completed` / `succeeded` 上报都只表示“Agent 报告完成”。
+5. 悬浮球 R/W 只读取 `task_agent_activity`，不能从 HTTP 上报事件推断当前状态。
 
 ### events 表格式
 
@@ -72,19 +74,19 @@ OpenFocus 把“发生了什么”统一建模为事件：
 - `task_public_id`：当 `task_id` 无法填写但 payload 可携带关联时使用；仍优先填写顶层 `task_id`。
 - `metadata`：扩展元信息，不能包含密钥、token、完整凭证。
 
-### Agent/Skill 必须上报的规范事件
+### Agent/Skill 推荐上报的 journal 事件
 
-外部 Agent 在 AgentSpace 中工作时，至少遵守以下事件子集：
+外部 Agent 在 AgentSpace 中工作时，推荐遵守以下事件子集。这些事件进入 `events` 与 audit memory，但不直接驱动悬浮球当前状态：
 
-| kind | 触发时机 | 必要 payload | 是否进入 Attention |
+| kind | 触发时机 | 必要 payload | 状态影响 |
 | --- | --- | --- | --- |
-| `task.started` | 开始处理当前 Task | `status="running"`, `message` | 是，生成 `running` |
-| `task.progress` | 有可读进度、阶段变化或重要中间结果 | `status="running"`, `message`; 可选 `progress`, `step`, `total_steps` | status 为 running/progress/in_progress 时生成或更新 `running`；失败/阻塞状态进入对应分区 |
-| `task.completed` | Agent 认为任务已完成，等待用户确认 | `status="succeeded"`, `summary` | 是，生成 `completion_reported` |
-| `task.failed` | Agent 无法完成任务 | `status="failed"`, `error` 或 `summary` | 是，生成 `failed` |
-| `task.blocked` | Agent 需要用户/外部条件继续 | `status="blocked"` 或 `waiting`, `reason` | 是，生成 `blocked` |
-| `agent.completed` | 一次 Agent run 结束，尤其是 Next Move/推荐类 Agent 完成 | `status`, `result` 或 `summary` | 当 `payload.result.items[].target.task_public_id` 存在时生成 `next_move` |
-| `skill.focus_report` | 使用 focus_report skill 上报最终结果 | 见下节 | 成功/失败/阻塞状态会进入 Attention |
+| `task.started` | Agent 自报开始处理当前 Task | `status="running"`, `message` | journal only |
+| `task.progress` | 有可读进度、阶段变化或重要中间结果 | `status="running"`, `message`; 可选 `progress`, `step`, `total_steps` | journal only |
+| `task.completed` | Agent 认为任务已完成，等待用户确认 | `status="succeeded"`, `summary` | journal only |
+| `task.failed` | Agent 无法完成任务 | `status="failed"`, `error` 或 `summary` | journal only |
+| `task.blocked` | Agent 需要用户/外部条件继续 | `status="blocked"` 或 `waiting`, `reason` | journal only |
+| `agent.completed` | 一次 Agent run 结束，尤其是 Next Move/推荐类 Agent 完成 | `status`, `result` 或 `summary` | journal；Next Move 仍可生成推荐卡 |
+| `skill.focus_report` | 使用 focus_report skill 上报最终结果 | 见下节 | journal only |
 
 推荐上报节奏：
 
@@ -131,15 +133,41 @@ OpenFocus 把“发生了什么”统一建模为事件：
 
 当 audit-only 事件需要展示给用户、参与 Recent Events 或触发 Attention 时，应提升为 events 表事件，并保持相同 `kind` 命名语义。
 
-### Attention Inbox 派生规则
+### Runtime Activity 派生规则
 
-Attention Inbox 不展示所有事件，只展示 Agent 上报驱动的三类空间状态，并显示“进入当前状态已有多久”：
+悬浮球不展示所有 events，只展示 runtime activity read model，并显示“进入当前状态已有多久”：
 
-1. Running spaces：`task.started`、`agent.started`，或任意事件 `status in running/in_progress/progress` → `running` / `info`。
-2. Finished / waiting for input：`task.completed` 或 `skill.focus_report` 成功状态 → `completion_reported` / `success`；失败和阻塞状态分别进入 `failed` / `blocked`，也归入该分区等待用户处理。
-3. Next Move：`agent.completed` 且 `payload.result.items[].target.task_public_id` 存在 → `next_move` / `info`。
+1. Running：`runtime.turn.submitted` / `runtime.turn.started` / `runtime.turn.resumed` → `task_agent_activity.state = running`。
+2. Waiting：`runtime.turn.waiting_for_approval` / `runtime.turn.waiting_for_input` / `runtime.turn.waiting_for_confirmation` → `state = waiting`。
+3. Review ready：`runtime.turn.completed` → `state = review_ready`，等待用户在 Task 中确认完成或继续。
+4. Failed/stale/canceled：`runtime.turn.failed` / `runtime.turn.stale` / `runtime.turn.canceled` 进入 W 分区。
+5. Next Move：`agent.completed` 且 `payload.result.items[].target.task_public_id` 存在时仍可生成推荐卡，但不计入 R/W 徽标。
 
-悬浮球徽标展示两个数字：`R` 表示 Running spaces 数量，`W` 表示 finished / waiting-input 数量；Next Move 只在点开后的第三分区展示，不计入徽标数字。同一 Task 的同类 active Attention 会去重更新，避免用户看到重复卡片。状态持续时间以首次进入当前 item_type 的时间为准；同一状态内的新进度只更新摘要和最新事件，不重置持续时间。进入完成/失败/阻塞状态时会自动结束同 Task 的 running 状态；Next Move 与运行状态相互独立。Running 和 finished/waiting-input 条目都允许用户手动 dismiss。
+悬浮球徽标展示两个数字：`R` 表示 running turn 数量，`W` 表示 waiting / review-ready / failed / stale / canceled 数量。状态持续时间以进入当前 activity state 的时间为准；同一状态内的新进度只更新摘要和最新 signal，不重置持续时间。
+
+### OpenFocus runtime events
+
+Runtime events 是 OpenFocus 内部规范事件，通常来自 Companion gRPC，而不是外部 HTTP agent report：
+
+- `runtime.session.started`
+- `runtime.session.resumed`
+- `runtime.session.ended`
+- `runtime.session.offline`
+- `runtime.turn.submitted`
+- `runtime.turn.started`
+- `runtime.turn.activity`
+- `runtime.turn.waiting_for_approval`
+- `runtime.turn.waiting_for_input`
+- `runtime.turn.waiting_for_confirmation`
+- `runtime.interaction.resolved`
+- `runtime.turn.resumed`
+- `runtime.turn.completed`
+- `runtime.turn.failed`
+- `runtime.turn.canceled`
+- `runtime.turn.stale`
+- `runtime.subagent.started`
+- `runtime.subagent.completed`
+- `runtime.context.compacted`
 
 ### ContextPack（最小字段）
 

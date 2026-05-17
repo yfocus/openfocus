@@ -3,19 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
-import socket
 from pathlib import Path
 
 
 def _unused_local_addr() -> str:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("127.0.0.1", 0))
-        host, port = sock.getsockname()
-    finally:
-        sock.close()
-    return f"{host}:{port}"
+    return "127.0.0.1:1"
 
 
 def _load_runtime(monkeypatch, state_path: Path):
@@ -125,3 +119,148 @@ def test_run_companion_resets_backoff_after_stable_connection(
     asyncio.run(rt.run_companion(grpc_addr="127.0.0.1:1"))
 
     assert sleep_delays == [0.2, 0.4, 0.2]
+
+
+def test_hook_client_converts_hook_payload_to_runtime_signal(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENFOCUS_INSTANCE_ID", "default")
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+
+    payload = {
+        "hook_kind": "turn-ended",
+        "agent_runtime": "codex",
+        "runtime": {
+            "openfocus_session_id": "sess-1",
+            "openfocus_task_id": "task-public-id",
+            "openfocus_terminal_id": "term-1",
+            "cwd": str(tmp_path),
+            "tty": "ttys001",
+            "ppid": "123",
+        },
+        "runtime_ts": "1770000000.5",
+        "payload": {
+            "turn_id": "turn-1",
+            "summary": "done",
+        },
+    }
+
+    class Reader:
+        async def read(self, n: int) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+    class Writer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def _run() -> None:
+        out_q = asyncio.Queue()
+        writer = Writer()
+        await rt._handle_hook_client(Reader(), writer, out_q)
+        msg = await asyncio.wait_for(out_q.get(), timeout=1.0)
+        assert writer.closed is True
+        assert msg.WhichOneof("msg") == "runtime_signal"
+        sig = msg.runtime_signal
+        assert sig.raw_kind == "turn-ended"
+        assert sig.agent_runtime == "codex"
+        assert sig.session_id == "sess-1"
+        assert sig.turn_id == "turn-1"
+        assert sig.task_public_id == "task-public-id"
+        assert sig.terminal_id == "term-1"
+        assert sig.cwd == str(tmp_path)
+        assert sig.ppid == 123
+        assert sig.runtime_ts == 1770000000.5
+        assert sig.source == "hook"
+        assert json.loads(sig.payload_json)["summary"] == "done"
+
+    asyncio.run(_run())
+
+
+def test_hook_client_ignores_signals_from_other_openfocus_instance(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENFOCUS_INSTANCE_ID", "dev")
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+
+    payload = {
+        "hook_kind": "user-prompt-submit",
+        "agent_runtime": "codex",
+        "runtime": {
+            "openfocus_instance_id": "debug",
+            "openfocus_task_id": "task-public-id",
+            "openfocus_terminal_id": "term-1",
+        },
+        "payload": {"session_id": "sess-1"},
+    }
+
+    class Reader:
+        async def read(self, n: int) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+    class Writer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def _run() -> None:
+        out_q = asyncio.Queue()
+        writer = Writer()
+        await rt._handle_hook_client(Reader(), writer, out_q)
+        assert writer.closed is True
+        assert out_q.empty()
+
+    asyncio.run(_run())
+
+
+def test_hook_spool_drain_converts_spooled_payload_to_runtime_signal(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENFOCUS_INSTANCE_ID", "default")
+    monkeypatch.setenv("OPENFOCUS_HOOK_SPOOL_DIR", str(tmp_path / "spool"))
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    payload_path = spool / "signal.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "hook_kind": "user-prompt-submit",
+                "agent_runtime": "codex",
+                "runtime": {
+                    "openfocus_instance_id": "default",
+                    "openfocus_session_id": "sess-spool",
+                    "openfocus_task_id": "task-public-id",
+                    "openfocus_terminal_id": "term-spool",
+                    "cwd": str(tmp_path),
+                },
+                "payload": {"turn_id": "turn-spool", "prompt": "hello"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _run() -> None:
+        out_q = asyncio.Queue()
+        assert await rt._drain_hook_spool_once(out_q) == 1
+        assert not payload_path.exists()
+        msg = await asyncio.wait_for(out_q.get(), timeout=1.0)
+        sig = msg.runtime_signal
+        assert sig.raw_kind == "user-prompt-submit"
+        assert sig.agent_runtime == "codex"
+        assert sig.session_id == "sess-spool"
+        assert sig.turn_id == "turn-spool"
+        assert sig.task_public_id == "task-public-id"
+        assert sig.terminal_id == "term-spool"
+
+    asyncio.run(_run())

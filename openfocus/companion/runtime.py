@@ -8,9 +8,12 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
+import shlex
 import shutil
 import socket
+import stat
 import string
 import subprocess
 import sys
@@ -22,8 +25,11 @@ from typing import AsyncIterator
 
 import grpc
 
+from ..infrastructure import env as env_config
 from . import companion_rpc_pb2 as pb2
 from . import companion_rpc_pb2_grpc as pb2_grpc
+
+env_config.load_dotenv_once()
 
 LOG = logging.getLogger("openfocus.companion")
 
@@ -81,13 +87,16 @@ def _state_path() -> Path:
         os.environ.get("OPENFOCUS_COMPANION_STATE", "~/.openfocus/companion_state.json")
     )
     p = p.expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return p
 
 
 def _load_state() -> dict:
-    p = _state_path()
     try:
+        p = _state_path()
         return json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
@@ -96,8 +105,13 @@ def _load_state() -> dict:
 
 
 def _save_state(st: dict) -> None:
-    p = _state_path()
-    p.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        p = _state_path()
+        p.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        # Companion can still run in restricted environments; it simply loses
+        # persisted pairing state until a writable path is configured.
+        pass
 
 
 def _gen_device_id() -> str:
@@ -288,11 +302,285 @@ def _openfocus_grpc_addr() -> str:
 
 def _capabilities() -> list[str]:
     # MVP：先声明已实现的能力
-    return ["pairing", "choose_directory", "agent", "terminal"]
+    return ["pairing", "choose_directory", "agent", "terminal", "runtime_hooks"]
 
 
 def _coco_bin() -> str:
     return str(os.environ.get("OPENFOCUS_COCO_BIN") or "coco").strip() or "coco"
+
+
+def _safe_instance_id(value: str | None) -> str:
+    raw = str(value or "").strip() or "default"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._")
+    return safe or "default"
+
+
+def _openfocus_instance_id() -> str:
+    return _safe_instance_id(os.environ.get("OPENFOCUS_INSTANCE_ID") or "default")
+
+
+def _hook_sock_path() -> Path:
+    configured = str(os.environ.get("OPENFOCUS_HOOK_SOCK") or "").strip()
+    if configured:
+        p = Path(configured)
+    else:
+        instance_id = _openfocus_instance_id()
+        if instance_id == "default":
+            p = Path("~/.openfocus/hooks.sock")
+        else:
+            p = Path(f"~/.openfocus/hooks-{instance_id}.sock")
+    return p.expanduser()
+
+
+def _hook_spool_dir() -> Path:
+    configured = str(os.environ.get("OPENFOCUS_HOOK_SPOOL_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path(f"/tmp/openfocus-agent-hooks-{os.getuid()}") / _openfocus_instance_id()
+
+
+def _accept_hook_instance(origin_instance_id: object) -> bool:
+    own = _openfocus_instance_id()
+    origin = (
+        _safe_instance_id(str(origin_instance_id or "")) if origin_instance_id else ""
+    )
+    if origin:
+        return origin == own
+    return own == "default"
+
+
+def _payload_json(value: object, *, max_bytes: int) -> tuple[str, bool]:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        text = json.dumps({"value": str(value)}, ensure_ascii=False)
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text, False
+    clipped = raw[:max_bytes]
+    try:
+        return clipped.decode("utf-8"), True
+    except Exception:
+        return clipped.decode("utf-8", errors="replace"), True
+
+
+def _hook_text(value: object, *, max_len: int = 4000) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def _hook_payload_field(payload: object, *keys: str) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return _hook_text(value, max_len=4000)
+    return ""
+
+
+def _hook_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _hook_float(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _handle_hook_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    out_q: asyncio.Queue[pb2.ClientToServer],
+) -> None:
+    max_bytes = int(os.environ.get("OPENFOCUS_HOOK_MAX_BYTES") or str(256 * 1024))
+    max_bytes = max(4096, min(max_bytes, 2 * 1024 * 1024))
+    try:
+        raw = await reader.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        try:
+            envelope = json.loads(raw.decode("utf-8"))
+        except Exception:
+            envelope = {"payload": raw.decode("utf-8", errors="replace")}
+        if not isinstance(envelope, dict):
+            envelope = {"payload": envelope}
+
+        await _enqueue_hook_envelope(
+            envelope, out_q, max_bytes=max_bytes, truncated=truncated
+        )
+    except Exception as e:
+        try:
+            LOG.exception("hook signal 处理失败：%s", e)
+        except Exception:
+            pass
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+            await writer.wait_closed()
+
+
+async def _enqueue_hook_envelope(
+    envelope: dict[str, object],
+    out_q: asyncio.Queue[pb2.ClientToServer],
+    *,
+    max_bytes: int,
+    truncated: bool = False,
+) -> bool:
+    payload = envelope.get("payload")
+    runtime = (
+        envelope.get("runtime") if isinstance(envelope.get("runtime"), dict) else {}
+    )
+    if payload is None:
+        payload = {}
+    if not _accept_hook_instance(runtime.get("openfocus_instance_id")):
+        try:
+            LOG.debug(
+                "忽略非本实例 hook signal：own=%s origin=%s",
+                _openfocus_instance_id(),
+                runtime.get("openfocus_instance_id") or "",
+            )
+        except Exception:
+            pass
+        return False
+    raw_kind = _hook_text(
+        envelope.get("hook_kind")
+        or envelope.get("kind")
+        or _hook_payload_field(payload, "hook_event_name", "event")
+        or "unknown",
+        max_len=128,
+    )
+    agent_runtime = _hook_text(
+        envelope.get("agent_runtime") or envelope.get("agent") or "agent",
+        max_len=64,
+    )
+    payload_text, payload_truncated = _payload_json(payload, max_bytes=max_bytes)
+    signal = pb2.AgentRuntimeSignal(
+        signal_id=str(uuid.uuid4()),
+        raw_kind=raw_kind,
+        agent_runtime=agent_runtime,
+        session_id=_hook_text(
+            runtime.get("openfocus_session_id")
+            or runtime.get("session_id")
+            or _hook_payload_field(payload, "session_id"),
+            max_len=128,
+        ),
+        turn_id=_hook_text(_hook_payload_field(payload, "turn_id"), max_len=64),
+        task_public_id=_hook_text(
+            runtime.get("openfocus_task_id")
+            or runtime.get("task_public_id")
+            or runtime.get("task_id")
+            or _hook_payload_field(payload, "task_public_id", "task_id"),
+            max_len=36,
+        ),
+        terminal_id=_hook_text(
+            runtime.get("openfocus_terminal_id")
+            or runtime.get("terminal_id")
+            or _hook_payload_field(payload, "terminal_id"),
+            max_len=64,
+        ),
+        cwd=_hook_text(runtime.get("cwd"), max_len=4000),
+        tty=_hook_text(runtime.get("tty"), max_len=256),
+        ppid=_hook_int(runtime.get("ppid")),
+        runtime_ts=_hook_float(envelope.get("runtime_ts") or envelope.get("ts")),
+        source="hook",
+        payload_json=payload_text,
+        payload_truncated=bool(truncated or payload_truncated),
+    )
+    await out_q.put(pb2.ClientToServer(runtime_signal=signal))
+    return True
+
+
+async def _drain_hook_spool_once(out_q: asyncio.Queue[pb2.ClientToServer]) -> int:
+    spool_dir = _hook_spool_dir()
+    max_bytes = int(os.environ.get("OPENFOCUS_HOOK_MAX_BYTES") or str(256 * 1024))
+    max_bytes = max(4096, min(max_bytes, 2 * 1024 * 1024))
+    try:
+        spool_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        try:
+            LOG.warning("OpenFocus hook spool 创建失败：%s", e)
+        except Exception:
+            pass
+        return 0
+
+    processed = 0
+    for path in sorted(spool_dir.glob("*.json"))[:100]:
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            try:
+                LOG.debug("读取 hook spool 失败：path=%s error=%s", path, e)
+            except Exception:
+                pass
+            continue
+        with contextlib.suppress(Exception):
+            path.unlink()
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        try:
+            envelope = json.loads(raw.decode("utf-8"))
+        except Exception:
+            envelope = {"payload": raw.decode("utf-8", errors="replace")}
+        if not isinstance(envelope, dict):
+            envelope = {"payload": envelope}
+        if await _enqueue_hook_envelope(
+            envelope, out_q, max_bytes=max_bytes, truncated=truncated
+        ):
+            processed += 1
+    return processed
+
+
+async def _hook_spool_poller(
+    out_q: asyncio.Queue[pb2.ClientToServer], stop_event: asyncio.Event
+) -> None:
+    poll_s = float(os.environ.get("OPENFOCUS_HOOK_SPOOL_POLL_SECONDS") or "0.25")
+    poll_s = max(0.05, min(poll_s, 5.0))
+    while not stop_event.is_set():
+        with contextlib.suppress(Exception):
+            await _drain_hook_spool_once(out_q)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_s)
+
+
+async def _start_hook_server(
+    out_q: asyncio.Queue[pb2.ClientToServer],
+) -> asyncio.AbstractServer | None:
+    if not hasattr(asyncio, "start_unix_server"):
+        return None
+    sock_path = _hook_sock_path()
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    if sock_path.exists():
+        try:
+            mode = sock_path.stat().st_mode
+            if not stat.S_ISSOCK(mode):
+                raise RuntimeError(
+                    f"hook socket path exists and is not a socket: {sock_path}"
+                )
+            sock_path.unlink()
+        except FileNotFoundError:
+            pass
+    server = await asyncio.start_unix_server(
+        lambda r, w: _handle_hook_client(r, w, out_q), path=str(sock_path)
+    )
+    with contextlib.suppress(Exception):
+        os.chmod(sock_path, 0o600)
+    try:
+        LOG.info("OpenFocus hook socket listening: %s", sock_path)
+    except Exception:
+        pass
+    return server
 
 
 class _AgentSessionRuntime:
@@ -413,6 +701,11 @@ class _AgentManager:
         env.setdefault("GRPC_VERBOSITY", "ERROR")
         env.setdefault("ABSL_MIN_LOG_LEVEL", "2")
         env.setdefault("GLOG_minloglevel", "2")
+        env["OPENFOCUS_INSTANCE_ID"] = _openfocus_instance_id()
+        env["OPENFOCUS_HOOK_SOCK"] = str(_hook_sock_path())
+        env["OPENFOCUS_HOOK_SPOOL_DIR"] = str(_hook_spool_dir())
+        env["OPENFOCUS_TASK_ID"] = str(rt.task_public_id or "")
+        env["OPENFOCUS_AGENT_SESSION_ID"] = str(rt.session_id or "")
 
         try:
             LOG.info("启动命令：%s", " ".join([str(x) for x in cmd[:6]]) + " ...")
@@ -658,7 +951,14 @@ async def _wait_tcp_ready(
 
 
 async def _ensure_tmux_terminal_session(
-    *, tmux_bin: str, tmux_name: str, root_path: str, shell: str, mouse: bool = True
+    *,
+    tmux_bin: str,
+    tmux_name: str,
+    root_path: str,
+    shell: str,
+    mouse: bool = True,
+    env: dict[str, str] | None = None,
+    unset_env: list[str] | None = None,
 ) -> None:
     """Create/reuse a tmux session and configure wheel/copy behavior.
 
@@ -677,6 +977,22 @@ async def _ensure_tmux_terminal_session(
     await has.wait()
 
     if has.returncode != 0:
+        shell_cmd = shell
+        env_parts: list[str] = []
+        for key in unset_env or []:
+            clean_key = str(key or "").strip()
+            if clean_key:
+                env_parts.extend(["-u", clean_key])
+        for key, value in (env or {}).items():
+            clean_key = str(key or "").strip()
+            if clean_key:
+                env_parts.append(f"{clean_key}={shlex.quote(str(value or ''))}")
+        if env_parts:
+            assignments = " ".join(
+                shlex.quote(part) if part.startswith("-") else part
+                for part in env_parts
+            )
+            shell_cmd = f"env {assignments} {shlex.quote(shell)}"
         create = await asyncio.create_subprocess_exec(
             tmux_bin,
             "new-session",
@@ -685,13 +1001,49 @@ async def _ensure_tmux_terminal_session(
             tmux_name,
             "-c",
             root_path,
-            shell,
+            shell_cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
         await create.wait()
         if create.returncode != 0:
             raise RuntimeError("tmux new-session failed")
+
+    for key in unset_env or []:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            continue
+        unset_proc = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "set-environment",
+            "-u",
+            "-t",
+            tmux_name,
+            clean_key,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await unset_proc.wait()
+        if unset_proc.returncode != 0:
+            raise RuntimeError(f"tmux unset-environment failed: {clean_key}")
+
+    for key, value in (env or {}).items():
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            continue
+        set_env = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "set-environment",
+            "-t",
+            tmux_name,
+            clean_key,
+            str(value or ""),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await set_env.wait()
+        if set_env.returncode != 0:
+            raise RuntimeError(f"tmux set-environment failed: {clean_key}")
 
     opt = await asyncio.create_subprocess_exec(
         tmux_bin,
@@ -719,6 +1071,7 @@ class _TerminalManager:
         terminal_id: str,
         root_path: str,
         base_path: str,
+        task_public_id: str = "",
         out_q: asyncio.Queue[pb2.ClientToServer],
     ) -> _TerminalSession:
         tid = (terminal_id or "").strip() or str(uuid.uuid4())
@@ -768,6 +1121,17 @@ class _TerminalManager:
             root_path=rp,
             shell=shell,
             mouse=True,
+            env={
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "CLICOLOR": "1",
+                "OPENFOCUS_INSTANCE_ID": _openfocus_instance_id(),
+                "OPENFOCUS_HOOK_SOCK": str(_hook_sock_path()),
+                "OPENFOCUS_HOOK_SPOOL_DIR": str(_hook_spool_dir()),
+                "OPENFOCUS_TASK_ID": str(task_public_id or ""),
+                "OPENFOCUS_TERMINAL_ID": tid,
+            },
+            unset_env=["NO_COLOR"],
         )
         cmd = [
             ttyd_bin,
@@ -1247,6 +1611,8 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
     out_q: asyncio.Queue[pb2.ClientToServer] = asyncio.Queue()
     agent_mgr = _AgentManager()
     term_mgr = _TerminalManager()
+    hook_server: asyncio.AbstractServer | None = None
+    hook_spool_task: asyncio.Task | None = None
     connected = False
     connected_at: float | None = None
 
@@ -1269,6 +1635,16 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
         server_companion_id=int(getattr(RUNTIME, "server_companion_id", 0) or 0),
     )
     await out_q.put(pb2.ClientToServer(hello=hello))
+    try:
+        hook_server = await _start_hook_server(out_q)
+    except Exception as e:
+        try:
+            LOG.warning("OpenFocus hook socket 启动失败：%s", e)
+        except Exception:
+            pass
+    hook_spool_task = asyncio.create_task(
+        _hook_spool_poller(out_q, stop_event), name="openfocus-hook-spool"
+    )
     try:
         LOG.debug(
             "发送 hello：name=%s capabilities=%s has_token=%s",
@@ -1574,6 +1950,7 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
                             terminal_id=req.terminal_id,
                             root_path=req.root_path,
                             base_path=req.base_path,
+                            task_public_id=req.task_public_id,
                             out_q=out_q,
                         )
                         resp = pb2.TerminalStartResponse(
@@ -1702,6 +2079,18 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
             cancel_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await cancel_task
+            if hook_server is not None:
+                hook_server.close()
+                with contextlib.suppress(Exception):
+                    await hook_server.wait_closed()
+            if hook_spool_task is not None:
+                hook_spool_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await hook_spool_task
+            with contextlib.suppress(Exception):
+                sock_path = _hook_sock_path()
+                if sock_path.exists() and stat.S_ISSOCK(sock_path.stat().st_mode):
+                    sock_path.unlink()
 
 
 def _print_banner() -> None:

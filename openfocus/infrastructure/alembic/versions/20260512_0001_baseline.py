@@ -274,6 +274,110 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
+        "agent_runtime_sessions",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("session_id", sa.String(length=128), nullable=False, unique=True),
+        sa.Column(
+            "agent_runtime", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "task_public_id", sa.String(length=36), nullable=False, server_default=""
+        ),
+        sa.Column("companion_id", sa.Integer(), nullable=True),
+        sa.Column(
+            "terminal_id", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "workspace_root", sa.String(length=4000), nullable=False, server_default=""
+        ),
+        sa.Column("state", sa.String(length=32), nullable=False, server_default="idle"),
+        sa.Column(
+            "last_signal_kind", sa.String(length=128), nullable=False, server_default=""
+        ),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_agent_runtime_sessions_state",
+        "agent_runtime_sessions",
+        ["state", "updated_at"],
+    )
+    op.create_table(
+        "agent_turns",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("turn_id", sa.String(length=64), nullable=False, unique=True),
+        sa.Column(
+            "session_id", sa.String(length=128), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "agent_runtime", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "task_public_id", sa.String(length=36), nullable=False, server_default=""
+        ),
+        sa.Column("companion_id", sa.Integer(), nullable=True),
+        sa.Column(
+            "terminal_id", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "state", sa.String(length=32), nullable=False, server_default="running"
+        ),
+        sa.Column("source", sa.String(length=64), nullable=False, server_default=""),
+        sa.Column(
+            "last_signal_kind", sa.String(length=128), nullable=False, server_default=""
+        ),
+        sa.Column("summary", sa.String(length=2000), nullable=False, server_default=""),
+        sa.Column("error", sa.String(length=2000), nullable=False, server_default=""),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_agent_turns_task_state", "agent_turns", ["task_public_id", "state"]
+    )
+    op.create_index("ix_agent_turns_session", "agent_turns", ["session_id"])
+    op.create_table(
+        "task_agent_activity",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("task_public_id", sa.String(length=36), nullable=False, unique=True),
+        sa.Column(
+            "active_turn_id", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "session_id", sa.String(length=128), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "agent_runtime", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column("companion_id", sa.Integer(), nullable=True),
+        sa.Column(
+            "terminal_id", sa.String(length=64), nullable=False, server_default=""
+        ),
+        sa.Column(
+            "state", sa.String(length=32), nullable=False, server_default="running"
+        ),
+        sa.Column(
+            "severity", sa.String(length=32), nullable=False, server_default="info"
+        ),
+        sa.Column("title", sa.String(length=512), nullable=False, server_default=""),
+        sa.Column("summary", sa.String(length=2000), nullable=False, server_default=""),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("dismissed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_task_agent_activity_state", "task_agent_activity", ["state", "updated_at"]
+    )
+    op.create_table(
         "remote_terminal_sessions",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column(
@@ -342,6 +446,9 @@ def downgrade() -> None:
         "companions",
         "remote_terminal_outputs",
         "remote_terminal_sessions",
+        "task_agent_activity",
+        "agent_turns",
+        "agent_runtime_sessions",
         "agent_messages",
         "agent_sessions",
         "agent_space_prompts",

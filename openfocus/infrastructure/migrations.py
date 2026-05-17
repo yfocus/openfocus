@@ -14,6 +14,7 @@ REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
 ATTENTION_ITEMS_MIGRATION_ID = "20260514_attention_items"
 AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
 AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
+AGENT_ACTIVITY_MIGRATION_ID = "20260517_agent_activity"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -462,6 +463,100 @@ def _migrate_agent_space_prompts(conn: Any) -> None:
     )
 
 
+def _migrate_agent_activity(conn: Any) -> None:
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS agent_runtime_sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id VARCHAR(128) NOT NULL UNIQUE, "
+            "agent_runtime VARCHAR(64) NOT NULL DEFAULT '', "
+            "task_public_id VARCHAR(36) NOT NULL DEFAULT '', "
+            "companion_id INTEGER, "
+            "terminal_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "workspace_root VARCHAR(4000) NOT NULL DEFAULT '', "
+            "state VARCHAR(32) NOT NULL DEFAULT 'idle', "
+            "last_signal_kind VARCHAR(128) NOT NULL DEFAULT '', "
+            "payload JSON NOT NULL DEFAULT '{}', "
+            "started_at DATETIME, "
+            "last_seen_at DATETIME, "
+            "ended_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_runtime_sessions_state "
+            "ON agent_runtime_sessions(state, updated_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS agent_turns ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "turn_id VARCHAR(64) NOT NULL UNIQUE, "
+            "session_id VARCHAR(128) NOT NULL DEFAULT '', "
+            "agent_runtime VARCHAR(64) NOT NULL DEFAULT '', "
+            "task_public_id VARCHAR(36) NOT NULL DEFAULT '', "
+            "companion_id INTEGER, "
+            "terminal_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "state VARCHAR(32) NOT NULL DEFAULT 'running', "
+            "source VARCHAR(64) NOT NULL DEFAULT '', "
+            "last_signal_kind VARCHAR(128) NOT NULL DEFAULT '', "
+            "summary VARCHAR(2000) NOT NULL DEFAULT '', "
+            "error VARCHAR(2000) NOT NULL DEFAULT '', "
+            "payload JSON NOT NULL DEFAULT '{}', "
+            "created_at DATETIME, "
+            "state_started_at DATETIME, "
+            "last_activity_at DATETIME, "
+            "completed_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_turns_task_state "
+            "ON agent_turns(task_public_id, state)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_agent_turns_session "
+            "ON agent_turns(session_id)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS task_agent_activity ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "task_public_id VARCHAR(36) NOT NULL UNIQUE, "
+            "active_turn_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "session_id VARCHAR(128) NOT NULL DEFAULT '', "
+            "agent_runtime VARCHAR(64) NOT NULL DEFAULT '', "
+            "companion_id INTEGER, "
+            "terminal_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "state VARCHAR(32) NOT NULL DEFAULT 'running', "
+            "severity VARCHAR(32) NOT NULL DEFAULT 'info', "
+            "title VARCHAR(512) NOT NULL DEFAULT '', "
+            "summary VARCHAR(2000) NOT NULL DEFAULT '', "
+            "payload JSON NOT NULL DEFAULT '{}', "
+            "created_at DATETIME, "
+            "state_started_at DATETIME, "
+            "last_activity_at DATETIME, "
+            "dismissed_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_task_agent_activity_state "
+            "ON task_agent_activity(state, updated_at)"
+        )
+    )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -472,4 +567,5 @@ STARTUP_MIGRATIONS = [
     (ATTENTION_ITEMS_MIGRATION_ID, _migrate_attention_items),
     (AGENT_SPACE_START_COMMAND_MIGRATION_ID, _migrate_agent_space_start_command),
     (AGENT_SPACE_PROMPTS_MIGRATION_ID, _migrate_agent_space_prompts),
+    (AGENT_ACTIVITY_MIGRATION_ID, _migrate_agent_activity),
 ]

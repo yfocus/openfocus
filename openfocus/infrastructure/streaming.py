@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 
 from sqlalchemy import text
 
-from ..companion.grpc import add_agent_chunk_listener, add_terminal_output_listener
+from ..companion.grpc import (
+    add_agent_chunk_listener,
+    add_runtime_signal_listener,
+    add_terminal_output_listener,
+)
 from ..db import session_scope
+from ..domains.agent_activity import service as agent_activity_service
 from ..domains.memory import service as memory_service
 from ..models import (
     AgentMessage,
@@ -118,6 +124,7 @@ terminal_event_hub = TerminalEventHub()
 
 _AGENT_LISTENER_INSTALLED = False
 _TERM_LISTENER_INSTALLED = False
+_RUNTIME_SIGNAL_LISTENER_INSTALLED = False
 
 
 async def persist_and_publish_agent_chunk(ch) -> None:
@@ -173,6 +180,36 @@ async def persist_and_publish_agent_chunk(ch) -> None:
         if sess is not None:
             sess.updated_at = memory_service.utcnow()
             s.add(sess)
+
+        if bool(ch.done) or (not bool(ch.ok)):
+            sess_for_activity = (
+                s.query(AgentSession)
+                .filter(AgentSession.session_id == ch.session_id)
+                .one_or_none()
+            )
+            agent_activity_service.handle_runtime_signal(
+                s,
+                kind="runtime.turn.completed"
+                if bool(ch.ok) and bool(ch.done)
+                else "runtime.turn.failed",
+                agent_runtime=str(
+                    getattr(sess_for_activity, "agent_type", "") or "agent"
+                ),
+                session_id=str(ch.session_id or ""),
+                turn_id=str(ch.request_id or ""),
+                task_public_id=str(
+                    getattr(sess_for_activity, "task_public_id", "") or ""
+                ),
+                companion_id=int(getattr(sess_for_activity, "companion_id", 0) or 0)
+                or None,
+                source="companion.agent_chunk",
+                payload={
+                    "summary": "Agent turn completed."
+                    if bool(ch.ok)
+                    else "Agent turn failed.",
+                    "error": str(ch.error or ""),
+                },
+            )
 
     if ch.text or ch.error or bool(ch.done):
         memory_service.try_audit_memory(
@@ -315,3 +352,46 @@ def install_terminal_listener_once() -> None:
 
     add_terminal_output_listener(_on_out)
     _TERM_LISTENER_INSTALLED = True
+
+
+async def handle_runtime_signal(sig) -> None:
+    payload: dict = {}
+    raw_payload = str(getattr(sig, "payload_json", "") or "").strip()
+    if raw_payload:
+        try:
+            loaded = json.loads(raw_payload)
+            if isinstance(loaded, dict):
+                payload = loaded
+        except Exception:
+            payload = {"raw_payload": raw_payload}
+
+    with session_scope() as s:
+        agent_activity_service.handle_runtime_signal(
+            s,
+            kind=str(getattr(sig, "kind", "") or ""),
+            raw_kind=str(getattr(sig, "raw_kind", "") or ""),
+            agent_runtime=str(getattr(sig, "agent_runtime", "") or ""),
+            session_id=str(getattr(sig, "session_id", "") or ""),
+            turn_id=str(getattr(sig, "turn_id", "") or ""),
+            task_public_id=str(getattr(sig, "task_public_id", "") or ""),
+            terminal_id=str(getattr(sig, "terminal_id", "") or ""),
+            companion_id=int(getattr(sig, "companion_id", 0) or 0) or None,
+            cwd=str(getattr(sig, "cwd", "") or ""),
+            source=str(getattr(sig, "source", "") or "companion"),
+            payload=payload,
+        )
+
+
+def install_runtime_signal_listener_once() -> None:
+    global _RUNTIME_SIGNAL_LISTENER_INSTALLED
+    if _RUNTIME_SIGNAL_LISTENER_INSTALLED:
+        return
+
+    def _on_signal(sig) -> None:
+        try:
+            asyncio.get_running_loop().create_task(handle_runtime_signal(sig))
+        except RuntimeError:
+            pass
+
+    add_runtime_signal_listener(_on_signal)
+    _RUNTIME_SIGNAL_LISTENER_INSTALLED = True
