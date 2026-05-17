@@ -9,6 +9,42 @@ import os
 from httpx import ASGITransport, AsyncClient
 
 
+def test_agent_space_ttyd_bridge_supports_command_click_link_messages():
+    from openfocus.web.routes.agent_spaces import _ttyd_bridge_script
+
+    script = _ttyd_bridge_script()
+
+    assert (
+        "document.addEventListener('pointerdown', onCommandOpenEvent, true)" in script
+    )
+    assert "document.addEventListener('mousedown', onCommandOpenEvent, true)" in script
+    assert "document.addEventListener('click', onCommandOpenEvent, true)" in script
+    assert "event.metaKey || event.ctrlKey" in script
+    assert "openfocus:terminal-link-open" in script
+    assert "postMessage(payload, window.location.origin)" in script
+    assert "closest('a[href]')" in script
+    assert "xterm-rows" in script
+    assert "xterm-accessibility-tree" in script
+    assert "path: target.path" in script
+    assert "candidateTokens(line)" in script
+    assert "caretPositionFromPoint" in script
+    assert "registerLinkProvider" in script
+    assert "file:\\/\\/" in script
+    assert "value[0] === '@'" in script
+
+
+def test_agent_space_ttyd_bridge_injection_is_html_only_and_idempotent():
+    from openfocus.web.routes.agent_spaces import _maybe_inject_ttyd_bridge
+
+    html = b"<html><head></head><body>ok</body></html>"
+    injected = _maybe_inject_ttyd_bridge(html, "text/html; charset=utf-8")
+
+    assert b"__openfocusTtydBridgeInstalled" in injected
+    assert injected.count(b"__openfocusTtydBridgeInstalled") == 2
+    assert _maybe_inject_ttyd_bridge(injected, "text/html") == injected
+    assert _maybe_inject_ttyd_bridge(html, "application/json") == html
+
+
 async def _wait_until_companion_ready(
     client: AsyncClient, *, timeout_s: float = 2.0
 ) -> dict:

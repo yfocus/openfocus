@@ -1147,6 +1147,8 @@ class _TerminalManager:
             "--client-option",
             'theme={"background":"#000000"}',
             "--client-option",
+            "rendererType=dom",
+            "--client-option",
             "macOptionClickForcesSelection=true",
             "--client-option",
             "rightClickSelectsWord=true",

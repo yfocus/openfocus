@@ -2,7 +2,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { basicSetup, EditorView } from 'codemirror';
-import { type Extension, EditorState } from '@codemirror/state';
+import { type Extension, EditorState, StateEffect, StateField } from '@codemirror/state';
+import { Decoration, type DecorationSet } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { cpp } from '@codemirror/lang-cpp';
@@ -30,12 +31,66 @@ type AgentSpaceConfig = {
   startAgentCommand?: string;
 };
 
+type TerminalApi = {
+  injectPromptToTerminal?: (
+    text: string,
+    options?: { bracketedPaste?: boolean; submit?: boolean; focus?: boolean },
+  ) => Promise<boolean>;
+};
+
 type PreviewState = {
   path?: string;
   name?: string;
   scrollTop?: number;
   topLine?: number;
+  targetLine?: number;
+  targetColumn?: number;
+  targetNonce?: number;
   ts?: number;
+};
+
+type PreviewTarget = {
+  line?: number;
+  column?: number;
+};
+
+type PreviewViewState = {
+  path: string;
+  name: string;
+  content: string;
+  imageUrl: string;
+  loading: boolean;
+  error: string;
+  targetLine?: number;
+  targetColumn?: number;
+  targetNonce?: number;
+};
+
+type AgentContextMenuItem = {
+  label: string;
+  action: () => void | Promise<void>;
+};
+
+type AgentContextMenuState = {
+  x: number;
+  y: number;
+  items: AgentContextMenuItem[];
+};
+
+type TerminalLinkOpenMessage = {
+  type?: unknown;
+  href?: unknown;
+  text?: unknown;
+  path?: unknown;
+  line?: unknown;
+  column?: unknown;
+  terminalId?: unknown;
+};
+
+type PreviewSelectionState = {
+  text: string;
+  fromLine?: number;
+  toLine?: number;
 };
 
 function toast(message: string): void {
@@ -47,6 +102,184 @@ function clamp(value: number, minValue: number, maxValue: number): number {
   if (value < minValue) return minValue;
   if (value > maxValue) return maxValue;
   return value;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return undefined;
+  return Math.floor(n);
+}
+
+function cleanString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function shellQuotePath(path: string): string {
+  const value = String(path || '.');
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function formatAgentFileReference(relPath: string, line?: number): string {
+  const path = String(relPath || '').trim();
+  if (!path) return '';
+  const safeLine = positiveInt(line);
+  return `@${path}${safeLine ? `#L${safeLine}` : ''}`;
+}
+
+function stripFileReference(raw: string): string {
+  let s = String(raw || '').trim();
+  while (s.length >= 2 && "'\"`".includes(s[0]) && s[s.length - 1] === s[0]) s = s.slice(1, -1).trim();
+  const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}', '<': '>' };
+  let changed = true;
+  while (changed && s.length >= 2) {
+    changed = false;
+    const end = pairs[s[0]];
+    if (end && s[s.length - 1] === end) {
+      s = s.slice(1, -1).trim();
+      changed = true;
+    }
+  }
+  return s.replace(/[.,;]+$/g, '');
+}
+
+function stripAgentReferencePrefix(raw: string): string {
+  const value = stripFileReference(raw);
+  return value.startsWith('@') && value.length > 1 ? stripFileReference(value.slice(1)) : value;
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function extractFileReferenceCandidates(raw: string): string[] {
+  const value = String(raw || '');
+  const candidates: string[] = [];
+  const pattern = /@?file:\/\/[^\s<>"'`)\]}]+|@?(?:\.{1,2}\/|\/|[A-Za-z0-9_.@+-]+\/)[^\s<>"'`)\]}]+|@?[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]{1,16}(?::\d+){0,2}(?:#L\d+(?:C\d+)?)?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value))) {
+    const candidate = stripFileReference(match[0] || '');
+    if (candidate) candidates.push(candidate);
+  }
+  return Array.from(new Set(candidates));
+}
+
+function parseSingleFileReference(raw: string): { path: string; line?: number; column?: number } | null {
+  let value = stripAgentReferencePrefix(raw);
+  if (!value || isHttpUrl(value)) return null;
+
+  let cameFromFileUrl = false;
+  if (/^file:\/\//i.test(value)) {
+    cameFromFileUrl = true;
+    try {
+      const url = new URL(value);
+      value = decodeURIComponent(url.pathname || '');
+    } catch (_) {
+      value = value.replace(/^file:\/\//i, '');
+    }
+  }
+
+  let line: number | undefined;
+  let column: number | undefined;
+  const anchorMatch = value.match(/#L(\d+)(?:C(\d+))?$/i);
+  if (anchorMatch) {
+    line = positiveInt(anchorMatch[1]);
+    column = positiveInt(anchorMatch[2]);
+    value = value.slice(0, anchorMatch.index).trim();
+  } else {
+    const suffixMatch = value.match(/:(\d+)(?::(\d+))?$/);
+    if (suffixMatch) {
+      line = positiveInt(suffixMatch[1]);
+      column = positiveInt(suffixMatch[2]);
+      value = value.slice(0, suffixMatch.index).trim();
+    }
+  }
+
+  const path = stripAgentReferencePrefix(value);
+  if (!path) return null;
+  if (!cameFromFileUrl && !(/^\.{1,2}\//.test(path) || path.startsWith('/') || path.includes('/') || /[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]{1,16}$/.test(path))) return null;
+  return { path, line, column };
+}
+
+function parseTerminalFileReference(raw: string): { path: string; line?: number; column?: number } | null {
+  const directCandidate = stripFileReference(raw);
+  const direct = /\s/.test(directCandidate) ? null : parseSingleFileReference(directCandidate);
+  if (direct) return direct;
+  for (const candidate of extractFileReferenceCandidates(raw)) {
+    const parsed = parseSingleFileReference(candidate);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function normalizeAbsolutePath(value: string): string | null {
+  const raw = String(value || '').replace(/\\/g, '/');
+  if (!raw.startsWith('/')) return null;
+  const parts: string[] = [];
+  for (const part of raw.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    if (part.includes('\0')) return null;
+    parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
+function normalizeRelativePath(value: string): string | null {
+  const raw = String(value || '').replace(/\\/g, '/');
+  if (!raw || raw.startsWith('/')) return null;
+  const parts: string[] = [];
+  for (const part of raw.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    if (part.includes('\0')) return null;
+    parts.push(part);
+  }
+  return parts.length ? parts.join('/') : null;
+}
+
+function workspaceRelativePath(candidatePath: string, rootPath: string): string | null {
+  const candidate = stripAgentReferencePrefix(candidatePath);
+  if (!candidate) return null;
+  if (candidate.startsWith('/')) {
+    const root = normalizeAbsolutePath(rootPath);
+    const abs = normalizeAbsolutePath(candidate);
+    if (!root || !abs) return null;
+    if (abs === root) return null;
+    if (!abs.startsWith(`${root}/`)) return null;
+    return normalizeRelativePath(abs.slice(root.length + 1));
+  }
+  return normalizeRelativePath(candidate);
+}
+
+function fileReferenceFromTerminalMessage(data: TerminalLinkOpenMessage, rootPath: string): { relPath: string; line?: number; column?: number } | null {
+  const rawCandidates = [
+    cleanString(data.path),
+    cleanString(data.href),
+    cleanString(data.text),
+    ...extractFileReferenceCandidates(cleanString(data.text)),
+    ...extractFileReferenceCandidates(cleanString(data.href)),
+  ].filter(Boolean);
+  const candidates = Array.from(new Set(rawCandidates));
+  for (const candidate of candidates) {
+    const parsed = parseTerminalFileReference(candidate);
+    if (!parsed) continue;
+    const relPath = workspaceRelativePath(parsed.path, rootPath);
+    if (!relPath) continue;
+    return {
+      relPath,
+      line: positiveInt(data.line) || parsed.line,
+      column: positiveInt(data.column) || parsed.column,
+    };
+  }
+  return null;
 }
 
 function currentPxVar(el: HTMLElement, name: string, fallback: number): number {
@@ -162,7 +395,19 @@ function saveLayoutState(spaceId: number, state: { filesW: number; termW: number
   }
 }
 
-function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry; spaceId: number; depth: number; onOpenFile: (path: string, name: string) => void }) {
+function FileTreeNode({
+  entry,
+  spaceId,
+  depth,
+  onOpenFile,
+  onFileContextMenu,
+}: {
+  entry: FileEntry;
+  spaceId: number;
+  depth: number;
+  onOpenFile: (path: string, name: string) => void;
+  onFileContextMenu: (event: React.MouseEvent<HTMLElement>, entry: FileEntry) => void;
+}) {
   const [open, setOpen] = useState(depth === 0);
   const [loaded, setLoaded] = useState(false);
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -196,12 +441,12 @@ function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry;
   if (entry.kind === 'dir') {
     return (
       <details style={{ marginLeft }} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-        <summary style={{ cursor: 'pointer' }}>📁 {entry.name}</summary>
+        <summary style={{ cursor: 'pointer' }} onContextMenu={(event) => onFileContextMenu(event, entry)}>📁 {entry.name}</summary>
         {loading ? <div className="muted">Loading…</div> : null}
         {error ? <div className="muted">{error}</div> : null}
         {loaded && !entries.length ? <div className="muted">—</div> : null}
         {entries.map((child) => (
-          <FileTreeNode key={`${child.kind}:${child.rel_path}`} entry={child} spaceId={spaceId} depth={depth + 1} onOpenFile={onOpenFile} />
+          <FileTreeNode key={`${child.kind}:${child.rel_path}`} entry={child} spaceId={spaceId} depth={depth + 1} onOpenFile={onOpenFile} onFileContextMenu={onFileContextMenu} />
         ))}
       </details>
     );
@@ -214,13 +459,22 @@ function FileTreeNode({ entry, spaceId, depth, onOpenFile }: { entry: FileEntry;
         event.preventDefault();
         onOpenFile(entry.rel_path || '', entry.name || '');
       }}
+      onContextMenu={(event) => onFileContextMenu(event, entry)}
     >
       📄 {entry.name}
     </a>
   );
 }
 
-function FileTree({ spaceId, onOpenFile }: { spaceId: number; onOpenFile: (path: string, name: string) => void }) {
+function FileTree({
+  spaceId,
+  onOpenFile,
+  onFileContextMenu,
+}: {
+  spaceId: number;
+  onOpenFile: (path: string, name: string) => void;
+  onFileContextMenu: (event: React.MouseEvent<HTMLElement>, entry: FileEntry) => void;
+}) {
   const [reloadKey, setReloadKey] = useState(0);
   const rootEntry = useMemo<FileEntry>(() => ({ name: 'workspace', rel_path: '', kind: 'dir' }), [reloadKey]);
   return (
@@ -228,19 +482,70 @@ function FileTree({ spaceId, onOpenFile }: { spaceId: number; onOpenFile: (path:
       <button type="button" className="btn-ghost" style={{ marginBottom: 8 }} onClick={() => setReloadKey((value) => value + 1)}>
         Refresh
       </button>
-      <FileTreeNode key={reloadKey} entry={rootEntry} spaceId={spaceId} depth={0} onOpenFile={onOpenFile} />
+      <FileTreeNode key={reloadKey} entry={rootEntry} spaceId={spaceId} depth={0} onOpenFile={onOpenFile} onFileContextMenu={onFileContextMenu} />
     </div>
   );
 }
 
-function CodeMirrorPreview({ content, name, onScroll }: { content: string; name: string; onScroll: (scrollTop: number, topLine: number) => void }) {
+const targetLineEffect = StateEffect.define<number | null>();
+
+const targetLineField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(value, transaction) {
+    let next = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (!effect.is(targetLineEffect)) continue;
+      if (effect.value === null) {
+        next = Decoration.none;
+      } else {
+        next = Decoration.set([Decoration.line({ class: 'cm-openfocus-target-line' }).range(effect.value)]);
+      }
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+function selectedTextFromEditor(view: EditorView): PreviewSelectionState {
+  const ranges = view.state.selection.ranges.filter((range) => !range.empty);
+  if (!ranges.length) return { text: '' };
+  const from = Math.min(...ranges.map((range) => range.from));
+  const to = Math.max(...ranges.map((range) => range.to));
+  return {
+    text: ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n'),
+    fromLine: view.state.doc.lineAt(from).number,
+    toLine: view.state.doc.lineAt(to).number,
+  };
+}
+
+function CodeMirrorPreview({
+  content,
+  name,
+  onScroll,
+  onSelectionChange,
+  targetLine,
+  targetColumn,
+  targetNonce,
+}: {
+  content: string;
+  name: string;
+  onScroll: (scrollTop: number, topLine: number) => void;
+  onSelectionChange: (selection: PreviewSelectionState) => void;
+  targetLine?: number;
+  targetColumn?: number;
+  targetNonce?: number;
+}) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const scrollTimerRef = useRef<number>(0);
+  const targetClearTimerRef = useRef<number>(0);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    onSelectionChange({ text: '' });
 
     const view = new EditorView({
       state: EditorState.create({
@@ -251,6 +556,7 @@ function CodeMirrorPreview({ content, name, onScroll }: { content: string; name:
           ...languageExtension(name),
           EditorState.readOnly.of(true),
           EditorView.editable.of(false),
+          targetLineField,
           EditorView.theme({
             '&': {
               height: '100%',
@@ -284,6 +590,10 @@ function CodeMirrorPreview({ content, name, onScroll }: { content: string; name:
             '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
               backgroundColor: 'rgba(0,229,255,0.22)',
             },
+            '.cm-openfocus-target-line': {
+              backgroundColor: 'rgba(255, 209, 102, 0.16)',
+              outline: '1px solid rgba(255, 209, 102, 0.42)',
+            },
             '&.cm-focused': {
               outline: 'none',
             },
@@ -301,6 +611,9 @@ function CodeMirrorPreview({ content, name, onScroll }: { content: string; name:
               }, 180);
             },
           }),
+          EditorView.updateListener.of((update) => {
+            if (update.selectionSet || update.docChanged) onSelectionChange(selectedTextFromEditor(update.view));
+          }),
         ],
       }),
       parent: host,
@@ -309,10 +622,35 @@ function CodeMirrorPreview({ content, name, onScroll }: { content: string; name:
     viewRef.current = view;
     return () => {
       if (scrollTimerRef.current) window.clearTimeout(scrollTimerRef.current);
+      if (targetClearTimerRef.current) window.clearTimeout(targetClearTimerRef.current);
+      onSelectionChange({ text: '' });
       view.destroy();
       viewRef.current = null;
     };
-  }, [content, name, onScroll]);
+  }, [content, name, onScroll, onSelectionChange]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    const lineNumber = positiveInt(targetLine);
+    if (!view || !lineNumber) return;
+    const doc = view.state.doc;
+    const safeLine = clamp(lineNumber, 1, Math.max(1, doc.lines));
+    const line = doc.line(safeLine);
+    const safeColumn = clamp(positiveInt(targetColumn) || 1, 1, Math.max(1, line.length + 1));
+    const pos = line.from + safeColumn - 1;
+    if (targetClearTimerRef.current) window.clearTimeout(targetClearTimerRef.current);
+    view.dispatch({
+      effects: [
+        targetLineEffect.of(line.from),
+        EditorView.scrollIntoView(pos, { y: 'center' }),
+      ],
+    });
+    targetClearTimerRef.current = window.setTimeout(() => {
+      const current = viewRef.current;
+      if (current) current.dispatch({ effects: targetLineEffect.of(null) });
+      targetClearTimerRef.current = 0;
+    }, 1800);
+  }, [content, targetColumn, targetLine, targetNonce]);
 
   return <div ref={hostRef} className="codebox cm-preview" />;
 }
@@ -322,7 +660,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const previewContentRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<HTMLDivElement | null>(null);
-  const [preview, setPreview] = useState<{ path: string; name: string; content: string; imageUrl: string; loading: boolean; error: string }>(() => ({
+  const terminalApiRef = useRef<TerminalApi | null>(null);
+  const previewSelectionRef = useRef<PreviewSelectionState>({ text: '' });
+  const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
+  const [preview, setPreview] = useState<PreviewViewState>(() => ({
     path: '',
     name: '',
     content: '',
@@ -332,31 +673,37 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   }));
 
   const openPreview = useCallback(
-    async (relPath: string, name: string) => {
+    async (relPath: string, name: string, target?: PreviewTarget) => {
+      const targetLine = positiveInt(target?.line);
+      const targetColumn = positiveInt(target?.column);
+      const targetNonce = targetLine ? Date.now() : undefined;
       const previous = loadPreviewState(config.spaceId);
       const same = previous && String(previous.path || '') === String(relPath || '');
       savePreviewState(config.spaceId, {
         path: relPath,
         name,
-        scrollTop: same ? Number(previous?.scrollTop || 0) : 0,
-        topLine: same ? Number(previous?.topLine || 1) : 1,
+        scrollTop: targetLine ? 0 : same ? Number(previous?.scrollTop || 0) : 0,
+        topLine: targetLine || (same ? Number(previous?.topLine || 1) : 1),
+        targetLine,
+        targetColumn,
+        targetNonce,
         ts: Date.now(),
       });
       const displayName = name || guessNameFromPath(relPath);
-      setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: true, error: '' });
+      setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: true, error: '', targetLine, targetColumn, targetNonce });
       try {
         if (isLikelyImage(displayName)) {
           const imageUrl = rawFileUrl(config.spaceId, relPath);
-          setPreview({ path: relPath, name: displayName, content: '', imageUrl, loading: false, error: '' });
+          setPreview({ path: relPath, name: displayName, content: '', imageUrl, loading: false, error: '', targetLine, targetColumn, targetNonce });
           requestAnimationFrame(() => {
             if (previewScrollRef.current) previewScrollRef.current.scrollTop = 0;
           });
           return;
         }
         const data = await readFile(config.spaceId, relPath);
-        setPreview({ path: relPath, name: displayName, content: String(data.content || ''), imageUrl: '', loading: false, error: '' });
+        setPreview({ path: relPath, name: displayName, content: String(data.content || ''), imageUrl: '', loading: false, error: '', targetLine, targetColumn, targetNonce });
       } catch (err) {
-        setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `Preview failed: ${err instanceof Error ? err.message : String(err)}` });
+        setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `Preview failed: ${err instanceof Error ? err.message : String(err)}`, targetLine, targetColumn, targetNonce });
       }
     },
     [config.spaceId],
@@ -364,6 +711,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
   useEffect(() => {
     if (!preview.path || preview.loading || preview.error || preview.imageUrl) return;
+    if (positiveInt(preview.targetLine)) return;
     const state = loadPreviewState(config.spaceId);
     if (!state || String(state.path || '') !== String(preview.path || '')) return;
     const apply = () => {
@@ -378,12 +726,17 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     requestAnimationFrame(() => requestAnimationFrame(apply));
     const timeout = window.setTimeout(apply, 120);
     return () => window.clearTimeout(timeout);
-  }, [config.spaceId, preview.error, preview.imageUrl, preview.loading, preview.path]);
+  }, [config.spaceId, preview.error, preview.imageUrl, preview.loading, preview.path, preview.targetLine]);
 
   useEffect(() => {
     const state = loadPreviewState(config.spaceId);
     if (!state?.path) return;
-    void openPreview(String(state.path || ''), String(state.name || '') || guessNameFromPath(String(state.path || '')));
+    const targetLine = positiveInt(state.targetLine);
+    void openPreview(
+      String(state.path || ''),
+      String(state.name || '') || guessNameFromPath(String(state.path || '')),
+      targetLine ? { line: targetLine, column: positiveInt(state.targetColumn) } : undefined,
+    );
   }, [config.spaceId, openPreview]);
 
   const savePreviewScroll = useCallback(
@@ -395,6 +748,125 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     },
     [config.spaceId],
   );
+
+  const updatePreviewSelection = useCallback((selection: PreviewSelectionState) => {
+    previewSelectionRef.current = selection || { text: '' };
+  }, []);
+
+  const selectedPreviewReference = useCallback((): string => {
+    const host = previewContentRef.current;
+    const domSelection = window.getSelection?.();
+    if (host && domSelection && !domSelection.isCollapsed) {
+      const anchor = domSelection.anchorNode;
+      const focus = domSelection.focusNode;
+      if ((anchor && host.contains(anchor)) || (focus && host.contains(focus))) {
+        const selected = domSelection.toString();
+        if (selected.trim()) {
+          const trackedLine = positiveInt(previewSelectionRef.current.fromLine);
+          return formatAgentFileReference(preview.path, trackedLine);
+        }
+      }
+    }
+    const editorSelection = previewSelectionRef.current;
+    return editorSelection.text.trim() ? formatAgentFileReference(preview.path, editorSelection.fromLine) : '';
+  }, [preview.path]);
+
+  const showContextMenu = useCallback((event: React.MouseEvent<HTMLElement>, items: AgentContextMenuItem[]) => {
+    if (!items.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 44 + items.length * 36;
+    setContextMenu({
+      x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight)),
+      items,
+    });
+  }, []);
+
+  const sendToTerminal = useCallback(async (text: string) => {
+    const api = terminalApiRef.current || terminalRef.current?.__openfocusRemoteTerminal || null;
+    if (!api?.injectPromptToTerminal) {
+      toast('Terminal unavailable');
+      return;
+    }
+    try {
+      const ok = await api.injectPromptToTerminal(text, { bracketedPaste: true, submit: false, focus: true });
+      toast(ok ? 'Sent to terminal' : 'Terminal unavailable');
+    } catch (err) {
+      toast(`Send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
+
+  const handleFileContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLElement>, entry: FileEntry) => {
+      const relPath = String(entry.rel_path || '') || '.';
+      showContextMenu(event, [
+        {
+          label: 'Send Path to Terminal',
+          action: () => sendToTerminal(shellQuotePath(relPath)),
+        },
+      ]);
+    },
+    [sendToTerminal, showContextMenu],
+  );
+
+  const handlePreviewContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLElement>, options?: { allowSelection?: boolean }) => {
+      const items: AgentContextMenuItem[] = [];
+      const reference = options?.allowSelection === false ? '' : selectedPreviewReference();
+      const fallbackReference = preview.path ? formatAgentFileReference(preview.path) : '';
+      const payload = reference || fallbackReference;
+      if (payload) items.push({ label: 'Send File Reference to Terminal', action: () => sendToTerminal(payload) });
+      if (items.length) showContextMenu(event, items);
+    },
+    [preview.path, selectedPreviewReference, sendToTerminal, showContextMenu],
+  );
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('openfocus:agent-space-layout-changed', close);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('openfocus:agent-space-layout-changed', close);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data as TerminalLinkOpenMessage | null;
+      if (!data || data.type !== 'openfocus:terminal-link-open') return;
+
+      const href = cleanString(data.href);
+      if (href && isHttpUrl(href)) {
+        window.open(href, '_blank', 'noopener,noreferrer');
+        return;
+      }
+
+      const fileReference = fileReferenceFromTerminalMessage(data, config.rootPath);
+      if (!fileReference) {
+        toast('File not found in workspace');
+        return;
+      }
+      void openPreview(fileReference.relPath, guessNameFromPath(fileReference.relPath), { line: fileReference.line, column: fileReference.column });
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [config.rootPath, openPreview]);
 
   useEffect(() => {
     const root = splitRef.current;
@@ -463,12 +935,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const el = terminalRef.current;
     if (!el || !window.OpenFocusRemoteTerminal?.mount) return;
     try {
-      window.OpenFocusRemoteTerminal.mount(el, {
+      const api = window.OpenFocusRemoteTerminal.mount(el, {
         spaceId: config.spaceId,
         taskPublicId: config.taskPublicId,
         agentPrefix: config.agentPrefix,
         startAgentCommand: config.startAgentCommand || '',
-      });
+      }) || el.__openfocusRemoteTerminal || null;
+      terminalApiRef.current = api;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);
@@ -518,7 +991,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
             </div>
             <div className="divider" />
             <div className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12 }}>
-              <FileTree spaceId={config.spaceId} onOpenFile={openPreview} />
+              <FileTree spaceId={config.spaceId} onOpenFile={openPreview} onFileContextMenu={handleFileContextMenu} />
             </div>
           </div>
         </div>
@@ -533,18 +1006,18 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
         <div className="panel" style={{ height: '100%', padding: 0 }}>
           <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="pad" style={{ padding: 14, flex: '0 0 auto' }}>
+            <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
               <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
                 <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
               </div>
             </div>
             <div className="divider" />
-            <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto' }}>
+            <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
               <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
                 {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
                 {preview.error ? preview.error : null}
                 {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
-                {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} /> : null}
+                {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} /> : null}
                 {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
               </div>
             </div>
@@ -567,6 +1040,41 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
           </div>
         </div>
       </div>
+      {contextMenu ? (
+        <div
+          role="menu"
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 10000,
+            minWidth: 210,
+            padding: 6,
+            border: '1px solid rgba(0, 229, 255, 0.28)',
+            borderRadius: 8,
+            background: 'rgba(5, 10, 18, 0.97)',
+            boxShadow: '0 18px 40px rgba(0, 0, 0, 0.42)',
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {contextMenu.items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              className="btn-ghost"
+              style={{ width: '100%', display: 'block', textAlign: 'left', margin: 0 }}
+              onClick={() => {
+                setContextMenu(null);
+                void item.action();
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </>
   );
 }

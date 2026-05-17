@@ -147,13 +147,14 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    - Terminal area includes a `prompt zone`; it is not a separate Agent chat tab.
    - `prompt zone` 中的每个 prompt 都可以手动注入当前 terminal；每个 prompt 还有独立 `auto` 开关。`auto` 开启后，用户每次在 AgentSpace terminal 中提交消息时，OpenFocus 会在回车提交前把该 prompt 拼接进同一次输入。
    - AgentSpace 不再提供 terminal 级 `Agent Mode` 开关；agent 当前运行态与提醒由 Companion runtime hooks 驱动。
+   - 在 `FILES` 文件/目录节点右键时，AgentSpace 显示自定义菜单并提供 `Send Path to Terminal`，向当前 terminal 注入 shell 转义后的相对路径；该动作不得自动发送 Enter。
+   - 在 `PREVIEW` 右键时，若没有选中文本，显示 `Send File Reference to Terminal` 并注入当前文件引用（如 `@harness.md`）；若存在选中文本，注入当前文件加选区起始行的文件引用（如 `@harness.md#L10`）；以上动作均不得自动发送 Enter。
+   - Agent TUI 输出中的链接/文件引用只在 macOS `Command` + 左键、其他平台 `Ctrl` + 左键时激活；普通点击继续交给 terminal/TUI。`http://` 与 `https://` 链接在新浏览器标签页打开；工作区内相对路径、工作区根目录下绝对路径、`file://` URL、`@path`、`path:line[:column]` 和 `path#Lline` 文件引用应打开 `PREVIEW` 并跳到目标行。
+   - 终端链接跳转必须校验来源和路径边界：父页面只接受同源 iframe 消息，且只打开归一化后位于该 AgentSpace `root_path` 下的文件。
 5. 释放工作区：
    - 点击“释放工作区”会释放该 AgentSpace，并清理该空间下的所有远程终端（以及 OpenFocus 侧的终端记录）。
    - 若 Companion 离线，允许清理仅发生在 OpenFocus 侧（终端可能在 Companion 上残留，但不影响 OpenFocus 侧继续使用）。
 6. 使用Companion机制实现AgentSpace。
-
-待定
-1. 点击tui中的文件路径&行号能在FILES和PREVIEW里头跳转。
 
 ### Inspiration
 
