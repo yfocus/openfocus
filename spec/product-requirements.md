@@ -144,7 +144,9 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    - 用户在终端中输入命令，输入/输出以流式方式实时回显。
    - 终端默认以 AgentSpace 的工作目录作为启动目录（cwd=root_path）。
    - 终端 session 在 AgentSpace 生命周期内保留；若 Companion 重启/崩溃，允许终端 session 丢失。
-   - Terminal area includes a `Prompt Zone` with `Agent Mode` toggle in the current implementation; it is not a separate Agent chat tab.
+   - Terminal area includes a `prompt zone`; it is not a separate Agent chat tab.
+   - `prompt zone` 中的每个 prompt 都可以手动注入当前 terminal；每个 prompt 还有独立 `auto` 开关。`auto` 开启后，用户每次在 AgentSpace terminal 中提交消息时，OpenFocus 会在回车提交前把该 prompt 拼接进同一次输入。
+   - AgentSpace 不再提供 terminal 级 `Agent Mode` 开关；agent 当前运行态与提醒由 Companion runtime hooks 驱动。
 5. 释放工作区：
    - 点击“释放工作区”会释放该 AgentSpace，并清理该空间下的所有远程终端（以及 OpenFocus 侧的终端记录）。
    - 若 Companion 离线，允许清理仅发生在 OpenFocus 侧（终端可能在 Companion 上残留，但不影响 OpenFocus 侧继续使用）。
@@ -181,7 +183,7 @@ Inspiration is the dedicated ideation and planning module. It provides persisten
    - 左侧 `Resources`：展示资源文件、摘要与同步状态。
    - 右侧主区域：`Built-in Planner` 模式显示内置讨论区与消息输入框；`Bring Your Own Agent` / terminal 模式下，原本内置 agent 的讨论区和输入框必须完全由 `Remote Terminal` 取代，不再展示 `Send`、`Suggest Titles`、`Generate Draft` 等内置 agent 交互入口。
    - terminal 模式只保留 terminal 内部 `Prompt Zone` 操作（`Summary`、`Create Goal`）以及生成后的 Draft/Publish 确认卡片；Draft 卡片是 OpenFocus 的结构化确认 UI，不是新的内置对话区。
-   - terminal 模式不展示 `Agent Mode` 开关。
+   - terminal 模式不展示 AgentSpace 的 prompt auto controls。
    - terminal 模式必须提供清晰的桥接按钮，而不是要求用户复制粘贴协议文本。
 6. 创建空间时必须先手动填写标题。
    - 之后用户可通过消息输入区的 `/summary_title` 命令请求 agent 生成多个候选标题。

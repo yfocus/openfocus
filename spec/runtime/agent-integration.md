@@ -74,9 +74,9 @@ OpenFocus 将外部 Agent 报告和本机 runtime 状态分开处理：
 - `task_public_id`：当 `task_id` 无法填写但 payload 可携带关联时使用；仍优先填写顶层 `task_id`。
 - `metadata`：扩展元信息，不能包含密钥、token、完整凭证。
 
-### Agent/Skill 推荐上报的 journal 事件
+### Agent/Skill 支持的 journal 事件
 
-外部 Agent 在 AgentSpace 中工作时，推荐遵守以下事件子集。这些事件进入 `events` 与 audit memory，但不直接驱动悬浮球当前状态：
+外部 Agent 在 AgentSpace 中工作时，可以使用以下 journal 事件子集。这些事件进入 `events` 与 audit memory，但不直接驱动悬浮球当前状态。当前 prompt 注入默认只要求重要进展上报；启动、结束、成功、失败类 kind 仅作为兼容或特定工作流事件保留。
 
 | kind | 触发时机 | 必要 payload | 状态影响 |
 | --- | --- | --- | --- |
@@ -88,15 +88,15 @@ OpenFocus 将外部 Agent 报告和本机 runtime 状态分开处理：
 | `agent.completed` | 一次 Agent run 结束，尤其是 Next Move/推荐类 Agent 完成 | `status`, `result` 或 `summary` | journal；Next Move 仍可生成推荐卡 |
 | `skill.focus_report` | 使用 focus_report skill 上报最终结果 | 见下节 | journal only |
 
-推荐上报节奏：
+默认推荐上报节奏：
 
-1. 开始时上报 `task.started`。
-2. 长任务每个有意义阶段上报 `task.progress`；避免按 token、每行日志或无意义心跳上报。
-3. 结束时只选择一种最终上报方式：优先使用 `POST /api/skills/focus_report`；若不可用，再用 `task.completed` / `task.failed` / `task.blocked`。
+1. 只在重要进展时上报 `task.progress`，例如多步骤任务中某个步骤启动或完成、有重要中间结果、长期任务每约 5 分钟同步一次进展。
+2. 不要求 agent/任务启动、结束、成功或失败类上报。
+3. 避免按 token、每行日志或无意义心跳上报。
 
 ### focus_report 格式
 
-`POST /api/skills/focus_report` 是任务最终结果的推荐接口，会落库为 `kind="skill.focus_report"` 事件：
+`POST /api/skills/focus_report` 是任务最终结果的兼容接口，会落库为 `kind="skill.focus_report"` 事件：
 
 ```json
 {
@@ -135,7 +135,7 @@ OpenFocus 将外部 Agent 报告和本机 runtime 状态分开处理：
 
 ### Runtime Activity 派生规则
 
-悬浮球不展示所有 events，只展示 runtime activity read model，并显示“进入当前状态已有多久”：
+悬浮球不展示所有 events，只展示 runtime activity read model，并显示“进入当前状态已有多久”。当前实现的主要信号来源是 Companion runtime hooks（Codex/Coco hook shim -> Companion `AgentRuntimeSignal` -> Core），而不是 `/api/agent/events`：
 
 1. Running：`runtime.turn.submitted` / `runtime.turn.started` / `runtime.turn.resumed` → `task_agent_activity.state = running`。
 2. Waiting：`runtime.turn.waiting_for_approval` / `runtime.turn.waiting_for_input` / `runtime.turn.waiting_for_confirmation` → `state = waiting`。
@@ -176,9 +176,19 @@ Runtime events 是 OpenFocus 内部规范事件，通常来自 Companion gRPC，
   - `taskId=<Task.public_id>`
   - `agentSessionId=<session_id>`
   - `openfocusBaseUrl=<base_url>`
-  - 事件上报要求：按本文件 Event Spec 调用 `POST /api/agent/events`，并在 prompt 中直接写明接口结构、字段、推荐 kind、status 合法值与 payload 常用字段
-  - 上报时机要求：Agent run 启动后必须立刻先上报 `agent.started`；开始处理 task 后必须立刻上报 `task.started`；完成时必须上报 `agent.completed`，并继续上报该 task 的最终结果（优先 `POST /api/skills/focus_report`，否则 `task.completed` / `task.failed` / `task.blocked`）
-  - 最终结果上报要求：优先调用 `POST /api/skills/focus_report`
+  - 事件上报要求：按本文件 Event Spec 调用 `POST /api/agent/events`，并在 prompt 中直接写明接口结构、字段、`task.progress` kind、status 合法值与 payload 常用字段
+  - 上报时机要求：只在重要进展时上报 `task.progress`，例如多步骤任务中某个步骤启动或完成、有重要中间结果、长期任务每约 5 分钟同步一次进展
+  - 不要求 agent/任务启动、结束、成功或失败类上报；Agent Session `/send` 不追加 Prompt Zone 自定义 prompts
+
+### Prompt Zone Auto Prompts
+
+- AgentSpace prompt zone 中每个 prompt 都有独立 `auto` 开关。
+- `agent_space_prompts.enabled` 控制 prompt 是否展示；`agent_space_prompts.auto_enabled` 控制自定义 prompt 是否在 AgentSpace terminal input submit 时自动拼接。
+- Terminal 中的 built-in prompt（例如 `report progress`、`pua`）也可以在 prompt zone 中开启 `auto`；这类开关属于浏览器侧偏好，运行时通过 `/api/agent_spaces/{space_id}/terminals/{terminal_id}/auto_prompts` 同步到 Core 的 ttyd input rewrite 状态。
+- 对 terminal agent：每次用户在 ttyd 中提交一条输入时，Core 在转发到 ttyd upstream 前把当前启用的 auto prompt 文本作为同一次 bracketed paste 追加到回车之前，行为等价于旧的 terminal-level Agent Mode，但粒度从 terminal 改为 prompt。
+- `report progress` 内置 prompt 只要求在重要进展时上报 `task.progress`，例如多步骤任务中某个步骤启动或完成、有重要中间结果、长期任务每约 5 分钟同步一次进展；不要求 agent/任务启动、结束、成功或失败类上报。
+- 对 Agent Session：`POST /api/agent_spaces/{space_id}/agent/sessions/{session_id}/send` 只注入 OpenFocus event spec prompt，不追加 Prompt Zone 自定义 prompts。
+- Auto prompt 只修改提示词内容，不创建 runtime activity，不写 business Task 状态，也不绕过用户对外部沟通、执行命令或任务完成的确认要求。
 
 ### 鉴权与可靠性
 

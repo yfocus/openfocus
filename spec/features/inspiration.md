@@ -5,7 +5,7 @@
 
 - 用户创建 `InspirationSpace` 时选择默认模式：`Built-in Planner` 或 `Bring Your Own Agent`。
 - `Built-in Planner` 模式下，内建规划 Agent 通过持续追问、资源引用与上下文澄清来帮助用户收敛目标。
-- `Bring Your Own Agent` 模式下，OpenFocus 启动 remote terminal，用户在 terminal 中运行自己偏好的 agent；此时详情页主工作区完全切换为 terminal，不再展示内置 agent 对话流、消息输入框、terminal header 草案按钮或 `Suggest Titles` / `Generate Draft` 等内置交互入口，也不展示 `Agent Mode` 开关。OpenFocus 不解析 terminal 对话语义，只通过 `resources/draft_summary.md` 与草案/发布链路桥接。
+- `Bring Your Own Agent` 模式下，OpenFocus 启动 remote terminal，用户在 terminal 中运行自己偏好的 agent；此时详情页主工作区完全切换为 terminal，不再展示内置 agent 对话流、消息输入框、terminal header 草案按钮或 `Suggest Titles` / `Generate Draft` 等内置交互入口，也不展示 AgentSpace 的 prompt auto controls。OpenFocus 不解析 terminal 对话语义，只通过 `resources/draft_summary.md` 与草案/发布链路桥接。
 - terminal agent 是“不受信协作者”：它可以在 workspace 中产出文件，但不能直接写入 Goal/Task，不能绕过 OpenFocus 的草案生成、用户确认与发布链路。
 - built-in 模式下，当用户显式触发 `/draft_goal_tasks` 或内建 Agent 判断上下文已经足够完整时，可生成新的 `Draft vN`；terminal 模式下通过 `Prompt Zone` 的 `Create Goal` 选择一个已同步 resource，并基于该 resource 生成 `Draft vN`。
 - 在用户点击 `Publish` 之前，不写入任何 Goal/Tasks；所有结构化结果都先保存为草案。

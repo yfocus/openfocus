@@ -18,6 +18,19 @@ def _isolate_db(tmp_path):
     # 每个测试使用独立 SQLite 文件，避免互相污染
     os.environ["OPENFOCUS_DB_PATH"] = str(tmp_path / "test.db")
     os.environ.pop("OPENFOCUS_DB_URL", None)
+    # 默认禁用外部 LLM 配置，避免测试因开发机环境变量命中真实网关而阻塞。
+    for key in (
+        "OPENFOCUS_OPENAI_API_KEY",
+        "OPENFOCUS_OPENAI_BASE_URL",
+        "OPENFOCUS_OPENAI_MODEL",
+        "OPENFOCUS_ARK_API_KEY",
+        "OPENFOCUS_ARK_BASE_URL",
+        "OPENFOCUS_ARK_MODEL",
+        "ARK_API_KEY",
+        "ARK_BASE_URL",
+        "ARK_MODEL",
+    ):
+        os.environ.pop(key, None)
     os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
     os.environ["OPENFOCUS_HOOK_SOCK"] = str(tmp_path / "hooks.sock")
 

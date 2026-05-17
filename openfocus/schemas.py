@@ -53,3 +53,4 @@ class AgentSpacePromptIn(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=1, max_length=20000)
     enabled: bool = True
+    auto_enabled: bool = False

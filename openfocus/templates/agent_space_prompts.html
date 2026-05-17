@@ -33,7 +33,7 @@
       <div class="prompt-card-head">
         <div>
           <div class="prompt-card-title">AgentSpace Prompts</div>
-          <div class="prompt-card-sub">Enabled prompts appear automatically in every AgentSpace Prompt Zone.</div>
+          <div class="prompt-card-sub">Shown prompts appear in every AgentSpace prompt zone; auto prompts are appended on each message submit.</div>
         </div>
         <button type="button" class="btn-primary" id="prompt-new">New</button>
       </div>
@@ -65,6 +65,11 @@
             <span class="prompt-switch-track" aria-hidden="true"></span>
             <span class="prompt-switch-text">Show in Prompt Zone</span>
           </label>
+          <label class="prompt-switch" title="Append this prompt whenever a message is submitted to an AgentSpace agent.">
+            <input type="checkbox" id="prompt-auto-enabled" />
+            <span class="prompt-switch-track" aria-hidden="true"></span>
+            <span class="prompt-switch-text">Auto attach</span>
+          </label>
           <span class="prompt-actions-spacer"></span>
           <button type="button" class="btn-ghost" id="prompt-delete">Delete</button>
           <button type="submit" class="btn-primary">Save</button>
@@ -82,6 +87,7 @@
       const titleEl = document.getElementById('prompt-title');
       const contentEl = document.getElementById('prompt-content');
       const enabledEl = document.getElementById('prompt-enabled');
+      const autoEnabledEl = document.getElementById('prompt-auto-enabled');
       const editorTitle = document.getElementById('prompt-editor-title');
       const btnNew = document.getElementById('prompt-new');
       const btnDelete = document.getElementById('prompt-delete');
@@ -103,7 +109,10 @@
       function render(){
         if(!listEl) return;
         if(!prompts.length){ listEl.innerHTML = '<div class="muted">No prompts yet.</div>'; return; }
-        listEl.innerHTML = prompts.map((p)=> '<button type="button" class="prompt-item ' + (Number(p.id) === selectedId ? 'on' : '') + '" data-id="' + Number(p.id) + '"><div class="prompt-item-title"><span>' + escapeHtml(p.title || 'Untitled') + '</span><span class="prompt-status">' + (p.enabled ? 'shown' : 'hidden') + '</span></div><div class="prompt-item-summary">' + escapeHtml(String(p.content || '').replace(/\s+/g, ' ').slice(0, 160)) + '</div></button>').join('');
+        listEl.innerHTML = prompts.map((p)=> {
+          const status = (p.enabled ? 'shown' : 'hidden') + (p.auto_enabled ? ' | auto' : '');
+          return '<button type="button" class="prompt-item ' + (Number(p.id) === selectedId ? 'on' : '') + '" data-id="' + Number(p.id) + '"><div class="prompt-item-title"><span>' + escapeHtml(p.title || 'Untitled') + '</span><span class="prompt-status">' + status + '</span></div><div class="prompt-item-summary">' + escapeHtml(String(p.content || '').replace(/\s+/g, ' ').slice(0, 160)) + '</div></button>';
+        }).join('');
       }
       function selectPrompt(id){
         selectedId = Number(id || 0);
@@ -113,6 +122,7 @@
           titleEl.value = String(p.title || '');
           contentEl.value = String(p.content || '');
           enabledEl.checked = !!p.enabled;
+          autoEnabledEl.checked = !!p.auto_enabled;
           editorTitle.textContent = 'Edit Prompt';
           btnDelete.style.display = '';
         }else{
@@ -120,6 +130,7 @@
           titleEl.value = '';
           contentEl.value = '';
           enabledEl.checked = true;
+          autoEnabledEl.checked = false;
           editorTitle.textContent = 'New Prompt';
           btnDelete.style.display = 'none';
         }
@@ -134,7 +145,7 @@
       form?.addEventListener('submit', async (e)=> {
         e.preventDefault();
         const id = String(idEl.value || '').trim();
-        const payload = { title: String(titleEl.value || '').trim(), content: String(contentEl.value || '').trim(), enabled: !!enabledEl.checked };
+        const payload = { title: String(titleEl.value || '').trim(), content: String(contentEl.value || '').trim(), enabled: !!enabledEl.checked, auto_enabled: !!autoEnabledEl.checked };
         if(!payload.title || !payload.content){ toast2('Title and Prompt are required'); return; }
         const data = await api(id ? ('/api/agent_space_prompts/' + encodeURIComponent(id)) : '/api/agent_space_prompts', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const item = data.item;
@@ -153,6 +164,20 @@
           toast2(enabledEl.checked ? 'Shown in Prompt Zone' : 'Hidden from Prompt Zone');
         }catch(err){
           enabledEl.checked = previous;
+          toast2(String(err && err.message ? err.message : err || 'update failed'));
+        }
+      });
+      autoEnabledEl?.addEventListener('change', async ()=> {
+        const id = String(idEl.value || '').trim();
+        if(!id) return;
+        const previous = !autoEnabledEl.checked;
+        try{
+          const data = await api('/api/agent_space_prompts/' + encodeURIComponent(id) + '/auto_enabled', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_enabled: !!autoEnabledEl.checked }) });
+          upsertPrompt(data.item);
+          render();
+          toast2(autoEnabledEl.checked ? 'Auto attach on' : 'Auto attach off');
+        }catch(err){
+          autoEnabledEl.checked = previous;
           toast2(String(err && err.message ? err.message : err || 'update failed'));
         }
       });

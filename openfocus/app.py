@@ -133,8 +133,8 @@ async def _inspiration_release_terminals(space_id: int) -> int:
     return await inspiration_service.release_terminals(
         int(space_id),
         select_online=_select_online_companion,
-        clear_ttyd_agent_mode=lambda tid: (
-            streaming.terminal_event_hub.ttyd_agent_mode.pop(str(tid or ""), None)
+        clear_ttyd_auto_prompts=lambda tid: (
+            streaming.terminal_event_hub.ttyd_auto_prompts.pop(str(tid or ""), None)
         ),
     )
 
@@ -254,11 +254,11 @@ app.include_router(
     agent_spaces_routes.create_router(
         grpc_server=COMPANION_GRPC,
         templates=templates,
-        ttyd_agent_mode=streaming.terminal_event_hub.ttyd_agent_mode,
+        ttyd_auto_prompts=streaming.terminal_event_hub.ttyd_auto_prompts,
         agent_sse_subscribe=streaming.agent_sse_hub.subscribe,
         agent_sse_unsubscribe=streaming.agent_sse_hub.unsubscribe,
         agent_sse_publish=streaming.agent_sse_hub.publish,
-        rewrite_ttyd_input_for_agent_mode=streaming.terminal_event_hub.rewrite_ttyd_input_for_agent_mode,
+        rewrite_ttyd_input_for_auto_prompts=streaming.terminal_event_hub.rewrite_ttyd_input_for_auto_prompts,
     )
 )
 app.include_router(
@@ -307,8 +307,7 @@ app.include_router(
                 companion_id
             ),
             inspiration_terminal_conn=_inspiration_terminal_conn,
-            rewrite_ttyd_input_for_agent_mode=streaming.terminal_event_hub.rewrite_ttyd_input_for_agent_mode,
-            ttyd_agent_mode=streaming.terminal_event_hub.ttyd_agent_mode,
+            ttyd_auto_prompts=streaming.terminal_event_hub.ttyd_auto_prompts,
         ),
     )
 )

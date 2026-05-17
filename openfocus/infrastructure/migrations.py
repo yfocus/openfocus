@@ -14,6 +14,7 @@ REMOTE_TERMINAL_TASK_PUBLIC_ID_NULLABLE_MIGRATION_ID = (
 ATTENTION_ITEMS_MIGRATION_ID = "20260514_attention_items"
 AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
 AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
+AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID = "20260517_agent_space_prompt_auto"
 AGENT_ACTIVITY_MIGRATION_ID = "20260517_agent_activity"
 
 
@@ -456,11 +457,26 @@ def _migrate_agent_space_prompts(conn: Any) -> None:
             "title VARCHAR(160) NOT NULL DEFAULT '', "
             "content TEXT NOT NULL DEFAULT '', "
             "enabled BOOLEAN NOT NULL DEFAULT 1, "
+            "auto_enabled BOOLEAN NOT NULL DEFAULT 0, "
             "created_at DATETIME, "
             "updated_at DATETIME"
             ")"
         )
     )
+
+
+def _migrate_agent_space_prompt_auto(conn: Any) -> None:
+    prompt_cols = _table_columns(conn, "agent_space_prompts")
+    if not prompt_cols:
+        _migrate_agent_space_prompts(conn)
+        prompt_cols = _table_columns(conn, "agent_space_prompts")
+    if "auto_enabled" not in prompt_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE agent_space_prompts ADD COLUMN "
+                "auto_enabled BOOLEAN NOT NULL DEFAULT 0"
+            )
+        )
 
 
 def _migrate_agent_activity(conn: Any) -> None:
@@ -567,5 +583,6 @@ STARTUP_MIGRATIONS = [
     (ATTENTION_ITEMS_MIGRATION_ID, _migrate_attention_items),
     (AGENT_SPACE_START_COMMAND_MIGRATION_ID, _migrate_agent_space_start_command),
     (AGENT_SPACE_PROMPTS_MIGRATION_ID, _migrate_agent_space_prompts),
+    (AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID, _migrate_agent_space_prompt_auto),
     (AGENT_ACTIVITY_MIGRATION_ID, _migrate_agent_activity),
 ]

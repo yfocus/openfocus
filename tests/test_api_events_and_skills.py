@@ -444,19 +444,17 @@ def test_agent_space_prompt_injects_event_spec():
     assert "taskId=task_123" in prompt
     assert "openfocusBaseUrl=http://127.0.0.1:8001" in prompt
     assert "POST /api/agent/events" in prompt
-    assert "agent.started" in prompt
-    assert "task.started" in prompt
     assert "task.progress" in prompt
-    assert "task.completed" in prompt
-    assert "task.failed" in prompt
-    assert "task.blocked" in prompt
-    assert "agent.completed" in prompt
+    assert "步骤启动或完成" in prompt
+    assert "每约 5 分钟同步一次进展" in prompt
+    assert "不要为了 agent 启动、任务启动、任务结束、成功或失败而上报" in prompt
+    assert "agent.started" not in prompt
+    assert "task.started" not in prompt
+    assert "task.completed" not in prompt
+    assert "task.failed" not in prompt
+    assert "agent.completed" not in prompt
     assert "status 合法值按 spec 使用" in prompt
-    assert "focus_report.status 合法值按 spec 归一化" in prompt
-    assert "Agent 一启动，立刻先上报 agent.started" in prompt
-    assert "完成时必须上报 agent.completed" in prompt
-    assert "POST /api/skills/focus_report" in prompt
-    assert "task_public_id" in prompt
+    assert "POST /api/skills/focus_report" not in prompt
     assert "不要按 token/日志行/无意义心跳刷屏" in prompt
     assert prompt.endswith("do the work")
 
@@ -472,14 +470,15 @@ def test_agent_space_ttyd_prefix_injects_event_spec():
     assert "taskId=task_123" in prefix
     assert "openfocusBaseUrl=http://127.0.0.1:8001" in prefix
     assert "POST http://127.0.0.1:8001/api/agent/events" in prefix
-    assert "task.started" in prefix
     assert "task.progress" in prefix
-    assert "task.completed" in prefix
-    assert "task.failed" in prefix
-    assert "task.blocked" in prefix
-    assert "agent.started" in prefix
-    assert "agent.completed" in prefix
-    assert "status 按 spec 使用" in prefix
-    assert "POST http://127.0.0.1:8001/api/skills/focus_report" in prefix
-    assert "task_public_id" in prefix
+    assert "某个步骤启动/完成" in prefix
+    assert "每约 5 分钟同步一次进展" in prefix
+    assert "不要为了 agent 启动、任务启动、任务结束、成功或失败而上报" in prefix
+    assert "task.started" not in prefix
+    assert "task.completed" not in prefix
+    assert "task.failed" not in prefix
+    assert "task.blocked" not in prefix
+    assert "agent.started" not in prefix
+    assert "agent.completed" not in prefix
+    assert "POST http://127.0.0.1:8001/api/skills/focus_report" not in prefix
     assert "不要按 token/日志行/无意义心跳刷屏" in prefix

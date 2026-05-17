@@ -65,7 +65,6 @@ def _ttyd_bridge_script() -> str:
 (function(){
   if(window.__openfocusTtydBridgeInstalled) return;
   window.__openfocusTtydBridgeInstalled = true;
-  const state = { enabled: false, prefix: '', injectUrl: '' };
   function disableBeforeUnload(){
     try{ window.onbeforeunload = null; }catch(_){ }
   }
@@ -78,14 +77,6 @@ def _ttyd_bridge_script() -> str:
   }catch(_){ }
   disableBeforeUnload();
   try{ setInterval(disableBeforeUnload, 1000); }catch(_){ }
-
-  window.addEventListener('message', function(ev){
-    const d = ev && ev.data ? ev.data : {};
-    if(!d || d.type !== 'openfocus:ttyd-agent-mode') return;
-    state.enabled = !!d.enabled;
-    state.prefix = String(d.prefix || '');
-    state.injectUrl = String(d.injectUrl || '');
-  }, true);
 })();
 </script>
 """
@@ -1244,28 +1235,6 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                 raise HTTPException(status_code=400, detail="name already exists")
         return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
-    @router.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/agent_mode")
-    async def inspiration_terminals_agent_mode(
-        space_id: int, terminal_id: str, payload: dict
-    ) -> dict:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-        enabled = bool((payload or {}).get("enabled"))
-        prefix = str((payload or {}).get("prefix") or "").strip()
-        if enabled and prefix:
-            deps.ttyd_agent_mode[tid] = {"enabled": True, "prefix": prefix}
-        else:
-            deps.ttyd_agent_mode.pop(tid, None)
-        return {"ok": True, "enabled": enabled}
-
     @router.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/mouse_mode")
     async def inspiration_terminals_mouse_mode(
         space_id: int, terminal_id: str, payload: dict
@@ -1335,7 +1304,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                 owner=terminal_service.owner_for_inspiration_space(int(space_id)),
                 terminal_id=tid,
             )
-        deps.ttyd_agent_mode.pop(tid, None)
+        deps.ttyd_auto_prompts.pop(tid, None)
         return {"ok": True}
 
     @router.api_route(
@@ -1429,17 +1398,9 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                             await upstream.close()
                             return
                         if msg.get("bytes") is not None:
-                            await upstream.send(
-                                deps.rewrite_ttyd_input_for_agent_mode(
-                                    terminal_id, msg["bytes"]
-                                )
-                            )
+                            await upstream.send(msg["bytes"])
                         elif msg.get("text") is not None:
-                            await upstream.send(
-                                deps.rewrite_ttyd_input_for_agent_mode(
-                                    terminal_id, msg["text"]
-                                )
-                            )
+                            await upstream.send(msg["text"])
 
                 async def _upstream_to_client() -> None:
                     async for msg in upstream:

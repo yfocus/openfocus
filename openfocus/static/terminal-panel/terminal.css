@@ -114,6 +114,14 @@
   margin:2px 0;
 }
 
+.rt-prompt-row{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) auto;
+  align-items:stretch;
+  gap:6px;
+  width:100%;
+}
+
 .rt-side .rt-side-pill{
   display:inline-flex;
   align-items:center;
@@ -140,6 +148,54 @@
   line-height:1.2;
   white-space:nowrap;
   text-align:left;
+}
+
+.rt-prompt-row .rt-prompt-main{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.rt-auto-switch{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:42px;
+  min-height:32px;
+  box-sizing:border-box;
+  padding:4px 6px;
+  border:1px solid var(--border);
+  border-radius:calc(var(--radius) - 2px);
+  background:transparent;
+  color:var(--muted-foreground);
+  font-size:11px;
+  line-height:1;
+  cursor:pointer;
+  user-select:none;
+}
+
+.rt-auto-switch input{
+  position:absolute;
+  opacity:0;
+  width:1px;
+  height:1px;
+  overflow:hidden;
+}
+
+.rt-auto-switch input:checked + span{
+  color:var(--success);
+  font-weight:700;
+}
+
+.rt-auto-switch:has(input:checked){
+  border-color:color-mix(in srgb, var(--success) 55%, var(--border));
+  background:color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.rt-auto-switch:hover{
+  border-color:color-mix(in srgb, var(--primary) 55%, var(--border));
+  background:color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
 .rt-prompt-list{

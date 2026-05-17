@@ -336,9 +336,10 @@ async def test_agent_space_view_embeds_full_agent_prefix():
         r = await client.get(f"/tasks/{public_id}/agent_space")
         assert r.status_code == 200
         assert '"agentPrefix":' in r.text
-        assert "task.started" in r.text
+        assert "task.progress" in r.text
+        assert "task.started" not in r.text
         assert "/api/agent/events" in r.text
-        assert "/api/skills/focus_report" in r.text
+        assert "/api/skills/focus_report" not in r.text
 
 
 @pytest.mark.anyio

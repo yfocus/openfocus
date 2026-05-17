@@ -69,7 +69,7 @@ class TerminalEventHub:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._subs: dict[str, set[asyncio.Queue[dict]]] = {}
-        self.ttyd_agent_mode: dict[str, dict[str, object]] = {}
+        self.ttyd_auto_prompts: dict[str, dict[str, object]] = {}
 
     async def subscribe(self, terminal_id: str) -> asyncio.Queue[dict]:
         q: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
@@ -99,14 +99,14 @@ class TerminalEventHub:
             except Exception:
                 pass
 
-    def rewrite_ttyd_input_for_agent_mode(self, terminal_id: str, msg):
-        st = self.ttyd_agent_mode.get(str(terminal_id or "")) or {}
+    def rewrite_ttyd_input_for_auto_prompts(self, terminal_id: str, msg):
+        st = self.ttyd_auto_prompts.get(str(terminal_id or "")) or {}
         if not bool(st.get("enabled")):
             return msg
-        prefix = str(st.get("prefix") or "").strip()
-        if not prefix:
+        prompt = " ".join(str(st.get("prompt") or "").split())
+        if not prompt:
             return msg
-        paste_s = f"\x1b[200~ {prefix}\x1b[201~"
+        paste_s = f"\x1b[200~ {prompt}\x1b[201~"
         if isinstance(msg, bytes):
             paste_b = paste_s.encode("utf-8")
             if msg.startswith(b"0"):

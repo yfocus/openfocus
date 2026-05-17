@@ -242,9 +242,14 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         "dismissed_at",
         "acted_at",
     }.issubset(attention_cols)
-    assert {"title", "content", "enabled", "created_at", "updated_at"}.issubset(
-        prompt_cols
-    )
+    assert {
+        "title",
+        "content",
+        "enabled",
+        "auto_enabled",
+        "created_at",
+        "updated_at",
+    }.issubset(prompt_cols)
     assert {"turn_id", "session_id", "task_public_id", "state"}.issubset(turn_cols)
     assert {"task_public_id", "active_turn_id", "state", "dismissed_at"}.issubset(
         activity_cols
@@ -263,4 +268,5 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert migrations.ATTENTION_ITEMS_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_PROMPTS_MIGRATION_ID in migration_ids
+    assert migrations.AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID in migration_ids
     assert migrations.AGENT_ACTIVITY_MIGRATION_ID in migration_ids

@@ -56,14 +56,12 @@ def _build_openfocus_ttyd_agent_prefix(*, base_url: str, task_public_id: str) ->
         parts.append(f"taskId={task_id}")
     parts.append(f"openfocusBaseUrl={base}")
     parts.append(
-        "按 OpenFocus Event Spec 上报：启动立刻报 agent.started；开始当前任务立刻报 task.started；阶段进展/重要中间结果/阻塞/失败用 "
-        f'POST {base}/api/agent/events，JSON={{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{{"status":"running","message":"...","progress":0.5}}}}；'
-        "合法 kind=task.started|task.progress|task.completed|task.failed|task.blocked|agent.started|agent.completed；"
-        "payload 常用字段=status|message|summary|error|reason|progress|step|total_steps|metadata；"
-        "status 按 spec 使用：running|succeeded|failed|blocked|waiting|canceled|in_progress|progress|success|ok|done|completed|fail|error|timeout|denied|panic|waiting_on_someone；"
-        "完成时先报 agent.completed，再优先用 "
-        f'POST {base}/api/skills/focus_report，JSON={{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked|running","goal_id":null,"task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{{}}}}；'
-        "若 focus_report 不可用，再用 task.completed/task.failed/task.blocked；不要按 token/日志行/无意义心跳刷屏；completed/succeeded 只表示 Agent 报告完成，不会自动把任务标记为 done。"
+        "按 OpenFocus Event Spec 同步重要进展：只在有意义进展时调用 "
+        f'POST {base}/api/agent/events，JSON={{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{{"status":"running","message":"...","progress":0.5,"step":1,"total_steps":4}}}}；'
+        "不要为了 agent 启动、任务启动、任务结束、成功或失败而上报；"
+        "适合上报的时机包括多步骤任务中某个步骤启动/完成、有重要中间结果、长期任务每约 5 分钟同步一次进展；"
+        "payload 常用字段=status|message|summary|progress|step|total_steps|metadata；"
+        "不要按 token/日志行/无意义心跳刷屏。"
     )
     return " · ".join(parts)
 
@@ -78,21 +76,14 @@ def _inject_openfocus_prompt(
         f"openfocusBaseUrl={base_url}\n"
         "你必须按 OpenFocus 的 Event Spec 上报，不要自定义不兼容格式。\n"
         "接口 1：POST /api/agent/events（完整地址：{openfocusBaseUrl}/api/agent/events）\n"
-        "请求体必须是 JSON，对任务相关事件统一使用：\n"
-        '{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{"status":"running","message":"...","progress":0.5}}\n'
+        "请求体必须是 JSON；只在重要进展时使用 task.progress：\n"
+        '{"kind":"task.progress","agent":"<agent>","task_id":taskId,"payload":{"status":"running","message":"...","progress":0.5,"step":1,"total_steps":4}}\n'
         "字段规范：kind=事件类型（必填，<=128 chars）；agent=上报方标识（必填）；task_id=任务相关事件必填，且必须等于 taskId；payload=对象（必填）。\n"
-        "payload 合法常用字段：status、message、summary、error、reason、progress、step、total_steps、metadata。\n"
-        "status 合法值按 spec 使用：running | succeeded | failed | blocked | waiting | canceled | in_progress | progress | success | ok | done | completed | fail | error | timeout | denied | panic | waiting_on_someone。\n"
-        "kind 规范：task.started=任务开始；task.progress=阶段进度/重要中间结果；task.completed=Agent 认为已完成、等待用户确认；task.failed=无法完成；task.blocked=需要用户或外部条件；agent.started=一次 agent run 启动；agent.completed=一次 agent run 结束。\n"
-        "上报时机必须明确遵守：\n"
-        "1. Agent 一启动，立刻先上报 agent.started；开始处理该任务时，立刻上报 task.started。\n"
-        "2. 长任务只在有意义的阶段变化、重要进展、阻塞、失败时上报 task.progress / task.blocked / task.failed，不要按 token、日志行或无意义心跳刷屏。\n"
+        "payload 合法常用字段：status、message、summary、progress、step、total_steps、metadata。\n"
+        "status 合法值按 spec 使用：running | blocked | waiting | canceled | in_progress | progress | waiting_on_someone。\n"
+        "上报时机：多步骤任务中某个步骤启动或完成、有重要中间结果、长期任务每约 5 分钟同步一次进展。\n"
+        "不要为了 agent 启动、任务启动、任务结束、成功或失败而上报；不要使用启动、结束、成功、失败这类 kind。\n"
         "不要按 token/日志行/无意义心跳刷屏。\n"
-        "3. 完成时必须上报 agent.completed；若本次工作针对 task，随后上报最终任务结果：优先使用 /api/skills/focus_report，若不可用再用 task.completed / task.failed / task.blocked。\n"
-        "4. task.completed / skill.focus_report(status=succeeded) 只表示 Agent 报告完成，不会自动把任务标记为 done。\n"
-        "接口 2：POST /api/skills/focus_report（完整地址：{openfocusBaseUrl}/api/skills/focus_report，推荐用于最终结果）\n"
-        '{"agent":"<agent>","task_name":"...","status":"succeeded|failed|blocked|running","goal_id":null,"task_public_id":taskId,"user_prompt":"...","assistant_response":"...","metadata":{}}\n'
-        "focus_report.status 合法值按 spec 归一化：成功=succeeded|success|ok|done|completed；失败=failed|fail|error|timeout|denied|panic；阻塞=blocked|waiting|waiting_on_someone；进行中=running|in_progress|progress。\n"
         "---\n"
     )
     return head + str(user_prompt or "")
@@ -108,6 +99,7 @@ def _agent_space_prompt_payload(prompt: AgentSpacePrompt) -> dict:
         "title": str(prompt.title or ""),
         "content": str(prompt.content or ""),
         "enabled": bool(prompt.enabled),
+        "auto_enabled": bool(getattr(prompt, "auto_enabled", False)),
     }
 
 
@@ -190,11 +182,11 @@ def create_router(
     *,
     grpc_server: CompanionGrpcServer,
     templates: Jinja2Templates,
-    ttyd_agent_mode: dict[str, dict[str, object]],
+    ttyd_auto_prompts: dict[str, dict[str, object]],
     agent_sse_subscribe,
     agent_sse_unsubscribe,
     agent_sse_publish,
-    rewrite_ttyd_input_for_agent_mode,
+    rewrite_ttyd_input_for_auto_prompts,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -236,6 +228,7 @@ def create_router(
                 title=title,
                 content=content,
                 enabled=bool(payload.enabled),
+                auto_enabled=bool(payload.auto_enabled),
             )
             s.add(prompt)
             s.flush()
@@ -259,6 +252,7 @@ def create_router(
             prompt.title = title
             prompt.content = content
             prompt.enabled = bool(payload.enabled)
+            prompt.auto_enabled = bool(payload.auto_enabled)
             s.add(prompt)
             s.flush()
             item = _agent_space_prompt_payload(prompt)
@@ -274,6 +268,23 @@ def create_router(
                     status_code=404, detail="AgentSpace prompt not found"
                 )
             prompt.enabled = enabled
+            s.add(prompt)
+            s.flush()
+            item = _agent_space_prompt_payload(prompt)
+        return {"ok": True, "item": item}
+
+    @router.patch("/api/agent_space_prompts/{prompt_id}/auto_enabled")
+    def update_agent_space_prompt_auto_enabled(prompt_id: int, payload: dict) -> dict:
+        auto_enabled = (
+            bool(payload.get("auto_enabled")) if isinstance(payload, dict) else False
+        )
+        with session_scope() as s:
+            prompt = s.get(AgentSpacePrompt, int(prompt_id))
+            if prompt is None:
+                raise HTTPException(
+                    status_code=404, detail="AgentSpace prompt not found"
+                )
+            prompt.auto_enabled = auto_enabled
             s.add(prompt)
             s.flush()
             item = _agent_space_prompt_payload(prompt)
@@ -299,7 +310,7 @@ def create_router(
     _agent_sse_subscribe = agent_sse_subscribe
     _agent_sse_unsubscribe = agent_sse_unsubscribe
     _agent_sse_publish = agent_sse_publish
-    _rewrite_ttyd_input_for_agent_mode = rewrite_ttyd_input_for_agent_mode
+    _rewrite_ttyd_input_for_auto_prompts = rewrite_ttyd_input_for_auto_prompts
     _try_audit_memory = memory_service.try_audit_memory
     _memory_decode_terminal_bytes = memory_service.decode_terminal_bytes
 
@@ -671,8 +682,8 @@ def create_router(
             raise HTTPException(status_code=502, detail=f"terminal inject failed: {e}")
         return {"ok": True}
 
-    @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/agent_mode")
-    async def terminals_agent_mode(
+    @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/auto_prompts")
+    async def terminals_auto_prompts(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
         sp, _ = _load_space_and_optional_companion(space_id)
@@ -686,11 +697,13 @@ def create_router(
             except terminal_service.TerminalNotFound:
                 raise HTTPException(status_code=404, detail="Terminal not found")
         enabled = bool((payload or {}).get("enabled"))
-        prefix = str((payload or {}).get("prefix") or "").strip()
-        if enabled and prefix:
-            ttyd_agent_mode[tid] = {"enabled": True, "prefix": prefix}
+        prompt = str((payload or {}).get("prompt") or "").strip()
+        if len(prompt) > 40000:
+            raise HTTPException(status_code=400, detail="prompt is too long (<=40000)")
+        if enabled and prompt:
+            ttyd_auto_prompts[tid] = {"enabled": True, "prompt": prompt}
         else:
-            ttyd_agent_mode.pop(tid, None)
+            ttyd_auto_prompts.pop(tid, None)
         return {"ok": True, "enabled": enabled}
 
     @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/mouse_mode")
@@ -750,7 +763,7 @@ def create_router(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
                 terminal_id=tid,
             )
-        ttyd_agent_mode.pop(tid, None)
+        ttyd_auto_prompts.pop(tid, None)
 
         _try_audit_memory(
             kind="terminal.closed",
@@ -799,7 +812,6 @@ def create_router(
     (function(){
       if(window.__openfocusTtydBridgeInstalled) return;
       window.__openfocusTtydBridgeInstalled = true;
-      const state = { enabled: false, prefix: '', injectUrl: '' };
       function disableBeforeUnload(){
         try{ window.onbeforeunload = null; }catch(_){ }
       }
@@ -812,14 +824,6 @@ def create_router(
       }catch(_){ }
       disableBeforeUnload();
       try{ setInterval(disableBeforeUnload, 1000); }catch(_){ }
-
-      window.addEventListener('message', function(ev){
-        const d = ev && ev.data ? ev.data : {};
-        if(!d || d.type !== 'openfocus:ttyd-agent-mode') return;
-        state.enabled = !!d.enabled;
-        state.prefix = String(d.prefix || '');
-        state.injectUrl = String(d.injectUrl || '');
-      }, true);
     })();
     </script>
     """
@@ -938,13 +942,13 @@ def create_router(
                             return
                         if msg.get("bytes") is not None:
                             await upstream.send(
-                                _rewrite_ttyd_input_for_agent_mode(
+                                _rewrite_ttyd_input_for_auto_prompts(
                                     terminal_id, msg["bytes"]
                                 )
                             )
                         elif msg.get("text") is not None:
                             await upstream.send(
-                                _rewrite_ttyd_input_for_agent_mode(
+                                _rewrite_ttyd_input_for_auto_prompts(
                                     terminal_id, msg["text"]
                                 )
                             )

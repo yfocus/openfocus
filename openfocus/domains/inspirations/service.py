@@ -553,7 +553,7 @@ async def release_terminals(
     space_id: int,
     *,
     select_online: SelectCompanion,
-    clear_ttyd_agent_mode: ReleaseTerminalMode,
+    clear_ttyd_auto_prompts: ReleaseTerminalMode,
 ) -> int:
     owner = terminal_service.owner_for_inspiration_space(int(space_id))
     with session_scope() as s:
@@ -578,7 +578,7 @@ async def release_terminals(
     with session_scope() as s:
         terminal_service.delete_owner_terminal_records(s, owner=owner)
     for info in term_infos:
-        clear_ttyd_agent_mode(str(info.get("terminal_id") or ""))
+        clear_ttyd_auto_prompts(str(info.get("terminal_id") or ""))
     return len(term_infos)
 
 

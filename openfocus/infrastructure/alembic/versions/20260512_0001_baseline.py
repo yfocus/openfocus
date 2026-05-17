@@ -236,6 +236,9 @@ def upgrade() -> None:
         sa.Column("title", sa.String(length=160), nullable=False, server_default=""),
         sa.Column("content", sa.Text(), nullable=False, server_default=""),
         sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column(
+            "auto_enabled", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )

@@ -60,23 +60,21 @@
     if(!rootEl) throw new Error('mount element required');
     if(!spaceId) throw new Error('spaceId required');
 
-    // AGENT 模式按 terminal 生效（不是全局/space 全局）。
-    function agentModeKey(terminalId){
-      const tid = String(terminalId || '').trim();
-      return `openfocus.${mode}.terminal.agent_mode.${String(spaceId)}.${tid}`;
-    }
-
     function mouseModeKey(terminalId){
       const tid = String(terminalId || '').trim();
       return `openfocus.${mode}.terminal.mouse_mode.${String(spaceId)}.${tid}`;
     }
 
-    function loadAgentMode(terminalId){
-      try{ return (localStorage.getItem(agentModeKey(terminalId)) || '') === '1'; }catch(_){ return false; }
+    function builtinAutoPromptKey(key){
+      return `openfocus.${mode}.prompt.auto_builtin.${String(key || '').trim()}`;
     }
 
-    function saveAgentMode(terminalId, v){
-      try{ localStorage.setItem(agentModeKey(terminalId), v ? '1' : '0'); }catch(_){ }
+    function loadBuiltinAutoPrompt(key){
+      try{ return (localStorage.getItem(builtinAutoPromptKey(key)) || '') === '1'; }catch(_){ return false; }
+    }
+
+    function saveBuiltinAutoPrompt(key, v){
+      try{ localStorage.setItem(builtinAutoPromptKey(key), v ? '1' : '0'); }catch(_){ }
     }
 
     function loadMouseMode(terminalId){
@@ -98,7 +96,7 @@
       const parts = [];
       if(tid) parts.push(`taskId=${tid}`);
       if(base) parts.push(`openfocus=${base}`);
-      parts.push('进度上报: POST /api/agent/events; 最终结果: POST /api/skills/focus_report');
+      parts.push('重要进展同步: POST /api/agent/events kind=task.progress; 步骤启动/完成或长期任务每约5分钟同步一次; 不要求启动/结束/成功/失败上报');
       return parts.join(' · ');
     }
 
@@ -106,9 +104,13 @@
       const prefix = buildAgentPrefix();
       const k = String(kind || 'context');
       if(k === 'draft_summary') return `[OpenFocus Summary Request] ${String(opts && opts.draftSummaryPrompt ? opts.draftSummaryPrompt : '')}`;
-      if(k === 'lessons') return `[OpenFocus Lessons]\n${prefix}`;
+      if(k === 'report_progress') return `[OpenFocus Report Progress]\n${prefix}`;
       if(k === 'pua') return PUA_PROACTIVITY_PROMPT;
       return prefix;
+    }
+
+    function normalizeAutoPromptText(text){
+      return String(text || '').replace(/\s+/g, ' ').trim();
     }
 
     rootEl.innerHTML = `
@@ -125,9 +127,8 @@
         </div>
         <div class="rt-side">
           <div class="rt-side-title">prompt zone</div>
-          ${isInspiration ? '' : '<label class="rt-agent-switch" title="enable agent mode"><input type="checkbox" id="rt-agent-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text">agent mode</span></label>'}
           <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><button type="button" class="btn-ghost" id="rt-lessons">draw lessons</button><button type="button" class="btn-ghost" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal and turn on agent mode.">start agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button></div>'}
+          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-report-progress">report progress</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="report_progress" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="pua" /><span>auto</span></label></div></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal.">start agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button></div>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
       </div>
@@ -137,10 +138,9 @@
     const bodyEl = $('#rt-body', rootEl);
     const statusEl = $('#rt-status', rootEl);
     const btnNew = $('#rt-new', rootEl);
-    const agentSwitch = $('#rt-agent-switch', rootEl);
     const mouseSwitch = $('#rt-mouse-switch', rootEl);
     const mouseText = $('#rt-mouse-text', rootEl);
-    const btnLessons = $('#rt-lessons', rootEl);
+    const btnReportProgress = $('#rt-report-progress', rootEl);
     const btnPua = $('#rt-pua', rootEl);
     const customPromptsEl = $('#rt-custom-prompts', rootEl);
     const btnStartAgent = $('#rt-start-agent', rootEl);
@@ -181,7 +181,8 @@
         const id = Number(p && p.id ? p.id : 0);
         const title = esc(String(p && p.title ? p.title : 'Prompt'));
         const content = esc(String(p && p.content ? p.content : ''));
-        return `<button type="button" class="btn-ghost rt-prompt-btn" data-prompt-id="${id}" title="${title}: ${content}">${title}</button>`;
+        const checked = p && p.auto_enabled ? ' checked' : '';
+        return `<div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-btn rt-prompt-main" data-prompt-id="${id}" title="${title}: ${content}">${title}</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-prompt-id="${id}"${checked} /><span>auto</span></label></div>`;
       }).join('');
     }
 
@@ -194,19 +195,34 @@
         customPrompts = [];
       }
       renderCustomPrompts();
+      syncAllAutoPrompts();
     }
 
     function customPromptText(prompt){
       const content = String(prompt && prompt.content ? prompt.content : '').trim();
-      return content ? content.replace(/\s+/g, ' ').trim() : '';
+      return content ? normalizeAutoPromptText(content) : '';
     }
 
-    function applyAgentUi(){
-      const it = activeTerminal();
-      const on = !!(it && it.__agent_mode);
-      if(agentSwitch && agentSwitch instanceof HTMLInputElement){
-        agentSwitch.checked = on;
+    function applyBuiltinAutoUi(){
+      if(isInspiration) return;
+      rootEl.querySelectorAll('[data-auto-builtin]').forEach((el)=> {
+        if(el instanceof HTMLInputElement) el.checked = loadBuiltinAutoPrompt(el.getAttribute('data-auto-builtin') || '');
+      });
+    }
+
+    function autoPromptTexts(){
+      if(isInspiration) return [];
+      const out = [];
+      if(loadBuiltinAutoPrompt('report_progress')) out.push(normalizeAutoPromptText(buildPasteText('report_progress')));
+      if(loadBuiltinAutoPrompt('pua')) out.push(normalizeAutoPromptText(buildPasteText('pua')));
+      for(const p of customPrompts){
+        if(p && p.auto_enabled) out.push(customPromptText(p));
       }
+      return out.map(normalizeAutoPromptText).filter(Boolean);
+    }
+
+    function combinedAutoPromptText(){
+      return autoPromptTexts().join(' ');
     }
 
     function applyMouseUi(){
@@ -313,25 +329,22 @@
       void Promise.resolve(opts.createGoalFromResource(value)).catch((err)=> toast(String(err && err.message ? err.message : err || 'create failed')));
     }
 
-    function syncTtydAgentMode(it){
+    function syncTtydAutoPrompts(it){
       if(isInspiration) return;
       if(!it || !it.iframeEl) return;
-      const prefix = buildAgentPrefix();
+      const prompt = combinedAutoPromptText();
       try{
-        fetchJson(`${apiBase}/${encodeURIComponent(it.terminalId)}/agent_mode`, {
+        fetchJson(`${apiBase}/${encodeURIComponent(it.terminalId)}/auto_prompts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: !!it.__agent_mode, prefix }),
+          body: JSON.stringify({ enabled: !!prompt, prompt }),
         }).catch(()=>{});
       }catch(_){ }
-      try{
-        it.iframeEl.contentWindow && it.iframeEl.contentWindow.postMessage({
-          type: 'openfocus:ttyd-agent-mode',
-          enabled: !!it.__agent_mode,
-          prefix,
-          injectUrl: `${apiBase}/${encodeURIComponent(it.terminalId)}/inject`,
-        }, window.location.origin);
-      }catch(_){ }
+    }
+
+    function syncAllAutoPrompts(){
+      if(isInspiration) return;
+      for(const it of terminals.values()) syncTtydAutoPrompts(it);
     }
 
     async function syncMouseMode(it){
@@ -348,12 +361,12 @@
       return it.__mouse_mode;
     }
 
-    function attachTtydAgentModeHook(it){
+    function attachTtydAutoPromptSync(it){
       if(isInspiration) return;
       if(!it || !it.iframeEl) return;
-      try{ it.iframeEl.addEventListener('load', ()=> syncTtydAgentMode(it)); }catch(_){ }
-      setTimeout(()=> syncTtydAgentMode(it), 300);
-      setTimeout(()=> syncTtydAgentMode(it), 1200);
+      try{ it.iframeEl.addEventListener('load', ()=> syncTtydAutoPrompts(it)); }catch(_){ }
+      setTimeout(()=> syncTtydAutoPrompts(it), 300);
+      setTimeout(()=> syncTtydAutoPrompts(it), 1200);
     }
 
     function focusActive(){
@@ -374,18 +387,9 @@
       const it = terminals.get(tid);
       if(it){
         focusActive();
-        applyAgentUi();
         applyMouseUi();
-        syncTtydAgentMode(it);
+        syncTtydAutoPrompts(it);
       }
-    }
-
-    function enableAgentModeForTerminal(it){
-      if(isInspiration || !it) return;
-      it.__agent_mode = true;
-      saveAgentMode(it.terminalId, true);
-      applyAgentUi();
-      syncTtydAgentMode(it);
     }
 
     async function startAgent(){
@@ -397,7 +401,6 @@
       }
       const it = await createNew();
       if(!it){ toast('terminal unavailable'); return; }
-      enableAgentModeForTerminal(it);
       await injectPromptToTerminal(it, cmd, { bracketedPaste: false, submit: true, focus: true });
       toast('Agent started');
     }
@@ -457,10 +460,9 @@
       view.appendChild(iframeEl);
 
       const it = { terminalId: tid, name: nm, backend: 'ttyd', embedUrl, iframeEl, tabEl: tab, nameEl, viewEl: view };
-      it.__agent_mode = isInspiration ? false : loadAgentMode(tid);
       it.__mouse_mode = loadMouseMode(tid);
       terminals.set(tid, it);
-      attachTtydAgentModeHook(it);
+      attachTtydAutoPromptSync(it);
       setTimeout(()=> syncMouseMode(it).catch(()=>{}), 50);
 
       tab.addEventListener('click', (e)=>{
@@ -580,19 +582,6 @@
 
     btnNew?.addEventListener('click', createNew);
 
-    agentSwitch?.addEventListener('change', ()=>{
-      const it = activeTerminal();
-      if(!it){
-        if(agentSwitch && agentSwitch instanceof HTMLInputElement) agentSwitch.checked = false;
-        return;
-      }
-      it.__agent_mode = !!(agentSwitch && agentSwitch instanceof HTMLInputElement && agentSwitch.checked);
-      saveAgentMode(it.terminalId, it.__agent_mode);
-      applyAgentUi();
-      syncTtydAgentMode(it);
-      try{ toast(it.__agent_mode ? 'Agent Mode: ON' : 'Agent Mode: OFF'); }catch(_){ }
-      focusActive();
-    });
     mouseSwitch?.addEventListener('change', ()=>{
       const it = activeTerminal();
       if(!it){ applyMouseUi(); return; }
@@ -609,14 +598,53 @@
         })
         .finally(()=> focusActive());
     });
-    btnLessons?.addEventListener('click', ()=> pasteToActive(buildPasteText('lessons')));
+    btnReportProgress?.addEventListener('click', ()=> pasteToActive(buildPasteText('report_progress')));
     btnPua?.addEventListener('click', ()=> pasteToActive(buildPasteText('pua')));
+    rootEl.querySelectorAll('[data-auto-builtin]').forEach((el)=> {
+      el.addEventListener('change', ()=>{
+        if(!(el instanceof HTMLInputElement)) return;
+        const key = String(el.getAttribute('data-auto-builtin') || '').trim();
+        saveBuiltinAutoPrompt(key, !!el.checked);
+        syncAllAutoPrompts();
+        toast(el.checked ? 'Auto prompt: on' : 'Auto prompt: off');
+        focusActive();
+      });
+    });
     customPromptsEl?.addEventListener('click', (e)=> {
       const target = e && e.target && e.target.closest ? e.target.closest('[data-prompt-id]') : null;
       if(!target) return;
       const id = Number(target.getAttribute('data-prompt-id') || 0);
       const prompt = customPrompts.find((p)=> Number(p && p.id ? p.id : 0) === id);
       pasteToActive(customPromptText(prompt));
+    });
+    customPromptsEl?.addEventListener('change', (e)=> {
+      const target = e && e.target && e.target.closest ? e.target.closest('[data-auto-prompt-id]') : null;
+      if(!target || !(target instanceof HTMLInputElement)) return;
+      const id = Number(target.getAttribute('data-auto-prompt-id') || 0);
+      const prompt = customPrompts.find((p)=> Number(p && p.id ? p.id : 0) === id);
+      if(!prompt) return;
+      const previous = !target.checked;
+      const next = !!target.checked;
+      prompt.auto_enabled = next;
+      syncAllAutoPrompts();
+      fetchJson(`${promptApi}/${encodeURIComponent(String(id))}/auto_enabled`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_enabled: next }),
+      }).then((data)=> {
+        if(data && data.item){
+          const idx = customPrompts.findIndex((p)=> Number(p && p.id ? p.id : 0) === id);
+          if(idx >= 0) customPrompts[idx] = data.item;
+          renderCustomPrompts();
+          syncAllAutoPrompts();
+        }
+        toast(next ? 'Auto prompt: on' : 'Auto prompt: off');
+      }).catch((err)=> {
+        prompt.auto_enabled = previous;
+        target.checked = previous;
+        syncAllAutoPrompts();
+        toast(String(err && err.message ? err.message : err || 'auto prompt failed'));
+      }).finally(()=> focusActive());
     });
     btnStartAgent?.addEventListener('click', ()=> {
       void startAgent().catch((err)=> toast(String(err && err.message ? err.message : err || 'start failed')));
@@ -660,7 +688,7 @@
     try{ rootEl.__openfocusRemoteTerminal = api; }catch(_){ }
 
     initialLoadPromise = loadExisting();
-    applyAgentUi();
+    applyBuiltinAutoUi();
     applyMouseUi();
     applyStartAgentUi();
     void loadCustomPrompts();
