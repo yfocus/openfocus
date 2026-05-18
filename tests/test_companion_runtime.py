@@ -283,6 +283,23 @@ def test_float_ball_backend_env_is_allowlisted(monkeypatch, tmp_path) -> None:
     assert "system_float_ball.swift" in rt._capabilities()
 
 
+def test_float_ball_backend_prefers_swift_on_macos(monkeypatch, tmp_path) -> None:
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    monkeypatch.delenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", raising=False)
+    monkeypatch.delenv("OPENFOCUS_DISABLE_SYSTEM_FLOAT_BALL", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setattr(rt.sys, "platform", "darwin")
+    monkeypatch.setattr(rt, "_python_supports_tk", lambda _exe: True)
+    monkeypatch.setattr(
+        rt.shutil, "which", lambda name: "/usr/bin/swift" if name == "swift" else None
+    )
+
+    assert rt._float_ball_backend() == "swift"
+
+    monkeypatch.setattr(rt.shutil, "which", lambda _name: None)
+    assert rt._float_ball_backend() == "tk"
+
+
 def test_float_ball_manager_reports_helper_startup_exit(monkeypatch, tmp_path) -> None:
     rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
     rt.RUNTIME.auth_token = "tok_test"

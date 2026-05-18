@@ -322,10 +322,10 @@ def _float_ball_backend() -> str:
     if disabled in {"1", "true", "yes", "on"}:
         return "unsupported"
     if sys.platform == "darwin" and os.environ.get("SSH_CONNECTION") is None:
-        if _python_supports_tk(_float_ball_helper_python()):
-            return "tk"
         if shutil.which("swift"):
             return "swift"
+        if _python_supports_tk(_float_ball_helper_python()):
+            return "tk"
     return "unsupported"
 
 

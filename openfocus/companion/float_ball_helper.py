@@ -23,6 +23,8 @@ FLOAT_BALL_MUTED = "#a7f3d0"
 FLOAT_BALL_ACCENT = "#34d399"
 SUMMARY_PATH = "/api/agent_activity/summary?limit=30"
 READY_FILE_ENV = "OPENFOCUS_FLOAT_BALL_READY_FILE"
+TK_POPOVER_OPEN_DELAY_MS = 1
+TK_TOPMOST_REASSERT_MS = 120
 
 
 def _as_dict(value: object) -> dict[str, Any]:
@@ -255,6 +257,8 @@ let textColor = NSColor(red: 0.925, green: 0.992, blue: 0.961, alpha: 1.0)
 let mutedColor = NSColor(red: 0.655, green: 0.953, blue: 0.816, alpha: 1.0)
 let accentColor = NSColor(red: 0.204, green: 0.827, blue: 0.600, alpha: 1.0)
 let summaryPath = "/api/agent_activity/summary?limit=30"
+let floatBallWindowLevel = NSWindow.Level.statusBar
+let floatBallCollectionBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
 func signalReady() {
     if readyFile.isEmpty { return }
@@ -504,12 +508,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        panel.level = floatBallWindowLevel
+        panel.collectionBehavior = floatBallCollectionBehavior
         panel.isMovableByWindowBackground = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.worksWhenModal = true
 
         let view = ClickSurface(frame: NSRect(x: 0, y: 0, width: 172, height: 58))
         view.owner = self
@@ -540,6 +547,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signalReady()
     }
 
+    func raiseFloatingWindows() {
+        panel?.level = floatBallWindowLevel
+        popoverPanel?.level = floatBallWindowLevel
+        panel?.orderFrontRegardless()
+        if let pop = popoverPanel, pop.isVisible {
+            pop.orderFrontRegardless()
+        }
+    }
+
     func updateBadge() {
         let c = counts(summary)
         badge?.stringValue = "R \(min(c.0, 99))   W \(min(c.1, 99))"
@@ -559,8 +575,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePopover() {
+        raiseFloatingWindows()
         if let pop = popoverPanel, pop.isVisible {
             pop.orderOut(nil)
+            panel?.orderFrontRegardless()
             return
         }
         showPopover()
@@ -569,6 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func closePopover() {
         popoverPanel?.orderOut(nil)
+        panel?.orderFrontRegardless()
     }
 
     @objc func openDashboard() {
@@ -597,22 +616,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         pop.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
-        pop.level = .floating
-        pop.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        pop.level = floatBallWindowLevel
+        pop.collectionBehavior = floatBallCollectionBehavior
         pop.isOpaque = false
         pop.backgroundColor = .clear
         pop.hasShadow = true
+        pop.hidesOnDeactivate = false
+        pop.isReleasedWhenClosed = false
+        pop.worksWhenModal = true
         popoverPanel = pop
         renderPopover()
+        panel?.orderFrontRegardless()
         pop.orderFrontRegardless()
     }
 
-    func label(_ text: String, frame: NSRect, font: NSFont, color: NSColor) -> NSTextField {
-        let f = NSTextField(wrappingLabelWithString: text)
+    func label(_ text: String, frame: NSRect, font: NSFont, color: NSColor, singleLine: Bool = false) -> NSTextField {
+        let f = singleLine ? NSTextField(labelWithString: text) : NSTextField(wrappingLabelWithString: text)
         f.frame = frame
         f.font = font
         f.textColor = color
         f.backgroundColor = .clear
+        if singleLine {
+            f.maximumNumberOfLines = 1
+            f.lineBreakMode = .byTruncatingTail
+            f.cell?.lineBreakMode = .byTruncatingTail
+            f.cell?.usesSingleLineMode = true
+        }
         return f
     }
 
@@ -626,31 +655,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         root.layer?.borderWidth = 1
         root.layer?.borderColor = borderColor.cgColor
 
-        let title = label("Attention Inbox", frame: NSRect(x: 14, y: 486, width: 220, height: 20), font: NSFont.boldSystemFont(ofSize: 14), color: textColor)
+        let title = label("Attention Inbox", frame: NSRect(x: 14, y: 486, width: 220, height: 20), font: NSFont.boldSystemFont(ofSize: 14), color: textColor, singleLine: true)
         root.addSubview(title)
         let c = counts(summary)
-        let sub = label("R = running, W = waiting / review   R \(c.0)  W \(c.1)", frame: NSRect(x: 14, y: 466, width: 260, height: 18), font: NSFont.systemFont(ofSize: 11), color: mutedColor)
+        let sub = label("R = running, W = waiting / review   R \(c.0)  W \(c.1)", frame: NSRect(x: 14, y: 466, width: 258, height: 18), font: NSFont.systemFont(ofSize: 11), color: mutedColor, singleLine: true)
         root.addSubview(sub)
-        let close = NSButton(title: "Close", target: self, action: #selector(closePopover))
-        close.frame = NSRect(x: 286, y: 477, width: 80, height: 28)
-        root.addSubview(close)
         let dashboard = NSButton(title: "Dashboard", target: self, action: #selector(openDashboard))
-        dashboard.frame = NSRect(x: 286, y: 449, width: 80, height: 24)
+        dashboard.frame = NSRect(x: 278, y: 470, width: 88, height: 24)
+        dashboard.font = NSFont.systemFont(ofSize: 10)
         root.addSubview(dashboard)
 
         let running = bucketItems(summary, "running")
         let waiting = bucketItems(summary, "waiting")
         let next = bucketItems(summary, "next_move")
-        let sections: [(String, [[String: Any]], String)] = [
-            ("Running spaces", running, ""),
-            ("Waiting / review", waiting, ""),
-            ("NextMove recommendations", next, "no suggestion.")
+        let sections: [(String, [[String: Any]], String, Bool)] = [
+            ("Running spaces", running, "", false),
+            ("Waiting / review", waiting, "", false),
+            ("NextMove recommendations", next, "no suggestion.", true)
         ]
         func cardHeight(_ item: [String: Any]) -> CGFloat {
-            clean(item["summary"]).isEmpty ? 104 : 128
+            clean(item["summary"]).isEmpty ? 118 : 150
         }
         var contentHeight: CGFloat = 18
         for section in sections {
+            if section.1.isEmpty && !section.3 {
+                continue
+            }
             contentHeight += 26
             if section.1.isEmpty {
                 contentHeight += 30
@@ -674,7 +704,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         func addSectionTitle(_ text: String) {
             y -= 16
-            let f = label(text, frame: NSRect(x: 14, y: y, width: 330, height: 16), font: NSFont.boldSystemFont(ofSize: 11), color: mutedColor)
+            let f = label(text, frame: NSRect(x: 14, y: y, width: 330, height: 16), font: NSFont.boldSystemFont(ofSize: 11), color: mutedColor, singleLine: true)
             content.addSubview(f)
             y -= 8
         }
@@ -691,6 +721,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sleeves.append(sleeve)
             let button = NSButton(title: title, target: sleeve, action: #selector(ClosureSleeve.invoke(_:)))
             button.frame = frame
+            button.font = NSFont.systemFont(ofSize: 10)
+            button.cell?.lineBreakMode = .byTruncatingTail
             view.addSubview(button)
         }
 
@@ -704,25 +736,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             card.layer?.borderWidth = 1
             card.layer?.borderColor = borderColor.cgColor
 
-            card.addSubview(label(itemTitle(item), frame: NSRect(x: 10, y: h - 30, width: 316, height: 18), font: NSFont.boldSystemFont(ofSize: 12), color: textColor))
+            card.addSubview(label(itemTitle(item), frame: NSRect(x: 10, y: h - 30, width: 316, height: 18), font: NSFont.boldSystemFont(ofSize: 12), color: textColor, singleLine: true))
             let agent = agentLabel(item)
             let goal = clean(item["goal_title"], maxLen: 80)
             let meta = [agent, goal].filter { !$0.isEmpty }.joined(separator: " / ")
-            card.addSubview(label(meta.isEmpty ? "No goal" : meta, frame: NSRect(x: 10, y: h - 50, width: 316, height: 16), font: NSFont.systemFont(ofSize: 10), color: mutedColor))
+            card.addSubview(label(meta.isEmpty ? "No goal" : meta, frame: NSRect(x: 10, y: h - 51, width: 316, height: 16), font: NSFont.systemFont(ofSize: 10), color: mutedColor, singleLine: true))
             let duration = durationText(item)
             let state = duration.isEmpty ? stateLabel(item) : "\(stateLabel(item)) / \(duration)"
-            card.addSubview(label(state, frame: NSRect(x: 10, y: h - 69, width: 316, height: 16), font: NSFont.systemFont(ofSize: 11), color: accentColor))
+            card.addSubview(label(state, frame: NSRect(x: 10, y: h - 72, width: 316, height: 16), font: NSFont.systemFont(ofSize: 11), color: accentColor, singleLine: true))
             let summaryText = clean(item["summary"], maxLen: 140)
             if !summaryText.isEmpty {
-                card.addSubview(label(summaryText, frame: NSRect(x: 10, y: 34, width: 316, height: 32), font: NSFont.systemFont(ofSize: 11), color: mutedColor))
+                card.addSubview(label(summaryText, frame: NSRect(x: 10, y: 44, width: 316, height: 36), font: NSFont.systemFont(ofSize: 11), color: mutedColor))
             }
             if let url = primaryURL(item) {
-                addButton(primaryLabel(item), frame: NSRect(x: 10, y: 8, width: 128, height: 24), action: {
+                addButton(primaryLabel(item), frame: NSRect(x: 10, y: 10, width: 150, height: 24), action: {
                     NSWorkspace.shared.open(url)
                 }, to: card)
             }
             if let url = dismissURL(item) {
-                addButton("Dismiss", frame: NSRect(x: 146, y: 8, width: 82, height: 24), action: { [weak self] in
+                addButton("Dismiss", frame: NSRect(x: 168, y: 10, width: 82, height: 24), action: { [weak self] in
                     postURL(url) {
                         self?.refreshSummary(render: true)
                     }
@@ -733,6 +765,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         for section in sections {
+            if section.1.isEmpty && !section.3 {
+                continue
+            }
             addSectionTitle(section.0)
             if section.1.isEmpty {
                 if !section.2.isEmpty {
@@ -803,6 +838,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         "drag_root_x": 0,
         "drag_root_y": 0,
         "drag_moved": False,
+        "opening_popover": False,
     }
 
     root = tk.Tk()
@@ -855,7 +891,23 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         running, waiting = _counts(_as_dict(state.get("summary")))
         badge.configure(text=f"R {min(running, 99)}   W {min(waiting, 99)}")
 
+    def raise_window(win: Any) -> None:
+        with contextlib.suppress(Exception):
+            win.attributes("-topmost", True)
+        with contextlib.suppress(Exception):
+            win.lift()
+
+        def reassert() -> None:
+            with contextlib.suppress(Exception):
+                win.attributes("-topmost", True)
+            with contextlib.suppress(Exception):
+                win.lift()
+
+        with contextlib.suppress(Exception):
+            win.after(TK_TOPMOST_REASSERT_MS, reassert)
+
     def close_popover() -> None:
+        state["opening_popover"] = False
         pop = state.get("popover")
         if pop is not None:
             try:
@@ -863,6 +915,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             except Exception:
                 pass
         state["popover"] = None
+        raise_window(root)
 
     def open_url(url: str) -> None:
         if url:
@@ -963,6 +1016,8 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             ).pack(side="left", padx=(6, 0))
 
     def render_section(parent: Any, label: str, items: list[dict[str, Any]], empty: str = "") -> None:
+        if not items and not empty:
+            return
         section = tk.Frame(parent, bg=FLOAT_BALL_PANEL_BG)
         section.pack(fill="x", pady=(0, 10))
         tk.Label(
@@ -1013,17 +1068,6 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         tk.Button(
             header,
-            text="Close",
-            command=close_popover,
-            bg=FLOAT_BALL_CARD_BG,
-            fg=FLOAT_BALL_TEXT,
-            activebackground=FLOAT_BALL_BORDER,
-            activeforeground=FLOAT_BALL_TEXT,
-            relief="flat",
-            padx=8,
-        ).grid(row=0, column=1, sticky="e", padx=(10, 0))
-        tk.Button(
-            header,
             text="Dashboard",
             command=open_dashboard,
             bg=FLOAT_BALL_CARD_BG,
@@ -1031,8 +1075,9 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             activebackground=FLOAT_BALL_BORDER,
             activeforeground=FLOAT_BALL_TEXT,
             relief="flat",
-            padx=8,
-        ).grid(row=1, column=1, sticky="e", padx=(10, 0), pady=(4, 0))
+            font=("Helvetica", 9),
+            padx=5,
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
         header.grid_columnconfigure(0, weight=1)
 
         canvas = tk.Canvas(pop, bg=FLOAT_BALL_PANEL_BG, highlightthickness=0, width=380, height=444)
@@ -1093,14 +1138,16 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def toggle_popover(_event=None) -> None:
+    def open_popover() -> None:
+        state["opening_popover"] = False
         if popover_exists():
-            close_popover()
             return
         pop = tk.Toplevel(root)
         pop.title("OpenFocus Attention Inbox")
         pop.configure(bg=FLOAT_BALL_PANEL_BG)
         pop.attributes("-topmost", True)
+        with contextlib.suppress(Exception):
+            pop.transient(root)
         pop.resizable(False, True)
         state["popover"] = pop
         root.update_idletasks()
@@ -1113,7 +1160,18 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             py = max(8, ry - panel_h - 8)
         pop.geometry(f"{panel_w}x{panel_h}+{px}+{py}")
         render_popover()
+        raise_window(root)
+        raise_window(pop)
         refresh_async(render=True)
+
+    def toggle_popover(_event=None) -> None:
+        if state.get("opening_popover"):
+            return
+        if popover_exists():
+            close_popover()
+            return
+        state["opening_popover"] = True
+        root.after(TK_POPOVER_OPEN_DELAY_MS, open_popover)
 
     def schedule_refresh() -> None:
         refresh_async(render=popover_exists())
@@ -1152,7 +1210,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
 
     update_badge()
     root.update_idletasks()
-    root.lift()
+    raise_window(root)
     _signal_ready()
     root.after(15000, schedule_refresh)
     root.mainloop()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 
 from openfocus.companion import float_ball_helper as helper
 
@@ -85,13 +86,32 @@ def test_helper_labels_and_durations_follow_web_copy() -> None:
 def test_helper_visual_contract_is_dark_green_popover() -> None:
     assert helper.FLOAT_BALL_BG == "#064e3b"
     assert helper.READY_FILE_ENV == "OPENFOCUS_FLOAT_BALL_READY_FILE"
+    assert helper.TK_POPOVER_OPEN_DELAY_MS == 1
+    assert helper.TK_TOPMOST_REASSERT_MS >= 100
     assert helper.SUMMARY_PATH in helper.SWIFT_HELPER
     assert "signalReady()" in helper.SWIFT_HELPER
     assert "final class ClickSurface" in helper.SWIFT_HELPER
     assert "togglePopover" in helper.SWIFT_HELPER
+    assert "floatBallWindowLevel = NSWindow.Level.statusBar" in helper.SWIFT_HELPER
+    assert ".ignoresCycle" in helper.SWIFT_HELPER
+    assert "hidesOnDeactivate = false" in helper.SWIFT_HELPER
+    assert "raiseFloatingWindows" in helper.SWIFT_HELPER
     assert "openDashboard" in helper.SWIFT_HELPER
     assert 'normalizedURL("/goals")' in helper.SWIFT_HELPER
     assert "Dashboard" in helper.SWIFT_HELPER
+    assert 'NSButton(title: "Close"' not in helper.SWIFT_HELPER
+    assert "singleLine: Bool = false" in helper.SWIFT_HELPER
+    assert "maximumNumberOfLines = 1" in helper.SWIFT_HELPER
+    assert "clean(item[\"summary\"]).isEmpty ? 118 : 150" in helper.SWIFT_HELPER
+    assert "if section.1.isEmpty && !section.3" in helper.SWIFT_HELPER
     assert "NSClickGestureRecognizer" not in helper.SWIFT_HELPER
     assert "NextMove recommendations" in helper.SWIFT_HELPER
     assert "dismiss_url" in helper.SWIFT_HELPER
+
+    tk_source = inspect.getsource(helper._run_tk_helper)
+    assert "root.after(TK_POPOVER_OPEN_DELAY_MS, open_popover)" in tk_source
+    assert "pop.transient(root)" in tk_source
+    assert "TK_TOPMOST_REASSERT_MS" in tk_source
+    assert "if not items and not empty:" in tk_source
+    assert 'text="Close"' not in tk_source
+    assert 'font=("Helvetica", 9)' in tk_source
