@@ -306,6 +306,60 @@ message TerminalListSessionsResponse {
   string error = 4;
 }
 
+// Browser-to-Companion local proof for trusted system float ball binding.
+
+message BrowserBindProof {
+  string nonce = 1;
+  int64 companion_id = 2;
+  string protocol = 3;
+  int64 received_ts_unix_ms = 4;
+}
+
+// System float ball control surface.
+
+message FloatBallStartRequest {
+  string request_id = 1;
+  string browser_session_id = 2;
+  string openfocus_base_url = 3;
+  string summary_json = 4;
+}
+
+message FloatBallStartResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  string backend = 4;
+}
+
+message FloatBallUpdateRequest {
+  string request_id = 1;
+  string browser_session_id = 2;
+  string summary_json = 3;
+}
+
+message FloatBallUpdateResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message FloatBallStopRequest {
+  string request_id = 1;
+  string browser_session_id = 2;
+}
+
+message FloatBallStopResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message FloatBallAction {
+  string browser_session_id = 1;
+  string action = 2;
+  string payload_json = 3;
+}
+
 message ServerToClient {
   oneof msg {
     Welcome welcome = 10;
@@ -328,6 +382,10 @@ message ServerToClient {
     TerminalResizeRequest terminal_resize = 33;
     TerminalListSessionsRequest terminal_list_sessions = 34;
     TerminalMouseModeRequest terminal_mouse_mode = 35;
+
+    FloatBallStartRequest float_ball_start = 50;
+    FloatBallUpdateRequest float_ball_update = 51;
+    FloatBallStopRequest float_ball_stop = 52;
   }
 }
 
@@ -356,6 +414,12 @@ message ClientToServer {
     TerminalOutput terminal_output = 34;
     TerminalListSessionsResponse terminal_list_sessions_resp = 35;
     TerminalMouseModeResponse terminal_mouse_mode_resp = 36;
+
+    BrowserBindProof browser_bind_proof = 50;
+    FloatBallStartResponse float_ball_start_resp = 51;
+    FloatBallUpdateResponse float_ball_update_resp = 52;
+    FloatBallStopResponse float_ball_stop_resp = 53;
+    FloatBallAction float_ball_action = 54;
   }
 }
 

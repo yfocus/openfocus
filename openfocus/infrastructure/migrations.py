@@ -16,6 +16,7 @@ AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
 AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
 AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID = "20260517_agent_space_prompt_auto"
 AGENT_ACTIVITY_MIGRATION_ID = "20260517_agent_activity"
+FLOAT_BALL_BINDING_MIGRATION_ID = "20260517_float_ball_binding"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -573,6 +574,55 @@ def _migrate_agent_activity(conn: Any) -> None:
     )
 
 
+def _migrate_float_ball_binding(conn: Any) -> None:
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS browser_companion_bindings ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "browser_session_id VARCHAR(64) NOT NULL UNIQUE, "
+            "companion_id INTEGER NOT NULL, "
+            "trust_method VARCHAR(64) NOT NULL DEFAULT 'nonce_protocol', "
+            "created_at DATETIME, "
+            "last_verified_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_browser_companion_bindings_companion "
+            "ON browser_companion_bindings(companion_id)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS browser_bind_challenges ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "nonce_hash VARCHAR(64) NOT NULL UNIQUE, "
+            "browser_session_id VARCHAR(64) NOT NULL, "
+            "status VARCHAR(32) NOT NULL DEFAULT 'pending', "
+            "companion_id INTEGER, "
+            "created_at DATETIME, "
+            "expires_at DATETIME NOT NULL, "
+            "confirmed_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_browser_bind_challenges_session "
+            "ON browser_bind_challenges(browser_session_id, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_browser_bind_challenges_status "
+            "ON browser_bind_challenges(status, expires_at)"
+        )
+    )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -585,4 +635,5 @@ STARTUP_MIGRATIONS = [
     (AGENT_SPACE_PROMPTS_MIGRATION_ID, _migrate_agent_space_prompts),
     (AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID, _migrate_agent_space_prompt_auto),
     (AGENT_ACTIVITY_MIGRATION_ID, _migrate_agent_activity),
+    (FLOAT_BALL_BINDING_MIGRATION_ID, _migrate_float_ball_binding),
 ]

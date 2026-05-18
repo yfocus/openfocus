@@ -387,66 +387,64 @@
       }
 
       .attention-fab-wrap{
-        position: fixed;
-        right: 22px;
-        bottom: 22px;
-        z-index: 1200;
-        touch-action: none;
+        position: relative;
+        z-index: 30;
+        display:flex;
+        align-items:center;
       }
       .attention-fab{
         width: auto;
-        min-width: 68px;
-        height: 56px;
-        padding: 0 14px 0 12px;
-        border-radius: 999px;
-        border: 1px solid color-mix(in srgb, var(--primary) 62%, white);
-        background:
-          radial-gradient(circle at 28% 20%, rgba(255,255,255,0.42), transparent 24px),
-          linear-gradient(135deg, color-mix(in srgb, var(--primary) 88%, white), color-mix(in srgb, var(--success) 58%, var(--primary)));
-        color: var(--primary-foreground);
-        box-shadow: 0 18px 48px rgba(0,0,0,0.48), 0 0 0 5px color-mix(in srgb, var(--ring) 20%, transparent);
-        display:flex;
+        min-width: 0;
+        min-height: 0;
+        padding: 7px 10px;
+        border: 0;
+        border-radius: calc(var(--radius) - 2px);
+        background: transparent;
+        color: var(--muted-foreground);
+        box-shadow: none;
+        display:inline-flex;
         align-items:center;
         justify-content:center;
-        gap: 7px;
+        gap: 0;
         cursor:pointer;
         user-select: none;
         -webkit-user-select: none;
-        transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1;
+        font-weight: 500;
       }
-      .attention-fab:hover{ transform: translateY(-1px); filter: brightness(1.05); box-shadow: 0 22px 58px rgba(0,0,0,0.54), 0 0 0 6px color-mix(in srgb, var(--ring) 24%, transparent); }
-      .attention-fab:active{ transform: translateY(0) scale(.98); }
-      .attention-fab-icon{ font-size: 20px; line-height: 1; }
-      .attention-fab-text{ font-size: 12px; font-weight: 750; letter-spacing: .02em; }
-      .attention-fab-wrap.dragging .attention-fab{ cursor: grabbing; transform: scale(1.02); }
+      .attention-fab:hover{ text-decoration: none; color: var(--foreground); background: var(--accent); }
+      .attention-fab:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ring); color: var(--foreground); }
+      .attention-fab-icon{ display:none; }
+      .attention-fab-text{ font-size: inherit; font-weight: inherit; letter-spacing: 0; }
       .attention-fab-badge{
-        position:absolute;
-        top: -6px;
-        right: -6px;
         display:none;
         gap: 4px;
         align-items:center;
         justify-content:center;
+        margin-left: 4px;
       }
       .attention-fab-badge-chip{
         min-width: 24px;
-        height: 21px;
-        padding: 0 7px;
+        height: 19px;
+        padding: 0 6px;
         border-radius: 999px;
         border: 1px solid var(--border);
         background: var(--primary);
         color: var(--primary-foreground);
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 750;
-        line-height: 20px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+        line-height: 18px;
+        box-shadow: none;
       }
       .attention-fab-badge-chip.running{ background: var(--warning); color: #09090b; }
       .attention-fab-badge-chip.waiting{ background: var(--success); color: #09090b; }
       .attention-popover{
         position:absolute;
         right: 0;
-        bottom: 58px;
+        top: 44px;
+        bottom: auto;
         width: min(380px, calc(100vw - 32px));
         max-height: min(560px, calc(100vh - 110px));
         overflow:auto;
@@ -457,13 +455,29 @@
         display:none;
       }
       .attention-popover.open{ display:block; }
-      .attention-popover.place-below{ top: 66px; bottom: auto; }
-      .attention-popover.place-above{ bottom: 66px; top: auto; }
-      .attention-popover.align-left{ left: 0; right: auto; }
-      .attention-popover.align-right{ right: 0; left: auto; }
       .attention-pop-head{ padding: 12px; display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
       .attention-pop-title{ color: var(--foreground); font-weight:650; }
       .attention-pop-sub{ color: var(--muted-foreground); font-size:12px; margin-top:3px; }
+      .attention-system-toggle{
+        flex: 0 0 auto;
+        display:inline-flex;
+        align-items:center;
+        gap: 6px;
+        min-width: 82px;
+        justify-content:center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--background);
+        color: var(--muted-foreground);
+        padding: 5px 9px;
+        font-size: 12px;
+        cursor:pointer;
+      }
+      .attention-system-toggle:hover{ color: var(--foreground); background: var(--accent); }
+      .attention-system-toggle:disabled{ cursor: wait; opacity: .78; }
+      .attention-system-toggle .dot{ width: 7px; height: 7px; border-radius:999px; background: var(--muted-foreground); }
+      .attention-system-toggle[data-state="starting"] .dot{ background: var(--warning); }
+      .attention-system-toggle[data-state="running"] .dot{ background: var(--success); }
       .attention-pop-body{ padding: 0 12px 12px; display:flex; flex-direction:column; gap: 10px; }
       .attention-pop-section{ display:flex; flex-direction:column; gap: 8px; }
       .attention-pop-k{ color: var(--muted-foreground); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
@@ -573,9 +587,29 @@
           <span class="nav-sep">|</span>
           <a href="javascript:void(0)" id="nav-calendar">Calendar</a>
           <span class="nav-sep">|</span>
-          <a href="javascript:void(0)" id="nav-attention">Inbox</a>
-          <span class="nav-sep">|</span>
           <a href="/agent_space_prompts">Agent Prompts</a>
+          <span class="nav-sep">|</span>
+          <div class="attention-fab-wrap" id="attention-fab-wrap">
+            <button type="button" class="attention-fab" id="attention-fab" aria-label="Open attention inbox" title="Attention Inbox · R=running W=waiting/review">
+              <span class="attention-fab-icon" aria-hidden="true">◎</span>
+              <span class="attention-fab-text">Inbox</span>
+            </button>
+            <span class="attention-fab-badge" id="attention-fab-badge"></span>
+            <div class="attention-popover" id="attention-popover" aria-label="Attention Inbox">
+              <div class="attention-pop-head">
+                <div>
+                  <div class="attention-pop-title">Attention Inbox</div>
+                  <div class="attention-pop-sub">Badge: R = running, W = waiting / review</div>
+                </div>
+                <button type="button" class="attention-system-toggle" id="attention-system-toggle" data-state="idle" title="Toggle system Inbox">
+                  <span class="dot" aria-hidden="true"></span>
+                  <span id="attention-system-label">未启动</span>
+                </button>
+              </div>
+              <div class="divider" style="margin:0;"></div>
+              <div class="attention-pop-body" id="attention-pop-body"><div class="muted">loading...</div></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -585,25 +619,6 @@
     </div>
 
     <div id="toast" class="toast"></div>
-
-    <div class="attention-fab-wrap" id="attention-fab-wrap">
-      <div class="attention-popover" id="attention-popover" aria-label="Attention Inbox">
-        <div class="attention-pop-head">
-          <div>
-            <div class="attention-pop-title">Attention Inbox</div>
-            <div class="attention-pop-sub">Badge: R = running, W = waiting / review</div>
-          </div>
-          <button type="button" class="btn-ghost" id="attention-hide" title="Hide for this session">Hide</button>
-        </div>
-        <div class="divider" style="margin:0;"></div>
-        <div class="attention-pop-body" id="attention-pop-body"><div class="muted">loading...</div></div>
-      </div>
-      <button type="button" class="attention-fab" id="attention-fab" aria-label="Open attention inbox" title="Attention Inbox · R=running W=waiting/review · drag to move">
-        <span class="attention-fab-icon" aria-hidden="true">◎</span>
-        <span class="attention-fab-text">Inbox</span>
-      </button>
-      <span class="attention-fab-badge" id="attention-fab-badge"></span>
-    </div>
 
     <dialog id="calendar-dialog" class="cal-dialog">
       <form method="dialog" style="margin:0;">
@@ -668,70 +683,30 @@
 
       document.getElementById('nav-new-goal')?.addEventListener('click', openNewGoal);
 
-      // Global Attention Inbox floating entry.
+      // Global Attention Inbox in the navigation bar.
       (function(){
         const wrap = document.getElementById('attention-fab-wrap');
         const fab = document.getElementById('attention-fab');
         const badge = document.getElementById('attention-fab-badge');
         const pop = document.getElementById('attention-popover');
         const body = document.getElementById('attention-pop-body');
-        const hide = document.getElementById('attention-hide');
-        const navInbox = document.getElementById('nav-attention');
-        if(!wrap || !fab || !badge || !pop || !body || !hide) return;
-        const POS_KEY = 'openfocus:attention_bubble_position';
-        const DRAG_THRESHOLD = 4;
+        const systemToggle = document.getElementById('attention-system-toggle');
+        const systemLabel = document.getElementById('attention-system-label');
+        if(!wrap || !fab || !badge || !pop || !body || !systemToggle || !systemLabel) return;
+        const SYSTEM_KEY = 'openfocus:system_inbox_state';
         const esc2 = (s)=> String(s ?? '').replace(/[&<>"']/g, (c)=> ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c] || c));
-        function clamp(n, min, max){ return Math.max(min, Math.min(max, n)); }
-        function viewportPosition(x, y){
-          const rect = wrap.getBoundingClientRect();
-          const margin = 8;
-          const w = rect.width || 76;
-          const h = rect.height || 56;
-          return {
-            x: clamp(Number(x || 0), margin, Math.max(margin, window.innerWidth - w - margin)),
-            y: clamp(Number(y || 0), margin, Math.max(margin, window.innerHeight - h - margin)),
-          };
+        let systemState = 'idle';
+        function setSystemState(state){
+          systemState = ['idle','starting','running'].includes(String(state || '')) ? String(state) : 'idle';
+          systemToggle.dataset.state = systemState;
+          systemToggle.disabled = systemState === 'starting';
+          systemLabel.textContent = systemState === 'running' ? '已启动' : (systemState === 'starting' ? '启动中' : '未启动');
+          try{ localStorage.setItem(SYSTEM_KEY, systemState); }catch(_){ }
         }
-        function applyPosition(pos, persist){
-          const p = viewportPosition(pos.x, pos.y);
-          wrap.style.left = p.x + 'px';
-          wrap.style.top = p.y + 'px';
-          wrap.style.right = 'auto';
-          wrap.style.bottom = 'auto';
-          updatePopoverPlacement();
-          if(persist){
-            try{ localStorage.setItem(POS_KEY, JSON.stringify(p)); }catch(_){ }
-          }
-        }
-        function loadPosition(){
-          try{
-            const raw = localStorage.getItem(POS_KEY) || '';
-            const p = raw ? JSON.parse(raw) : null;
-            if(p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y))){
-              applyPosition({ x: Number(p.x), y: Number(p.y) }, false);
-              return;
-            }
-          }catch(_){ }
-          const rect = wrap.getBoundingClientRect();
-          applyPosition({ x: window.innerWidth - (rect.width || 76) - 22, y: window.innerHeight - (rect.height || 56) - 22 }, false);
-        }
-        function updatePopoverPlacement(){
-          const rect = wrap.getBoundingClientRect();
-          const centerX = rect.left + rect.width / 2;
-          const centerY = rect.top + rect.height / 2;
-          pop.classList.toggle('place-below', centerY < window.innerHeight / 2);
-          pop.classList.toggle('place-above', centerY >= window.innerHeight / 2);
-          pop.classList.toggle('align-left', centerX < window.innerWidth / 2);
-          pop.classList.toggle('align-right', centerX >= window.innerWidth / 2);
-        }
-        loadPosition();
-        if(sessionStorage.getItem('openfocus:attention_bubble_hidden') === '1'){
-          wrap.style.display = 'none';
-        }
-        window.addEventListener('resize', ()=>{
-          const rect = wrap.getBoundingClientRect();
-          applyPosition({ x: rect.left, y: rect.top }, true);
-        });
+        try{
+          const stored = localStorage.getItem(SYSTEM_KEY) || '';
+          setSystemState(stored === 'running' ? 'running' : 'idle');
+        }catch(_){ setSystemState('idle'); }
         function ago(iso){
           try{
             const d = new Date(iso);
@@ -851,69 +826,80 @@
             render(a);
           }catch(_){ body.innerHTML = '<div class="muted">failed to load.</div>'; }
         }
-        const drag = { active: false, moved: false, pointerId: 0, startX: 0, startY: 0, originX: 0, originY: 0 };
-        fab.addEventListener('pointerdown', (e)=>{
-          if(e.button !== undefined && e.button !== 0) return;
-          const rect = wrap.getBoundingClientRect();
-          drag.active = true;
-          drag.moved = false;
-          drag.pointerId = e.pointerId;
-          drag.startX = e.clientX;
-          drag.startY = e.clientY;
-          drag.originX = rect.left;
-          drag.originY = rect.top;
-          try{ fab.setPointerCapture(e.pointerId); }catch(_){ }
-        });
-        fab.addEventListener('pointermove', (e)=>{
-          if(!drag.active || e.pointerId !== drag.pointerId) return;
-          const dx = e.clientX - drag.startX;
-          const dy = e.clientY - drag.startY;
-          if(!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-          drag.moved = true;
-          wrap.classList.add('dragging');
-          pop.classList.remove('open');
-          applyPosition({ x: drag.originX + dx, y: drag.originY + dy }, false);
-          e.preventDefault();
-        });
-        function finishDrag(e){
-          if(!drag.active || e.pointerId !== drag.pointerId) return;
-          drag.active = false;
-          try{ fab.releasePointerCapture(e.pointerId); }catch(_){ }
-          wrap.classList.remove('dragging');
-          if(drag.moved){
-            const rect = wrap.getBoundingClientRect();
-            applyPosition({ x: rect.left, y: rect.top }, true);
-            setTimeout(()=>{ drag.moved = false; }, 0);
-          }
-        }
-        fab.addEventListener('pointerup', finishDrag);
-        fab.addEventListener('pointercancel', finishDrag);
         fab.addEventListener('click', (e)=>{
-          if(drag.moved){ e.preventDefault(); e.stopPropagation(); return; }
-          updatePopoverPlacement();
+          e.preventDefault();
           pop.classList.toggle('open');
           if(pop.classList.contains('open')) void load();
         });
-        function showBubble(open){
-          sessionStorage.removeItem('openfocus:attention_bubble_hidden');
-          wrap.style.display = '';
-          loadPosition();
-          updatePopoverPlacement();
-          if(open){
-            pop.classList.add('open');
-            void load();
-          }
-        }
-        hide.addEventListener('click', ()=>{ sessionStorage.setItem('openfocus:attention_bubble_hidden','1'); pop.classList.remove('open'); wrap.style.display = 'none'; });
         document.addEventListener('pointerdown', (e)=>{
           if(!pop.classList.contains('open')) return;
           const target = e.target;
           if(target instanceof Node && wrap.contains(target)) return;
           pop.classList.remove('open');
         });
-        navInbox?.addEventListener('click', (e)=>{
+        async function postFloatBallStart(){
+          const r = await fetch('/api/float_ball/start', { method:'POST', cache:'no-store' });
+          if(!r.ok) throw new Error('HTTP ' + r.status);
+          return await r.json();
+        }
+        async function pollFloatBallBind(nonce, timeoutMs){
+          const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 12000));
+          while(Date.now() < deadline){
+            const url = '/api/float_ball/bind_status?nonce=' + encodeURIComponent(String(nonce || ''));
+            const r = await fetch(url, { cache:'no-store' }).catch(()=> null);
+            const data = r && r.ok ? await r.json().catch(()=> ({})) : {};
+            if(data.status === 'confirmed') return data;
+            if(data.status === 'expired' || data.status === 'missing') return data;
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+          return { status:'timeout' };
+        }
+        async function startSystemFloatBall(){
+          setSystemState('starting');
+          toast('Starting System Inbox...', 1800);
+          let first;
+          try{ first = await postFloatBallStart(); }catch(_){ setSystemState('idle'); toast('System Inbox start failed'); return false; }
+          if(first && first.ok && first.mode === 'system'){
+            setSystemState('running');
+            toast('System Inbox started');
+            return true;
+          }
+          const bind = first && first.bind ? first.bind : null;
+          if(!bind || !bind.open_url || !bind.nonce){ setSystemState('idle'); toast('System Inbox unavailable'); return false; }
+          try{ window.location.href = String(bind.open_url); }catch(_){ setSystemState('idle'); return false; }
+          toast('Opening Companion...');
+          const status = await pollFloatBallBind(bind.nonce, 12000);
+          if(status.status !== 'confirmed'){ setSystemState('idle'); toast('Companion binding timed out'); return false; }
+          try{
+            const second = await postFloatBallStart();
+            if(second && second.ok && second.mode === 'system'){
+              setSystemState('running');
+              toast('System Inbox started');
+              return true;
+            }
+          }catch(_){ }
+          setSystemState('idle');
+          toast('System Inbox start failed');
+          return false;
+        }
+        async function stopSystemFloatBall(){
+          setSystemState('starting');
+          try{
+            const r = await fetch('/api/float_ball/stop', { method:'POST', cache:'no-store' });
+            if(!r.ok) throw new Error('HTTP ' + r.status);
+            setSystemState('idle');
+            toast('System Inbox stopped');
+          }catch(_){
+            setSystemState('running');
+            toast('System Inbox stop failed');
+          }
+        }
+        systemToggle.addEventListener('click', async (e)=>{
           e.preventDefault();
-          showBubble(true);
+          e.stopPropagation();
+          if(systemState === 'starting') return;
+          if(systemState === 'running') await stopSystemFloatBall();
+          else await startSystemFloatBall();
         });
         body.addEventListener('click', (e)=>{
           const t = e.target;

@@ -34,6 +34,8 @@ class CompanionGrpcError(RuntimeError):
 _AGENT_CHUNK_LISTENERS: list[Callable[[pb2.AgentChunk], None]] = []
 _TERMINAL_OUTPUT_LISTENERS: list[Callable[[pb2.TerminalOutput], None]] = []
 _RUNTIME_SIGNAL_LISTENERS: list[Callable[[pb2.AgentRuntimeSignal], None]] = []
+_BROWSER_BIND_PROOF_LISTENERS: list[Callable[[pb2.BrowserBindProof], None]] = []
+_FLOAT_BALL_ACTION_LISTENERS: list[Callable[[pb2.FloatBallAction], None]] = []
 
 
 def add_agent_chunk_listener(listener: Callable[[pb2.AgentChunk], None]) -> None:
@@ -50,6 +52,18 @@ def add_runtime_signal_listener(
     listener: Callable[[pb2.AgentRuntimeSignal], None],
 ) -> None:
     _RUNTIME_SIGNAL_LISTENERS.append(listener)
+
+
+def add_browser_bind_proof_listener(
+    listener: Callable[[pb2.BrowserBindProof], None]
+) -> None:
+    _BROWSER_BIND_PROOF_LISTENERS.append(listener)
+
+
+def add_float_ball_action_listener(
+    listener: Callable[[pb2.FloatBallAction], None]
+) -> None:
+    _FLOAT_BALL_ACTION_LISTENERS.append(listener)
 
 
 @dataclass
@@ -490,6 +504,89 @@ class CompanionConnection:
             raise CompanionGrpcError(res.error or "terminal_mouse_mode failed")
         return res
 
+    async def request_float_ball_start(
+        self,
+        *,
+        browser_session_id: str,
+        openfocus_base_url: str,
+        summary_json: str,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.FloatBallStartResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="float_ball_start")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                float_ball_start=pb2.FloatBallStartRequest(
+                    request_id=rid,
+                    browser_session_id=str(browser_session_id or ""),
+                    openfocus_base_url=str(openfocus_base_url or ""),
+                    summary_json=str(summary_json or ""),
+                )
+            )
+        )
+        try:
+            res: pb2.FloatBallStartResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "float_ball_start failed")
+        return res
+
+    async def request_float_ball_update(
+        self,
+        *,
+        browser_session_id: str,
+        summary_json: str,
+        timeout_seconds: float = 10.0,
+    ) -> pb2.FloatBallUpdateResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="float_ball_update")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                float_ball_update=pb2.FloatBallUpdateRequest(
+                    request_id=rid,
+                    browser_session_id=str(browser_session_id or ""),
+                    summary_json=str(summary_json or ""),
+                )
+            )
+        )
+        try:
+            res: pb2.FloatBallUpdateResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "float_ball_update failed")
+        return res
+
+    async def request_float_ball_stop(
+        self, *, browser_session_id: str, timeout_seconds: float = 10.0
+    ) -> pb2.FloatBallStopResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="float_ball_stop")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                float_ball_stop=pb2.FloatBallStopRequest(
+                    request_id=rid, browser_session_id=str(browser_session_id or "")
+                )
+            )
+        )
+        try:
+            res: pb2.FloatBallStopResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "float_ball_stop failed")
+        return res
+
     def handle_incoming(self, msg: pb2.ClientToServer) -> None:
         self.mark_seen()
         which = msg.WhichOneof("msg")
@@ -575,6 +672,24 @@ class CompanionConnection:
                 except Exception:
                     pass
             return
+        if which == "browser_bind_proof":
+            proof: pb2.BrowserBindProof = msg.browser_bind_proof
+            if not int(proof.companion_id or 0):
+                proof.companion_id = int(self.companion_id)
+            for cb in list(_BROWSER_BIND_PROOF_LISTENERS):
+                try:
+                    cb(proof)
+                except Exception:
+                    pass
+            return
+        if which == "float_ball_action":
+            action: pb2.FloatBallAction = msg.float_ball_action
+            for cb in list(_FLOAT_BALL_ACTION_LISTENERS):
+                try:
+                    cb(action)
+                except Exception:
+                    pass
+            return
 
         if which == "terminal_start_resp":
             r: pb2.TerminalStartResponse = msg.terminal_start_resp
@@ -604,6 +719,24 @@ class CompanionConnection:
             r: pb2.TerminalMouseModeResponse = msg.terminal_mouse_mode_resp
             p = self._pending.get(r.request_id)
             if p and p.kind == "terminal_mouse_mode" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "float_ball_start_resp":
+            r: pb2.FloatBallStartResponse = msg.float_ball_start_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "float_ball_start" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "float_ball_update_resp":
+            r: pb2.FloatBallUpdateResponse = msg.float_ball_update_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "float_ball_update" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "float_ball_stop_resp":
+            r: pb2.FloatBallStopResponse = msg.float_ball_stop_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "float_ball_stop" and not p.fut.done():
                 p.fut.set_result(r)
             return
         if which == "terminal_output":

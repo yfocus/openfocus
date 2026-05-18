@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from .companion.grpc import CompanionGrpcServer
 from .db import get_engine
+from .domains.float_ball import service as float_ball_service
 from .domains.inspirations import drafts as inspiration_drafts
 from .domains.inspirations import presenters as inspiration_presenters
 from .domains.inspirations import publishing as inspiration_publishing
@@ -27,6 +28,7 @@ from .models import Base
 from .web.routes import agent_spaces as agent_spaces_routes
 from .web.routes import companions as companion_routes
 from .web.routes import events as events_routes
+from .web.routes import float_ball as float_ball_routes
 from .web.routes import goals as goals_routes
 from .web.routes import inspirations as inspirations_routes
 from .web.routes import memory as memory_routes
@@ -75,6 +77,7 @@ COMPANION_GRPC = CompanionGrpcServer()
 streaming.install_agent_chunk_listener_once()
 streaming.install_terminal_listener_once()
 streaming.install_runtime_signal_listener_once()
+float_ball_service.install_browser_bind_listener_once()
 
 
 # App-level dependency wiring. Business rules live in domain services;
@@ -222,6 +225,7 @@ def _startup() -> None:
 async def _startup_companion_grpc() -> None:
     streaming.install_agent_chunk_listener_once()
     streaming.install_runtime_signal_listener_once()
+    float_ball_service.install_browser_bind_listener_once()
     # 测试里可能希望手动控制启动/端口
     if os.environ.get("OPENFOCUS_GRPC_AUTOSTART", "1") == "0":
         return
@@ -229,6 +233,7 @@ async def _startup_companion_grpc() -> None:
 
 
 app.include_router(events_routes.router)
+app.include_router(float_ball_routes.create_router(grpc_server=COMPANION_GRPC))
 app.include_router(memory_routes.create_router(templates=templates))
 app.include_router(
     companion_routes.create_router(grpc_server=COMPANION_GRPC, templates=templates)

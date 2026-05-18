@@ -7,6 +7,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 
 def _unused_local_addr() -> str:
     return "127.0.0.1:1"
@@ -262,5 +264,100 @@ def test_hook_spool_drain_converts_spooled_payload_to_runtime_signal(
         assert sig.turn_id == "turn-spool"
         assert sig.task_public_id == "task-public-id"
         assert sig.terminal_id == "term-spool"
+
+    asyncio.run(_run())
+
+
+def test_float_ball_backend_env_is_allowlisted(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", "test")
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    assert rt._float_ball_backend() == "test"
+    assert "system_float_ball.test" in rt._capabilities()
+
+    monkeypatch.setenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", "shell")
+    assert rt._float_ball_backend() == "unsupported"
+    assert all(not c.startswith("system_float_ball") for c in rt._capabilities())
+
+    monkeypatch.setenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", "swift")
+    assert rt._float_ball_backend() == "swift"
+    assert "system_float_ball.swift" in rt._capabilities()
+
+
+def test_float_ball_manager_reports_helper_startup_exit(monkeypatch, tmp_path) -> None:
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    rt.RUNTIME.auth_token = "tok_test"
+
+    class FakeStderr:
+        def read(self) -> bytes:
+            return b"No module named _tkinter"
+
+    class FakeProc:
+        returncode = 2
+        stderr = FakeStderr()
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def fake_popen(*args, **kwargs):
+        return FakeProc()
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(rt, "_float_ball_backend", lambda: "tk")
+    monkeypatch.setattr(rt.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(rt.asyncio, "sleep", fake_sleep)
+
+    async def _run() -> None:
+        mgr = rt._FloatBallManager()
+        with pytest.raises(RuntimeError, match="helper exited during startup"):
+            await mgr.start(
+                browser_session_id="browser-session-id-12345",
+                openfocus_base_url="http://127.0.0.1:8001",
+                summary_json="{}",
+            )
+        assert mgr._sessions == {}
+
+    asyncio.run(_run())
+
+
+def test_float_ball_manager_waits_for_helper_ready_file(monkeypatch, tmp_path) -> None:
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    rt.RUNTIME.auth_token = "tok_test"
+
+    captured: dict = {}
+
+    class FakeProc:
+        stderr = None
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            captured["terminated"] = True
+
+    def fake_popen(*args, **kwargs):
+        env = kwargs["env"]
+        captured["env"] = env
+        ready_path = Path(env["OPENFOCUS_FLOAT_BALL_READY_FILE"])
+        ready_path.write_text("ready\n", encoding="utf-8")
+        return FakeProc()
+
+    monkeypatch.setattr(rt, "_float_ball_backend", lambda: "tk")
+    monkeypatch.setattr(rt, "_float_ball_helper_python", lambda: "python")
+    monkeypatch.setattr(rt.subprocess, "Popen", fake_popen)
+
+    async def _run() -> None:
+        mgr = rt._FloatBallManager()
+        backend = await mgr.start(
+            browser_session_id="browser-session-id-12345",
+            openfocus_base_url="http://127.0.0.1:8001",
+            summary_json='{"counts":{"running":1,"waiting":2}}',
+        )
+        assert backend == "tk"
+        assert "browser-session-id-12345" in mgr._sessions
+        ready_path = Path(captured["env"]["OPENFOCUS_FLOAT_BALL_READY_FILE"])
+        assert not ready_path.exists()
+        assert captured["env"]["OPENFOCUS_FLOAT_BALL_BACKEND"] == "tk"
 
     asyncio.run(_run())

@@ -17,7 +17,9 @@ import stat
 import string
 import subprocess
 import sys
+import tempfile
 import threading
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,8 +303,62 @@ def _openfocus_grpc_addr() -> str:
 
 
 def _capabilities() -> list[str]:
-    # MVP：先声明已实现的能力
-    return ["pairing", "choose_directory", "agent", "terminal", "runtime_hooks"]
+    caps = ["pairing", "choose_directory", "agent", "terminal", "runtime_hooks"]
+    backend = _float_ball_backend()
+    if backend != "unsupported":
+        caps.extend(["system_float_ball", f"system_float_ball.{backend}"])
+    return caps
+
+
+def _float_ball_backend() -> str:
+    configured = (
+        str(os.environ.get("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND") or "").strip().lower()
+    )
+    if configured:
+        return configured if configured in {"test", "tk", "swift"} else "unsupported"
+    disabled = (
+        str(os.environ.get("OPENFOCUS_DISABLE_SYSTEM_FLOAT_BALL") or "").strip().lower()
+    )
+    if disabled in {"1", "true", "yes", "on"}:
+        return "unsupported"
+    if sys.platform == "darwin" and os.environ.get("SSH_CONNECTION") is None:
+        if _python_supports_tk(_float_ball_helper_python()):
+            return "tk"
+        if shutil.which("swift"):
+            return "swift"
+    return "unsupported"
+
+
+def _python_supports_tk(executable: str) -> bool:
+    exe = str(executable or "").strip()
+    if not exe:
+        return False
+    try:
+        probe = subprocess.run(
+            [
+                exe,
+                "-c",
+                "import tkinter as tk; root=tk.Tk(); root.withdraw(); root.update_idletasks(); root.destroy()",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return probe.returncode == 0
+    except Exception:
+        return False
+
+
+def _float_ball_helper_python() -> str:
+    configured = str(os.environ.get("OPENFOCUS_FLOAT_BALL_HELPER_PYTHON") or "").strip()
+    if configured:
+        return configured
+    if _python_supports_tk(sys.executable):
+        return sys.executable
+    if sys.platform == "darwin" and _python_supports_tk("/usr/bin/python3"):
+        return "/usr/bin/python3"
+    return sys.executable
 
 
 def _coco_bin() -> str:
@@ -1395,6 +1451,222 @@ class _TerminalManager:
         return bool(enabled)
 
 
+def _protocol_sock_path() -> Path:
+    configured = str(os.environ.get("OPENFOCUS_PROTOCOL_SOCK") or "").strip()
+    if configured:
+        p = Path(configured)
+    else:
+        instance_id = _openfocus_instance_id()
+        if instance_id == "default":
+            p = Path("~/.openfocus/protocol.sock")
+        else:
+            p = Path(f"~/.openfocus/protocol-{instance_id}.sock")
+    return p.expanduser()
+
+
+def send_protocol_url(url: str) -> bool:
+    payload = str(url or "").strip()
+    if not payload:
+        return False
+    sock_path = _protocol_sock_path()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(sock_path))
+            client.sendall(payload.encode("utf-8")[:8192])
+        return True
+    except Exception as exc:
+        try:
+            LOG.error("openfocus protocol delivery failed: %s", exc)
+        except Exception:
+            pass
+        return False
+
+
+def _parse_bind_protocol_url(url: str) -> str:
+    raw = str(url or "").strip()
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "openfocus":
+        raise ValueError("unsupported protocol")
+    action = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    if action != "bind":
+        raise ValueError("unsupported openfocus action")
+    qs = urllib.parse.parse_qs(parsed.query)
+    nonce = str((qs.get("nonce") or [""])[0] or "").strip()
+    instance_id = str((qs.get("instance_id") or [""])[0] or "").strip()
+    if instance_id and _safe_instance_id(instance_id) != _openfocus_instance_id():
+        raise ValueError("protocol event belongs to another OpenFocus instance")
+    if not nonce:
+        raise ValueError("nonce is required")
+    return nonce
+
+
+async def _handle_protocol_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    out_q: asyncio.Queue[pb2.ClientToServer],
+) -> None:
+    try:
+        data = await reader.read(8192)
+        nonce = _parse_bind_protocol_url(data.decode("utf-8", errors="replace"))
+        await out_q.put(
+            pb2.ClientToServer(
+                browser_bind_proof=pb2.BrowserBindProof(
+                    nonce=nonce,
+                    companion_id=int(getattr(RUNTIME, "server_companion_id", 0) or 0),
+                    protocol="openfocus://",
+                    received_ts_unix_ms=_now_ms(),
+                )
+            )
+        )
+    except Exception as exc:
+        try:
+            LOG.warning("openfocus protocol event ignored: %s", exc)
+        except Exception:
+            pass
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def _start_protocol_server(
+    out_q: asyncio.Queue[pb2.ClientToServer],
+) -> asyncio.AbstractServer:
+    sock_path = _protocol_sock_path()
+    try:
+        sock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    with contextlib.suppress(FileNotFoundError):
+        sock_path.unlink()
+    server = await asyncio.start_unix_server(
+        lambda r, w: _handle_protocol_client(r, w, out_q), path=str(sock_path)
+    )
+    with contextlib.suppress(Exception):
+        sock_path.chmod(0o600)
+    return server
+
+
+@dataclass
+class _FloatBallSession:
+    browser_session_id: str
+    backend: str
+    proc: subprocess.Popen | None = None
+    summary_json: str = ""
+
+
+async def _wait_for_float_ball_ready(
+    proc: subprocess.Popen, ready_path: Path
+) -> None:
+    timeout_s = float(os.environ.get("OPENFOCUS_FLOAT_BALL_READY_TIMEOUT_SECONDS") or "8")
+    timeout_s = max(0.5, min(timeout_s, 30.0))
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        if ready_path.exists():
+            return
+        if proc.poll() is not None:
+            err = ""
+            with contextlib.suppress(Exception):
+                if proc.stderr is not None:
+                    err = proc.stderr.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                "system float ball helper exited during startup"
+                + (f": {err}" if err else f" (exit={proc.returncode})")
+            )
+        await asyncio.sleep(0.05)
+    raise RuntimeError(
+        f"system float ball helper did not become ready within {timeout_s:.1f}s"
+    )
+
+
+class _FloatBallManager:
+    def __init__(self) -> None:
+        self._sessions: dict[str, _FloatBallSession] = {}
+
+    async def start(
+        self, *, browser_session_id: str, openfocus_base_url: str, summary_json: str
+    ) -> str:
+        sid = str(browser_session_id or "").strip()
+        if not sid:
+            raise ValueError("browser_session_id is required")
+        if not (RUNTIME.auth_token or "").strip():
+            raise RuntimeError("Companion 尚未配对")
+        backend = _float_ball_backend()
+        if backend == "unsupported":
+            raise RuntimeError("system float ball is unsupported in this environment")
+        await self.stop(browser_session_id=sid)
+        if backend == "test":
+            self._sessions[sid] = _FloatBallSession(
+                browser_session_id=sid, backend=backend, summary_json=summary_json
+            )
+            return backend
+        env = os.environ.copy()
+        env["OPENFOCUS_FLOAT_BALL_SUMMARY_JSON"] = str(summary_json or "")
+        env["OPENFOCUS_FLOAT_BALL_BACKEND"] = backend
+        ready_path = Path(tempfile.gettempdir()) / f"openfocus-float-ball-ready-{uuid.uuid4().hex}"
+        env["OPENFOCUS_FLOAT_BALL_READY_FILE"] = str(ready_path)
+        helper_python = _float_ball_helper_python()
+        proc = subprocess.Popen(
+            [
+                helper_python,
+                str(Path(__file__).with_name("float_ball_helper.py")),
+                "--browser-session-id",
+                sid,
+                "--openfocus-base-url",
+                str(openfocus_base_url or ""),
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            await _wait_for_float_ball_ready(proc, ready_path)
+        except Exception:
+            with contextlib.suppress(Exception):
+                if proc.poll() is None:
+                    proc.terminate()
+            raise
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                ready_path.unlink()
+        self._sessions[sid] = _FloatBallSession(
+            browser_session_id=sid,
+            backend=backend,
+            proc=proc,
+            summary_json=summary_json,
+        )
+        return backend
+
+    async def update(self, *, browser_session_id: str, summary_json: str) -> None:
+        sid = str(browser_session_id or "").strip()
+        sess = self._sessions.get(sid)
+        if sess is None:
+            return
+        sess.summary_json = str(summary_json or "")
+
+    async def stop(self, *, browser_session_id: str) -> None:
+        sid = str(browser_session_id or "").strip()
+        sess = self._sessions.pop(sid, None)
+        if sess is None or sess.proc is None:
+            return
+        proc = sess.proc
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.to_thread(proc.wait, 2)
+        except Exception:
+            with contextlib.suppress(Exception):
+                proc.kill()
+
+    async def stop_all(self) -> None:
+        for sid in list(self._sessions):
+            await self.stop(browser_session_id=sid)
+
+
 def _choose_directory() -> str:
     # 测试专用：直接返回指定路径（避免依赖 osascript）
     test_path = os.environ.get("OPENFOCUS_TEST_CHOOSE_DIRECTORY")
@@ -1613,7 +1885,9 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
     out_q: asyncio.Queue[pb2.ClientToServer] = asyncio.Queue()
     agent_mgr = _AgentManager()
     term_mgr = _TerminalManager()
+    float_mgr = _FloatBallManager()
     hook_server: asyncio.AbstractServer | None = None
+    protocol_server: asyncio.AbstractServer | None = None
     hook_spool_task: asyncio.Task | None = None
     connected = False
     connected_at: float | None = None
@@ -1642,6 +1916,13 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
     except Exception as e:
         try:
             LOG.warning("OpenFocus hook socket 启动失败：%s", e)
+        except Exception:
+            pass
+    try:
+        protocol_server = await _start_protocol_server(out_q)
+    except Exception as e:
+        try:
+            LOG.warning("OpenFocus protocol socket 启动失败：%s", e)
         except Exception:
             pass
     hook_spool_task = asyncio.create_task(
@@ -2060,6 +2341,67 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
                         )
                     await out_q.put(pb2.ClientToServer(terminal_mouse_mode_resp=resp))
                     continue
+
+                if which == "float_ball_start":
+                    req = msg.float_ball_start
+                    try:
+                        backend = await float_mgr.start(
+                            browser_session_id=req.browser_session_id,
+                            openfocus_base_url=req.openfocus_base_url,
+                            summary_json=req.summary_json,
+                        )
+                        resp = pb2.FloatBallStartResponse(
+                            request_id=req.request_id, ok=True, backend=backend
+                        )
+                    except Exception as e:
+                        try:
+                            LOG.exception("float_ball_start 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.FloatBallStartResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
+                    await out_q.put(pb2.ClientToServer(float_ball_start_resp=resp))
+                    continue
+
+                if which == "float_ball_update":
+                    req = msg.float_ball_update
+                    try:
+                        await float_mgr.update(
+                            browser_session_id=req.browser_session_id,
+                            summary_json=req.summary_json,
+                        )
+                        resp = pb2.FloatBallUpdateResponse(
+                            request_id=req.request_id, ok=True
+                        )
+                    except Exception as e:
+                        try:
+                            LOG.exception("float_ball_update 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.FloatBallUpdateResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
+                    await out_q.put(pb2.ClientToServer(float_ball_update_resp=resp))
+                    continue
+
+                if which == "float_ball_stop":
+                    req = msg.float_ball_stop
+                    try:
+                        await float_mgr.stop(browser_session_id=req.browser_session_id)
+                        resp = pb2.FloatBallStopResponse(
+                            request_id=req.request_id, ok=True
+                        )
+                    except Exception as e:
+                        try:
+                            LOG.exception("float_ball_stop 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.FloatBallStopResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
+                    await out_q.put(pb2.ClientToServer(float_ball_stop_resp=resp))
+                    continue
             return _result(reason="stream_completed")
         except grpc.aio.AioRpcError as e:
             # 连接断开/服务端关闭
@@ -2089,10 +2431,22 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
                 hook_spool_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await hook_spool_task
+            if protocol_server is not None:
+                protocol_server.close()
+                with contextlib.suppress(Exception):
+                    await protocol_server.wait_closed()
+            with contextlib.suppress(Exception):
+                await float_mgr.stop_all()
             with contextlib.suppress(Exception):
                 sock_path = _hook_sock_path()
                 if sock_path.exists() and stat.S_ISSOCK(sock_path.stat().st_mode):
                     sock_path.unlink()
+            with contextlib.suppress(Exception):
+                proto_sock_path = _protocol_sock_path()
+                if proto_sock_path.exists() and stat.S_ISSOCK(
+                    proto_sock_path.stat().st_mode
+                ):
+                    proto_sock_path.unlink()
 
 
 def _print_banner() -> None:
