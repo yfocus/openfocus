@@ -23,6 +23,7 @@ FLOAT_BALL_MUTED = "#a7f3d0"
 FLOAT_BALL_ACCENT = "#34d399"
 SUMMARY_PATH = "/api/agent_activity/summary?limit=30"
 STATE_PATH = "/api/float_ball/state"
+STOP_PATH = "/api/float_ball/stop"
 READY_FILE_ENV = "OPENFOCUS_FLOAT_BALL_READY_FILE"
 TK_POPOVER_OPEN_DELAY_MS = 1
 TK_TOPMOST_REASSERT_MS = 120
@@ -283,6 +284,7 @@ let mutedColor = NSColor(red: 0.655, green: 0.953, blue: 0.816, alpha: 1.0)
 let accentColor = NSColor(red: 0.204, green: 0.827, blue: 0.600, alpha: 1.0)
 let summaryPath = "/api/agent_activity/summary?limit=30"
 let statePath = "/api/float_ball/state"
+let stopPath = "/api/float_ball/stop"
 let floatBallWindowLevel = NSWindow.Level.statusBar
 let floatBallCollectionBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
@@ -553,7 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildBall() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
-        let rect = NSRect(x: screen.maxX - 206, y: screen.minY + 82, width: 172, height: 58)
+        let rect = NSRect(x: screen.maxX - 120, y: screen.minY + 82, width: 86, height: 29)
         let panel = NSPanel(
             contentRect: rect,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -570,23 +572,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isReleasedWhenClosed = false
         panel.worksWhenModal = true
 
-        let view = ClickSurface(frame: NSRect(x: 0, y: 0, width: 172, height: 58))
+        let view = ClickSurface(frame: NSRect(x: 0, y: 0, width: 86, height: 29))
         view.owner = self
         view.wantsLayer = true
         view.layer?.backgroundColor = ballColor.cgColor
-        view.layer?.cornerRadius = 18
+        view.layer?.cornerRadius = 10
         view.layer?.borderWidth = 1
         view.layer?.borderColor = borderColor.cgColor
 
         let title = NSTextField(labelWithString: "Inbox")
-        title.frame = NSRect(x: 14, y: 31, width: 140, height: 18)
-        title.font = NSFont.boldSystemFont(ofSize: 13)
+        title.frame = NSRect(x: 8, y: 15, width: 70, height: 12)
+        title.font = NSFont.boldSystemFont(ofSize: 10)
         title.textColor = textColor
         view.addSubview(title)
 
         let badge = NSTextField(labelWithString: "R \(initialRunningText)   W \(initialWaitingText)")
-        badge.frame = NSRect(x: 14, y: 10, width: 140, height: 18)
-        badge.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        badge.frame = NSRect(x: 8, y: 3, width: 70, height: 11)
+        badge.font = NSFont.monospacedSystemFont(ofSize: 8, weight: .regular)
         badge.textColor = mutedColor
         view.addSubview(badge)
 
@@ -659,11 +661,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func quitSystemInbox() {
+        if let url = normalizedURL(stopPath) {
+            postURL(url) {
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+        NSApplication.shared.terminate(nil)
+    }
+
     func showPopover() {
         let w: CGFloat = 380
         let h: CGFloat = 520
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
-        let ballFrame = panel?.frame ?? NSRect(x: screen.maxX - 206, y: screen.minY + 82, width: 172, height: 58)
+        let ballFrame = panel?.frame ?? NSRect(x: screen.maxX - 120, y: screen.minY + 82, width: 86, height: 29)
         var x = ballFrame.maxX - w
         x = min(max(x, screen.minX + 8), screen.maxX - w - 8)
         var y = ballFrame.maxY + 8
@@ -727,6 +739,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard.frame = NSRect(x: 278, y: 470, width: 88, height: 24)
         dashboard.font = NSFont.systemFont(ofSize: 10)
         root.addSubview(dashboard)
+        let quit = NSButton(title: "Quit", target: self, action: #selector(quitSystemInbox))
+        quit.frame = NSRect(x: 278, y: 442, width: 88, height: 24)
+        quit.font = NSFont.systemFont(ofSize: 10)
+        root.addSubview(quit)
 
         let running = bucketItems(summary, "running")
         let waiting = bucketItems(summary, "waiting")
@@ -754,9 +770,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             contentHeight += 8
         }
-        contentHeight = max(contentHeight, 444)
+        contentHeight = max(contentHeight, 416)
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 444))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 416))
         scroll.hasVerticalScroller = true
         scroll.borderType = .noBorder
         scroll.backgroundColor = panelColor
@@ -912,7 +928,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
     with contextlib.suppress(Exception):
         root.overrideredirect(True)
 
-    width, height = 172, 58
+    width, height = 86, 29
     x = max(8, root.winfo_screenwidth() - width - 34)
     y = max(8, root.winfo_screenheight() - height - 90)
     root.geometry(f"{width}x{height}+{x}+{y}")
@@ -921,7 +937,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         root,
         bg=FLOAT_BALL_BG,
         padx=12,
-        pady=8,
+        pady=3,
         highlightbackground=FLOAT_BALL_BORDER,
         highlightthickness=1,
     )
@@ -931,7 +947,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         text="Inbox",
         fg=FLOAT_BALL_TEXT,
         bg=FLOAT_BALL_BG,
-        font=("Helvetica", 13, "bold"),
+        font=("Helvetica", 9, "bold"),
     )
     title.grid(row=0, column=0, sticky="w")
     badge = tk.Label(
@@ -939,7 +955,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         text="",
         fg=FLOAT_BALL_MUTED,
         bg=FLOAT_BALL_BG,
-        font=("Menlo", 11),
+        font=("Menlo", 7),
     )
     badge.grid(row=1, column=0, sticky="w")
 
@@ -986,6 +1002,10 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
 
     def open_dashboard() -> None:
         open_url(_absolute_url(base_url, "/goals"))
+
+    def quit_system_inbox() -> None:
+        _post_url(_absolute_url(base_url, STOP_PATH))
+        root.destroy()
 
     def render_item(parent: Any, item: dict[str, Any]) -> None:
         card = tk.Frame(
@@ -1151,7 +1171,19 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             relief="flat",
             font=("Helvetica", 9),
             padx=5,
-        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
+        ).grid(row=0, column=1, sticky="e", padx=(10, 0))
+        tk.Button(
+            header,
+            text="Quit",
+            command=quit_system_inbox,
+            bg=FLOAT_BALL_CARD_BG,
+            fg=FLOAT_BALL_TEXT,
+            activebackground=FLOAT_BALL_BORDER,
+            activeforeground=FLOAT_BALL_TEXT,
+            relief="flat",
+            font=("Helvetica", 9),
+            padx=5,
+        ).grid(row=1, column=1, sticky="e", padx=(10, 0), pady=(4, 0))
         header.grid_columnconfigure(0, weight=1)
 
         canvas = tk.Canvas(

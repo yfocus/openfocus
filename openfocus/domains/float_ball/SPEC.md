@@ -13,6 +13,8 @@ Owns System Inbox target selection and system float ball orchestration.
   fixed page-level floating bubble is not used as a fallback.
 - The navigation inbox can request/stop the system float ball. A successful start
   response means the system helper has acknowledged that its window is visible.
+- The system helper itself exposes a `Quit` action. It must clear the persisted
+  desired running state through OpenFocus before the helper exits.
 - If no System Inbox target is configured, start returns `target_required` and the
   browser should navigate to `/companions?system_inbox=1`.
 - Canceling the System Inbox target clears the target configuration and, when a

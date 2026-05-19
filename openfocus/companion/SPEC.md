@@ -25,6 +25,10 @@ bridge between OpenFocus Core and machine-local capabilities.
 - Clicking the ball opens an inbox panel with running spaces, waiting/review
   items, and NextMove recommendations. Item actions use the server-provided
   `action.primary_url` or fallback URL; dismiss uses `dismiss_url`.
+- The inbox panel provides `Dashboard` and `Quit` controls. `Quit` stops the
+  system float ball through OpenFocus and exits the local helper.
+- The visible ball stays compact so it does not dominate the desktop; it shows
+  only the `Inbox` label and running/waiting counts.
 - The helper may keep an initial summary snapshot from gRPC start, but it should
   refresh from the web API so it does not diverge from the page-level inbox.
 - The Companion records and reclaims helper processes by browser session id.

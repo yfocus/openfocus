@@ -89,6 +89,7 @@ def test_helper_visual_contract_is_dark_green_popover() -> None:
     assert helper.TK_POPOVER_OPEN_DELAY_MS == 1
     assert helper.TK_TOPMOST_REASSERT_MS >= 100
     assert helper.SUMMARY_PATH in helper.SWIFT_HELPER
+    assert helper.STOP_PATH in helper.SWIFT_HELPER
     assert "signalReady()" in helper.SWIFT_HELPER
     assert "final class ClickSurface" in helper.SWIFT_HELPER
     assert "togglePopover" in helper.SWIFT_HELPER
@@ -97,8 +98,12 @@ def test_helper_visual_contract_is_dark_green_popover() -> None:
     assert "hidesOnDeactivate = false" in helper.SWIFT_HELPER
     assert "raiseFloatingWindows" in helper.SWIFT_HELPER
     assert "openDashboard" in helper.SWIFT_HELPER
+    assert "quitSystemInbox" in helper.SWIFT_HELPER
     assert 'normalizedURL("/goals")' in helper.SWIFT_HELPER
+    assert "normalizedURL(stopPath)" in helper.SWIFT_HELPER
     assert "Dashboard" in helper.SWIFT_HELPER
+    assert 'NSButton(title: "Quit"' in helper.SWIFT_HELPER
+    assert "width: 86, height: 29" in helper.SWIFT_HELPER
     assert 'NSButton(title: "Close"' not in helper.SWIFT_HELPER
     assert "singleLine: Bool = false" in helper.SWIFT_HELPER
     assert "maximumNumberOfLines = 1" in helper.SWIFT_HELPER
@@ -111,7 +116,11 @@ def test_helper_visual_contract_is_dark_green_popover() -> None:
     tk_source = inspect.getsource(helper._run_tk_helper)
     assert "root.after(TK_POPOVER_OPEN_DELAY_MS, open_popover)" in tk_source
     assert "pop.transient(root)" in tk_source
+    assert "width, height = 86, 29" in tk_source
+    assert "quit_system_inbox" in tk_source
+    assert "_post_url(_absolute_url(base_url, STOP_PATH))" in tk_source
     assert "TK_TOPMOST_REASSERT_MS" in tk_source
     assert "if not items and not empty:" in tk_source
     assert 'text="Close"' not in tk_source
+    assert 'text="Quit"' in tk_source
     assert 'font=("Helvetica", 9)' in tk_source
