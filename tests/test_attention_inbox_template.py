@@ -30,6 +30,7 @@ def test_attention_inbox_has_system_float_ball_toggle_states() -> None:
     assert "已启动" in source
     assert "/api/float_ball/start" in source
     assert "/api/float_ball/stop" in source
+    assert "/api/float_ball/preflight" in source
     assert "Starting System Inbox..." in source
 
 

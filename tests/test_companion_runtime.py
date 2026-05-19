@@ -345,6 +345,7 @@ def test_float_ball_manager_waits_for_helper_ready_file(monkeypatch, tmp_path) -
     captured: dict = {}
 
     class FakeProc:
+        pid = 1234
         stderr = None
 
         def poll(self) -> None:
@@ -378,3 +379,34 @@ def test_float_ball_manager_waits_for_helper_ready_file(monkeypatch, tmp_path) -
         assert captured["env"]["OPENFOCUS_FLOAT_BALL_BACKEND"] == "tk"
 
     asyncio.run(_run())
+
+
+def test_float_ball_manager_stops_orphan_helper_state(monkeypatch, tmp_path) -> None:
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    monkeypatch.setattr(rt.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    class FakeProc:
+        pid = 4321
+
+    killed: list[int] = []
+    sid = "browser-session-id-12345"
+    rt._write_float_ball_state(browser_session_id=sid, backend="tk", proc=FakeProc())
+    monkeypatch.setattr(rt, "_process_exists", lambda pid: True)
+    monkeypatch.setattr(
+        rt,
+        "_command_for_pid",
+        lambda pid: f"python float_ball_helper.py --browser-session-id {sid}",
+    )
+    monkeypatch.setattr(rt, "_terminate_pid", lambda pid: killed.append(int(pid)))
+    monkeypatch.setattr(
+        rt, "_find_float_ball_helper_pids", lambda browser_session_id: []
+    )
+
+    async def _run() -> None:
+        mgr = rt._FloatBallManager()
+        await mgr.stop(browser_session_id=sid)
+
+    asyncio.run(_run())
+
+    assert killed == [4321]
+    assert not rt._float_ball_state_path(sid).exists()

@@ -22,9 +22,11 @@ FLOAT_BALL_TEXT = "#ecfdf5"
 FLOAT_BALL_MUTED = "#a7f3d0"
 FLOAT_BALL_ACCENT = "#34d399"
 SUMMARY_PATH = "/api/agent_activity/summary?limit=30"
+STATE_PATH = "/api/float_ball/state"
 READY_FILE_ENV = "OPENFOCUS_FLOAT_BALL_READY_FILE"
 TK_POPOVER_OPEN_DELAY_MS = 1
 TK_TOPMOST_REASSERT_MS = 120
+STATE_CHECK_INTERVAL_MS = 5000
 
 
 def _as_dict(value: object) -> dict[str, Any]:
@@ -91,6 +93,28 @@ def _absolute_url(base_url: str, raw_url: object) -> str:
 
 def _fetch_summary(base_url: str, *, timeout: float = 2.5) -> dict[str, Any]:
     url = _absolute_url(base_url, SUMMARY_PATH)
+    if not url:
+        return {}
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"Cache-Control": "no-store", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _fetch_state(
+    base_url: str, *, browser_session_id: str, timeout: float = 2.5
+) -> dict[str, Any]:
+    query = urllib.parse.urlencode(
+        {"browser_session_id": str(browser_session_id or "")}
+    )
+    url = _absolute_url(base_url, f"{STATE_PATH}?{query}")
     if not url:
         return {}
     try:
@@ -245,6 +269,7 @@ if !selfPath.isEmpty {
     try? FileManager.default.removeItem(atPath: selfPath)
 }
 
+let browserSessionID = arg(2)
 let baseURL = arg(3).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 let initialRunningText = arg(4, "0")
 let initialWaitingText = arg(5, "0")
@@ -257,6 +282,7 @@ let textColor = NSColor(red: 0.925, green: 0.992, blue: 0.961, alpha: 1.0)
 let mutedColor = NSColor(red: 0.655, green: 0.953, blue: 0.816, alpha: 1.0)
 let accentColor = NSColor(red: 0.204, green: 0.827, blue: 0.600, alpha: 1.0)
 let summaryPath = "/api/agent_activity/summary?limit=30"
+let statePath = "/api/float_ball/state"
 let floatBallWindowLevel = NSWindow.Level.statusBar
 let floatBallCollectionBehavior: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
@@ -313,6 +339,29 @@ func normalizedURL(_ rawValue: Any?) -> URL? {
 
 func fetchSummary(_ completion: @escaping ([String: Any]) -> Void) {
     guard let url = normalizedURL(summaryPath) else {
+        completion([:])
+        return
+    }
+    var req = URLRequest(url: url)
+    req.cachePolicy = .reloadIgnoringLocalCacheData
+    req.timeoutInterval = 3
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+        var payload: [String: Any] = [:]
+        if let data = data,
+           let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            payload = decoded
+        }
+        DispatchQueue.main.async { completion(payload) }
+    }.resume()
+}
+
+func fetchState(_ completion: @escaping ([String: Any]) -> Void) {
+    guard var components = URLComponents(string: statePath) else {
+        completion([:])
+        return
+    }
+    components.queryItems = [URLQueryItem(name: "browser_session_id", value: browserSessionID)]
+    guard let url = normalizedURL(components.string ?? statePath) else {
         completion([:])
         return
     }
@@ -497,6 +546,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.refreshSummary(render: false)
         }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.checkDesiredState()
+        }
     }
 
     func buildBall() {
@@ -570,6 +622,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if render {
                 self.renderPopover()
+            }
+        }
+    }
+
+    func checkDesiredState() {
+        fetchState { payload in
+            if payload.isEmpty { return }
+            let shouldExit = (payload["should_exit"] as? Bool) ?? false
+            let running = payload["running"] as? Bool
+            if shouldExit || running == false {
+                NSApplication.shared.terminate(nil)
             }
         }
     }
@@ -1198,6 +1261,25 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         refresh_async(render=popover_exists())
         root.after(15000, schedule_refresh)
 
+    def check_desired_state_async() -> None:
+        def worker() -> None:
+            payload = _fetch_state(base_url, browser_session_id=args.browser_session_id)
+            if not payload:
+                return
+            should_exit = bool(payload.get("should_exit"))
+            running = payload.get("running")
+            if should_exit or running is False:
+                try:
+                    root.after(0, root.destroy)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def schedule_state_check() -> None:
+        check_desired_state_async()
+        root.after(STATE_CHECK_INTERVAL_MS, schedule_state_check)
+
     def start_drag(event: Any) -> None:
         state["drag_x"] = event.x
         state["drag_y"] = event.y
@@ -1234,6 +1316,7 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
     raise_window(root)
     _signal_ready()
     root.after(15000, schedule_refresh)
+    root.after(STATE_CHECK_INTERVAL_MS, schedule_state_check)
     root.mainloop()
     return 0
 

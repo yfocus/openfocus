@@ -12,6 +12,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import string
@@ -1458,6 +1459,135 @@ class _FloatBallSession:
     summary_json: str = ""
 
 
+def _float_ball_state_path(browser_session_id: str) -> Path:
+    safe_sid = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(browser_session_id or "").strip())
+    if not safe_sid:
+        safe_sid = "unknown"
+    return Path(tempfile.gettempdir()) / f"openfocus-float-ball-{safe_sid}.json"
+
+
+def _write_float_ball_state(
+    *, browser_session_id: str, backend: str, proc: subprocess.Popen
+) -> None:
+    payload = {
+        "browser_session_id": str(browser_session_id or ""),
+        "backend": str(backend or ""),
+        "pid": int(proc.pid or 0),
+        "created_at": _utcnow().isoformat(),
+    }
+    path = _float_ball_state_path(browser_session_id)
+    with contextlib.suppress(Exception):
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_float_ball_state(browser_session_id: str) -> dict:
+    path = _float_ball_state_path(browser_session_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _terminate_pid(pid: int) -> None:
+    if pid <= 0:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+
+
+def _command_for_pid(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return ""
+    return str(proc.stdout or "").strip()
+
+
+def _is_float_ball_helper_command(command: str, browser_session_id: str) -> bool:
+    sid = str(browser_session_id or "").strip()
+    if len(sid) < 8 or sid not in str(command or ""):
+        return False
+    return "float_ball_helper.py" in command or "openfocus-float-ball-" in command
+
+
+def _terminate_float_ball_state(browser_session_id: str) -> None:
+    state = _read_float_ball_state(browser_session_id)
+    pid = int(state.get("pid") or 0)
+    command = _command_for_pid(pid)
+    if (
+        pid > 0
+        and pid != os.getpid()
+        and _process_exists(pid)
+        and _is_float_ball_helper_command(command, browser_session_id)
+    ):
+        _terminate_pid(pid)
+    with contextlib.suppress(FileNotFoundError):
+        _float_ball_state_path(browser_session_id).unlink()
+
+
+def _find_float_ball_helper_pids(browser_session_id: str) -> list[int]:
+    sid = str(browser_session_id or "").strip()
+    if len(sid) < 8:
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in (proc.stdout or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        pid_text, _, command = raw.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == os.getpid():
+            continue
+        if not _is_float_ball_helper_command(command, sid):
+            continue
+        pids.append(pid)
+    return pids
+
+
+def _terminate_float_ball_helpers(browser_session_id: str) -> None:
+    _terminate_float_ball_state(browser_session_id)
+    for pid in _find_float_ball_helper_pids(browser_session_id):
+        _terminate_pid(pid)
+
+
 async def _wait_for_float_ball_ready(proc: subprocess.Popen, ready_path: Path) -> None:
     timeout_s = float(
         os.environ.get("OPENFOCUS_FLOAT_BALL_READY_TIMEOUT_SECONDS") or "8"
@@ -1498,6 +1628,7 @@ class _FloatBallManager:
         if backend == "unsupported":
             raise RuntimeError("system float ball is unsupported in this environment")
         await self.stop(browser_session_id=sid)
+        _terminate_float_ball_helpers(sid)
         if backend == "test":
             self._sessions[sid] = _FloatBallSession(
                 browser_session_id=sid, backend=backend, summary_json=summary_json
@@ -1542,6 +1673,7 @@ class _FloatBallManager:
             proc=proc,
             summary_json=summary_json,
         )
+        _write_float_ball_state(browser_session_id=sid, backend=backend, proc=proc)
         return backend
 
     async def update(self, *, browser_session_id: str, summary_json: str) -> None:
@@ -1555,9 +1687,11 @@ class _FloatBallManager:
         sid = str(browser_session_id or "").strip()
         sess = self._sessions.pop(sid, None)
         if sess is None or sess.proc is None:
+            _terminate_float_ball_helpers(sid)
             return
         proc = sess.proc
         if proc.poll() is not None:
+            _terminate_float_ball_helpers(sid)
             return
         proc.terminate()
         try:
@@ -1565,6 +1699,7 @@ class _FloatBallManager:
         except Exception:
             with contextlib.suppress(Exception):
                 proc.kill()
+        _terminate_float_ball_helpers(sid)
 
     async def stop_all(self) -> None:
         for sid in list(self._sessions):

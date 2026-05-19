@@ -31,6 +31,10 @@ def create_router(*, grpc_server: CompanionGrpcServer) -> APIRouter:
         sid = _session_from_request(request, response)
         return float_ball_service.preflight_payload(grpc_server, browser_session_id=sid)
 
+    @router.get("/api/float_ball/state")
+    def float_ball_state(browser_session_id: str = "") -> dict:
+        return float_ball_service.state_payload(browser_session_id=browser_session_id)
+
     @router.get("/api/float_ball/target")
     def float_ball_target() -> dict:
         return float_ball_service.target_payload(grpc_server)

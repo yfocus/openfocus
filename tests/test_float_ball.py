@@ -123,6 +123,29 @@ def test_float_ball_preflight_checks_capability_after_target_selection() -> None
     assert payload["target"]["set"] is True
 
 
+def test_float_ball_state_tracks_desired_browser_session() -> None:
+    cid = _paired_companion()
+    _set_target(
+        cid,
+        browser_session_id="browser-session-id-12345",
+        float_ball_enabled=True,
+        float_ball_base_url="http://testserver",
+        float_ball_backend="test",
+    )
+
+    running = float_ball_service.state_payload(
+        browser_session_id="browser-session-id-12345"
+    )
+    other = float_ball_service.state_payload(
+        browser_session_id="other-browser-session-12345"
+    )
+
+    assert running["running"] is True
+    assert running["should_exit"] is False
+    assert other["running"] is False
+    assert other["should_exit"] is True
+
+
 def test_float_ball_start_uses_selected_target_companion() -> None:
     import asyncio
 
@@ -270,6 +293,13 @@ async def test_float_ball_target_routes_drive_system_inbox_flow() -> None:
         assert started.status_code == 200
         assert started.json()["mode"] == "system"
         assert len(conn.started) == 1
+        browser_session = conn.started[0]["browser_session_id"]
+
+        state = await client.get(
+            f"/api/float_ball/state?browser_session_id={browser_session}"
+        )
+        assert state.status_code == 200
+        assert state.json()["running"] is True
 
         cleared = await client.delete("/api/float_ball/target")
         assert cleared.status_code == 200

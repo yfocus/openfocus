@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import inspect
 import os
@@ -124,8 +125,22 @@ class CompanionConnection:
         )
 
     async def outgoing(self) -> AsyncIterator[pb2.ServerToClient]:
-        while not self._closed.is_set():
-            msg = await self._out_q.get()
+        while True:
+            if self._closed.is_set():
+                return
+            get_task = asyncio.create_task(self._out_q.get())
+            close_task = asyncio.create_task(self._closed.wait())
+            done, pending = await asyncio.wait(
+                {get_task, close_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*pending)
+
+            if close_task in done or self._closed.is_set():
+                return
+            msg = get_task.result()
             yield msg
 
     def mark_seen(self) -> None:
@@ -779,6 +794,13 @@ class CompanionRegistry:
 
         # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 
+    async def close_all(self) -> None:
+        async with self._lock:
+            conns = list(self._by_companion_id.values())
+            self._by_companion_id.clear()
+        for conn in conns:
+            conn.close()
+
 
 class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
     def __init__(self, registry: CompanionRegistry) -> None:
@@ -851,6 +873,9 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
         conn = CompanionConnection(companion_id=assigned_id, device_id=device_id)
         conn.handle_incoming(first)
         await self.registry.set_connected(assigned_id, conn)
+        add_done_callback = getattr(context, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(lambda _ctx: conn.close())
 
         # Companion 连接/断连事件不再落库（避免污染 Dashboard 事件流）。
 
@@ -878,6 +903,8 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
             except Exception:
                 # 连接断开/异常由 finally 处理
                 pass
+            finally:
+                conn.close()
 
         consumer = asyncio.create_task(
             _consume(), name=f"companion-consume:{assigned_id}"
@@ -887,6 +914,8 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
                 yield out
         finally:
             consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await consumer
             await self.registry.set_disconnected(assigned_id, conn)
             conn.close()
 
@@ -926,6 +955,7 @@ class CompanionGrpcServer:
         if self._server is None:
             return
         server = self._server
+        await self.registry.close_all()
         # 尽量等待底层资源释放，避免在 pytest/anyio 频繁启动/关闭时触发 gRPC aio 的不稳定。
         await server.stop(grace=0)
         try:

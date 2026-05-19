@@ -48,6 +48,9 @@ Companion 是运行在本机（或远端工作机）上的常驻桥接进程，�
   - 过程事件：stdout/stderr、阶段进度、会话状态变更等（可映射为 `/api/agent/events` 落库）。
   - runtime signal：Codex/Coco hooks、turn lifecycle、approval/input waiting、turn completed 等本机信号，通过 `AgentRuntimeSignal` 回传 Core，由 Core 更新 `agent_turns` / `task_agent_activity`。
 - 断线重连：指数退避；重连后重新发送 `hello`；OpenFocus 以 `device_id` 关联同一设备。
+- 任一侧崩溃或主动断开时，OpenFocus 必须及时关闭服务端内存连接、停止 ping/outgoing
+  循环并清理在线 registry；Companion 侧重连日志必须限流，避免 server 或 Companion
+  不可用时形成日志风暴。
 
 ### Enrollment 配对（认证码）在 gRPC 模型下的落点
 

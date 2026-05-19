@@ -23,3 +23,7 @@ Owns System Inbox target selection and system float ball orchestration.
   Companion reconnects after an OpenFocus or Companion reload, OpenFocus restores
   the desired system float ball without requiring another browser click. An
   explicit stop clears that desired state.
+- The browser navigation control and the system helper must reconcile against
+  OpenFocus desired state instead of trusting only local UI memory. Helpers poll
+  `/api/float_ball/state` and exit when their browser session is no longer the
+  desired running system inbox.

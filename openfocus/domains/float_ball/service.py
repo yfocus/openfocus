@@ -310,6 +310,29 @@ def preflight_payload(grpc_server: Any, *, browser_session_id: str) -> dict:
     }
 
 
+def state_payload(*, browser_session_id: str) -> dict:
+    sid = valid_browser_session_id(browser_session_id)
+    with session_scope() as s:
+        target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+        if target is None:
+            return {
+                "ok": True,
+                "running": False,
+                "should_exit": True,
+                "reason": "target_required",
+            }
+        desired_sid = valid_browser_session_id(str(target.browser_session_id or ""))
+        enabled = bool(target.float_ball_enabled)
+        running = bool(enabled and sid and desired_sid and sid == desired_sid)
+        return {
+            "ok": True,
+            "running": running,
+            "should_exit": not running,
+            "reason": "running" if running else "not_desired",
+            "target": _target_payload(target),
+        }
+
+
 def _summary_json() -> str:
     with session_scope() as s:
         payload = agent_activity_service.summary_payload(s, limit=30)

@@ -8,6 +8,9 @@ bridge between OpenFocus Core and machine-local capabilities.
 
 - Maintain the Companion gRPC client runtime, pairing state, reconnect loop, and
   runtime signal forwarding.
+- Close server-side gRPC connection state promptly when either side disconnects
+  or crashes; reconnection must rely on bounded backoff rather than tight retry
+  or ping loops.
 - Expose only declared local capabilities to OpenFocus Core, including terminal,
   agent workspace, directory selection, runtime hooks, and system float ball.
 - Run the system `Inbox` float ball helper as a local UI process when the browser
@@ -24,6 +27,9 @@ bridge between OpenFocus Core and machine-local capabilities.
   `action.primary_url` or fallback URL; dismiss uses `dismiss_url`.
 - The helper may keep an initial summary snapshot from gRPC start, but it should
   refresh from the web API so it does not diverge from the page-level inbox.
+- The Companion records and reclaims helper processes by browser session id.
+  Restarting or stopping the same system inbox session must terminate any stale
+  helper left behind by a crashed or forcibly closed Companion.
 
 ## Non-Goals
 

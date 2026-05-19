@@ -707,6 +707,16 @@
           const stored = localStorage.getItem(SYSTEM_KEY) || '';
           setSystemState(stored === 'running' ? 'running' : 'idle');
         }catch(_){ setSystemState('idle'); }
+        async function syncSystemState(){
+          if(systemState === 'starting') return;
+          try{
+            const r = await fetch('/api/float_ball/preflight', { cache:'no-store' });
+            if(!r.ok) return;
+            const payload = await r.json();
+            const target = payload && payload.target ? payload.target : {};
+            setSystemState(target && target.set && target.float_ball_enabled ? 'running' : 'idle');
+          }catch(_){ }
+        }
         function ago(iso){
           try{
             const d = new Date(iso);
@@ -829,7 +839,10 @@
         fab.addEventListener('click', (e)=>{
           e.preventDefault();
           pop.classList.toggle('open');
-          if(pop.classList.contains('open')) void load();
+          if(pop.classList.contains('open')){
+            void load();
+            void syncSystemState();
+          }
         });
         document.addEventListener('pointerdown', (e)=>{
           if(!pop.classList.contains('open')) return;
@@ -893,7 +906,9 @@
           }
         });
         void load();
+        void syncSystemState();
         setInterval(load, 15000);
+        setInterval(syncSystemState, 15000);
       })();
 
       // Calendar
