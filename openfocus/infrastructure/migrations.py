@@ -16,8 +16,7 @@ AGENT_SPACE_START_COMMAND_MIGRATION_ID = "20260516_agent_space_start_command"
 AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
 AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID = "20260517_agent_space_prompt_auto"
 AGENT_ACTIVITY_MIGRATION_ID = "20260517_agent_activity"
-FLOAT_BALL_BINDING_MIGRATION_ID = "20260517_float_ball_binding"
-FLOAT_BALL_RESTORE_STATE_MIGRATION_ID = "20260519_float_ball_restore_state"
+SYSTEM_INBOX_TARGET_MIGRATION_ID = "20260519_system_inbox_target"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -575,97 +574,34 @@ def _migrate_agent_activity(conn: Any) -> None:
     )
 
 
-def _migrate_float_ball_binding(conn: Any) -> None:
+def _migrate_system_inbox_target(conn: Any) -> None:
     conn.execute(
         text(
-            "CREATE TABLE IF NOT EXISTS browser_companion_bindings ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "browser_session_id VARCHAR(64) NOT NULL UNIQUE, "
+            "CREATE TABLE IF NOT EXISTS system_inbox_targets ("
+            "id INTEGER PRIMARY KEY, "
             "companion_id INTEGER NOT NULL, "
-            "trust_method VARCHAR(64) NOT NULL DEFAULT 'nonce_protocol', "
+            "browser_session_id VARCHAR(64) NOT NULL DEFAULT '', "
             "float_ball_enabled BOOLEAN NOT NULL DEFAULT 0, "
             "float_ball_base_url VARCHAR(1024) NOT NULL DEFAULT '', "
             "float_ball_backend VARCHAR(32) NOT NULL DEFAULT '', "
             "float_ball_last_started_at DATETIME, "
             "float_ball_last_error TEXT NOT NULL DEFAULT '', "
             "created_at DATETIME, "
-            "last_verified_at DATETIME, "
             "updated_at DATETIME"
             ")"
         )
     )
     conn.execute(
         text(
-            "CREATE INDEX IF NOT EXISTS ix_browser_companion_bindings_companion "
-            "ON browser_companion_bindings(companion_id)"
+            "CREATE INDEX IF NOT EXISTS ix_system_inbox_targets_companion "
+            "ON system_inbox_targets(companion_id)"
         )
     )
-    conn.execute(
-        text(
-            "CREATE TABLE IF NOT EXISTS browser_bind_challenges ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "nonce_hash VARCHAR(64) NOT NULL UNIQUE, "
-            "browser_session_id VARCHAR(64) NOT NULL, "
-            "status VARCHAR(32) NOT NULL DEFAULT 'pending', "
-            "companion_id INTEGER, "
-            "created_at DATETIME, "
-            "expires_at DATETIME NOT NULL, "
-            "confirmed_at DATETIME, "
-            "updated_at DATETIME"
-            ")"
-        )
-    )
-    conn.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_browser_bind_challenges_session "
-            "ON browser_bind_challenges(browser_session_id, created_at)"
-        )
-    )
-    conn.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_browser_bind_challenges_status "
-            "ON browser_bind_challenges(status, expires_at)"
-        )
-    )
-
-
-def _migrate_float_ball_restore_state(conn: Any) -> None:
-    columns = set(_table_columns(conn, "browser_companion_bindings"))
-    if "float_ball_enabled" not in columns:
-        conn.execute(
-            text(
-                "ALTER TABLE browser_companion_bindings "
-                "ADD COLUMN float_ball_enabled BOOLEAN NOT NULL DEFAULT 0"
-            )
-        )
-    if "float_ball_base_url" not in columns:
-        conn.execute(
-            text(
-                "ALTER TABLE browser_companion_bindings "
-                "ADD COLUMN float_ball_base_url VARCHAR(1024) NOT NULL DEFAULT ''"
-            )
-        )
-    if "float_ball_backend" not in columns:
-        conn.execute(
-            text(
-                "ALTER TABLE browser_companion_bindings "
-                "ADD COLUMN float_ball_backend VARCHAR(32) NOT NULL DEFAULT ''"
-            )
-        )
-    if "float_ball_last_started_at" not in columns:
-        conn.execute(
-            text(
-                "ALTER TABLE browser_companion_bindings "
-                "ADD COLUMN float_ball_last_started_at DATETIME"
-            )
-        )
-    if "float_ball_last_error" not in columns:
-        conn.execute(
-            text(
-                "ALTER TABLE browser_companion_bindings "
-                "ADD COLUMN float_ball_last_error TEXT NOT NULL DEFAULT ''"
-            )
-        )
+    conn.execute(text("DROP INDEX IF EXISTS ix_browser_bind_challenges_session"))
+    conn.execute(text("DROP INDEX IF EXISTS ix_browser_bind_challenges_status"))
+    conn.execute(text("DROP INDEX IF EXISTS ix_browser_companion_bindings_companion"))
+    conn.execute(text("DROP TABLE IF EXISTS browser_bind_challenges"))
+    conn.execute(text("DROP TABLE IF EXISTS browser_companion_bindings"))
 
 
 STARTUP_MIGRATIONS = [
@@ -680,6 +616,5 @@ STARTUP_MIGRATIONS = [
     (AGENT_SPACE_PROMPTS_MIGRATION_ID, _migrate_agent_space_prompts),
     (AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID, _migrate_agent_space_prompt_auto),
     (AGENT_ACTIVITY_MIGRATION_ID, _migrate_agent_activity),
-    (FLOAT_BALL_BINDING_MIGRATION_ID, _migrate_float_ball_binding),
-    (FLOAT_BALL_RESTORE_STATE_MIGRATION_ID, _migrate_float_ball_restore_state),
+    (SYSTEM_INBOX_TARGET_MIGRATION_ID, _migrate_system_inbox_target),
 ]

@@ -842,18 +842,6 @@
           if(!r.ok) throw new Error('HTTP ' + r.status);
           return await r.json();
         }
-        async function pollFloatBallBind(nonce, timeoutMs){
-          const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 12000));
-          while(Date.now() < deadline){
-            const url = '/api/float_ball/bind_status?nonce=' + encodeURIComponent(String(nonce || ''));
-            const r = await fetch(url, { cache:'no-store' }).catch(()=> null);
-            const data = r && r.ok ? await r.json().catch(()=> ({})) : {};
-            if(data.status === 'confirmed') return data;
-            if(data.status === 'expired' || data.status === 'missing') return data;
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-          return { status:'timeout' };
-        }
         async function startSystemFloatBall(){
           setSystemState('starting');
           toast('Starting System Inbox...', 1800);
@@ -864,20 +852,12 @@
             toast('System Inbox started');
             return true;
           }
-          const bind = first && first.bind ? first.bind : null;
-          if(!bind || !bind.open_url || !bind.nonce){ setSystemState('idle'); toast('System Inbox unavailable'); return false; }
-          try{ window.location.href = String(bind.open_url); }catch(_){ setSystemState('idle'); return false; }
-          toast('Opening Companion...');
-          const status = await pollFloatBallBind(bind.nonce, 12000);
-          if(status.status !== 'confirmed'){ setSystemState('idle'); toast('Companion binding timed out'); return false; }
-          try{
-            const second = await postFloatBallStart();
-            if(second && second.ok && second.mode === 'system'){
-              setSystemState('running');
-              toast('System Inbox started');
-              return true;
-            }
-          }catch(_){ }
+          if(first && (first.mode === 'target_required' || first.reason === 'target_required')){
+            setSystemState('idle');
+            toast('Choose a System Inbox Companion');
+            location.href = String(first.settings_url || '/companions?system_inbox=1');
+            return false;
+          }
           setSystemState('idle');
           toast('System Inbox start failed');
           return false;

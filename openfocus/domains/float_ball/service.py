@@ -2,13 +2,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import ipaddress
 import json
-import os
 import re
 import secrets
-import urllib.parse
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,12 +13,11 @@ from sqlalchemy.orm import Session
 
 from ...companion.grpc import (
     CompanionGrpcError,
-    add_browser_bind_proof_listener,
     add_companion_connected_listener,
     add_float_ball_action_listener,
 )
 from ...db import session_scope
-from ...models import BrowserBindChallenge, BrowserCompanionBinding, Companion
+from ...models import Companion, SystemInboxTarget
 from ..agent_activity import service as agent_activity_service
 from ..companion import service as companion_service
 from ..events import service as event_service
@@ -31,20 +26,13 @@ BROWSER_SESSION_COOKIE = "openfocus_browser_session"
 SESSION_COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 SYSTEM_FLOAT_BALL_CAPABILITY = "system_float_ball"
-BIND_CHALLENGE_TTL_SECONDS = 90
-_BIND_LISTENER_INSTALLED = False
+SYSTEM_INBOX_TARGET_ID = 1
+SYSTEM_INBOX_SETTINGS_URL = "/companions?system_inbox=1"
+_LISTENER_INSTALLED = False
 
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
-
-
-def _aware(ts: dt.datetime | None) -> dt.datetime | None:
-    if ts is None:
-        return None
-    if ts.tzinfo is None:
-        return ts.replace(tzinfo=dt.timezone.utc)
-    return ts
 
 
 def new_browser_session_id() -> str:
@@ -54,10 +42,6 @@ def new_browser_session_id() -> str:
 def valid_browser_session_id(value: str | None) -> str:
     raw = str(value or "").strip()
     return raw if SESSION_ID_RE.match(raw) else ""
-
-
-def nonce_hash(nonce: str) -> str:
-    return hashlib.sha256(str(nonce or "").encode("utf-8")).hexdigest()
 
 
 def _has_system_float_ball_capability(capabilities: Any) -> bool:
@@ -70,16 +54,32 @@ def _has_system_float_ball_capability(capabilities: Any) -> bool:
     return False
 
 
-def _companion_payload(companion: Companion | None, conn: Any | None = None) -> dict:
+def _companion_payload(companion: Any | None, conn: Any | None = None) -> dict:
     if companion is None:
         return {}
     caps = list(getattr(conn, "capabilities", []) or []) if conn is not None else []
     return {
-        "id": int(companion.id or 0),
-        "device_id": str(companion.device_id or ""),
-        "name": str(companion.name or ""),
-        "status": str(companion.status or ""),
+        "id": int(getattr(companion, "id", 0) or 0),
+        "device_id": str(getattr(companion, "device_id", "") or ""),
+        "name": str(getattr(companion, "name", "") or ""),
+        "status": str(getattr(companion, "status", "") or ""),
         "capabilities": caps,
+    }
+
+
+def _target_payload(target: Any | None) -> dict:
+    if target is None:
+        return {"set": False}
+    return {
+        "set": True,
+        "companion_id": int(getattr(target, "companion_id", 0) or 0),
+        "browser_session_id": str(getattr(target, "browser_session_id", "") or ""),
+        "float_ball_enabled": bool(getattr(target, "float_ball_enabled", False)),
+        "float_ball_base_url": str(getattr(target, "float_ball_base_url", "") or ""),
+        "float_ball_backend": str(getattr(target, "float_ball_backend", "") or ""),
+        "float_ball_last_error": str(
+            getattr(target, "float_ball_last_error", "") or ""
+        ),
     }
 
 
@@ -91,415 +91,222 @@ def _base_url(value: str) -> str:
 def _remember_float_ball_state(
     s: Session,
     *,
-    browser_session_id: str,
     enabled: bool,
+    browser_session_id: str = "",
     openfocus_base_url: str = "",
     backend: str = "",
     error: str = "",
 ) -> None:
-    browser_session_id = valid_browser_session_id(browser_session_id)
-    if not browser_session_id:
-        return
-    binding = (
-        s.query(BrowserCompanionBinding)
-        .filter(BrowserCompanionBinding.browser_session_id == browser_session_id)
-        .one_or_none()
-    )
-    if binding is None:
+    target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+    if target is None:
         return
     now = utcnow()
-    binding.float_ball_enabled = bool(enabled)
+    sid = valid_browser_session_id(browser_session_id)
+    if sid:
+        target.browser_session_id = sid
+    target.float_ball_enabled = bool(enabled)
     if openfocus_base_url:
-        binding.float_ball_base_url = _base_url(openfocus_base_url)
+        target.float_ball_base_url = _base_url(openfocus_base_url)
     if backend:
-        binding.float_ball_backend = str(backend or "").strip()
-    binding.float_ball_last_error = str(error or "")[:4000]
+        target.float_ball_backend = str(backend or "").strip()
+    target.float_ball_last_error = str(error or "")[:4000]
     if enabled and not error:
-        binding.float_ball_last_started_at = now
-    binding.updated_at = now
-    s.add(binding)
+        target.float_ball_last_started_at = now
+    target.updated_at = now
+    s.add(target)
 
 
-def _is_loopback_host(value: str | None) -> bool:
-    raw = str(value or "").strip().strip("[]").lower()
-    if not raw:
-        return False
-    if raw == "localhost" or raw.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(raw).is_loopback
-    except ValueError:
-        return False
+def _copy_target(target: SystemInboxTarget | None) -> SimpleNamespace | None:
+    if target is None:
+        return None
+    return SimpleNamespace(
+        id=target.id,
+        companion_id=target.companion_id,
+        browser_session_id=target.browser_session_id,
+        float_ball_enabled=target.float_ball_enabled,
+        float_ball_base_url=target.float_ball_base_url,
+        float_ball_backend=target.float_ball_backend,
+        float_ball_last_started_at=target.float_ball_last_started_at,
+        float_ball_last_error=target.float_ball_last_error,
+        created_at=target.created_at,
+        updated_at=target.updated_at,
+    )
 
 
-def _is_loopback_request(*, openfocus_base_url: str, client_host: str | None) -> bool:
-    try:
-        parsed = urllib.parse.urlparse(_base_url(openfocus_base_url))
-        base_host = parsed.hostname or ""
-    except Exception:
-        base_host = ""
-    return _is_loopback_host(base_host) and _is_loopback_host(client_host)
+def _copy_companion(companion: Companion | None) -> SimpleNamespace | None:
+    if companion is None:
+        return None
+    return SimpleNamespace(
+        id=companion.id,
+        device_id=companion.device_id,
+        name=companion.name,
+        base_url=companion.base_url,
+        status=companion.status,
+        auth_token=companion.auth_token,
+        last_seen_at=companion.last_seen_at,
+    )
 
 
-def _registry_connections(grpc_server: Any) -> list[tuple[int, Any]]:
-    registry = getattr(grpc_server, "registry", None)
-    by_id = getattr(registry, "_by_companion_id", None)
-    if isinstance(by_id, dict):
-        return [(int(cid), conn) for cid, conn in list(by_id.items())]
-    conn = getattr(registry, "conn", None)
-    if conn is not None:
-        with session_scope() as s:
-            companions = (
-                s.query(Companion)
-                .filter(Companion.status == "active")
-                .order_by(Companion.id.asc())
-                .all()
-            )
-            if len(companions) == 1:
-                return [(int(companions[0].id), conn)]
-    return []
-
-
-def _auto_bind_single_loopback_companion(
+def _target_connection(
     grpc_server: Any,
-    *,
-    browser_session_id: str,
-    openfocus_base_url: str,
-    client_host: str | None,
-) -> bool:
-    browser_session_id = valid_browser_session_id(browser_session_id)
-    if not browser_session_id or not _is_loopback_request(
-        openfocus_base_url=openfocus_base_url, client_host=client_host
-    ):
-        return False
-
-    online = _registry_connections(grpc_server)
-    if not online:
-        return False
-
-    now = utcnow()
-    candidates: list[int] = []
+) -> tuple[SimpleNamespace | None, SimpleNamespace | None, Any | None, str]:
     with session_scope() as s:
-        for cid, conn in online:
-            if not _has_system_float_ball_capability(
-                getattr(conn, "capabilities", []) or []
-            ):
-                continue
-            companion = s.get(Companion, int(cid))
-            if companion is None:
-                continue
-            if not (companion.auth_token or "").strip():
-                continue
-            if str(companion.status or "") != "active":
-                continue
-            candidates.append(int(cid))
+        target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+        if target is None:
+            return None, None, None, "target_required"
+        companion = s.get(Companion, int(target.companion_id or 0))
+        target_payload = _copy_target(target)
+        companion_payload = _copy_companion(companion)
 
-        # Local loopback is only used as a convenience fallback when selection is
-        # unambiguous. Multiple online capable companions must still use the
-        # explicit openfocus:// nonce proof to avoid binding the wrong machine.
-        if len(candidates) != 1:
-            return False
-
-        cid = candidates[0]
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(BrowserCompanionBinding.browser_session_id == browser_session_id)
-            .one_or_none()
-        )
-        previous_companion_id = int(binding.companion_id or 0) if binding else 0
-        if binding is None:
-            binding = BrowserCompanionBinding(
-                browser_session_id=browser_session_id,
-                companion_id=cid,
-                trust_method="loopback_auto",
-                created_at=now,
-                last_verified_at=now,
-                updated_at=now,
-            )
-        else:
-            binding.companion_id = cid
-            binding.trust_method = "loopback_auto"
-            binding.last_verified_at = now
-            binding.updated_at = now
-        s.add(binding)
-
-        if previous_companion_id != cid:
-            event_service.record_event(
-                s,
-                kind="float_ball.browser_bound",
-                agent="openfocus/system",
-                task_id=None,
-                payload={
-                    "browser_session_id": browser_session_id,
-                    "companion_id": cid,
-                    "trust_method": "loopback_auto",
-                },
-                audit=False,
-            )
-    return True
-
-
-def _challenge_payload(challenge: BrowserBindChallenge, *, nonce: str = "") -> dict:
-    payload = {
-        "nonce": nonce,
-        "status": str(challenge.status or "pending"),
-        "expires_at": _aware(challenge.expires_at).isoformat()
-        if challenge.expires_at
-        else None,
-        "companion_id": int(challenge.companion_id or 0) or None,
-    }
-    return payload
-
-
-def create_bind_challenge(
-    s: Session,
-    *,
-    browser_session_id: str,
-    openfocus_base_url: str,
-) -> dict:
-    browser_session_id = valid_browser_session_id(browser_session_id)
-    if not browser_session_id:
-        raise ValueError("browser_session_id is required")
-    now = utcnow()
-    nonce = secrets.token_urlsafe(32)
-    challenge = BrowserBindChallenge(
-        nonce_hash=nonce_hash(nonce),
-        browser_session_id=browser_session_id,
-        status="pending",
-        created_at=now,
-        expires_at=now + dt.timedelta(seconds=BIND_CHALLENGE_TTL_SECONDS),
-        updated_at=now,
-    )
-    s.add(challenge)
-    s.flush()
-
-    query = urllib.parse.urlencode(
-        {
-            "server": _base_url(openfocus_base_url),
-            "nonce": nonce,
-            "browser_session_id": browser_session_id,
-            "instance_id": _safe_instance_id(os.environ.get("OPENFOCUS_INSTANCE_ID")),
-        }
-    )
-    return {
-        "ok": True,
-        "mode": "bind_required",
-        "reason": "browser_not_bound",
-        "bind": {
-            **_challenge_payload(challenge, nonce=nonce),
-            "open_url": f"openfocus://bind?{query}",
-            "poll_url": f"/api/float_ball/bind_status?nonce={urllib.parse.quote(nonce)}",
-            "ttl_seconds": BIND_CHALLENGE_TTL_SECONDS,
-        },
-    }
-
-
-def bind_status(*, nonce: str) -> dict:
-    raw_nonce = str(nonce or "").strip()
-    if not raw_nonce:
-        raise HTTPException(status_code=400, detail="nonce is required")
-    h = nonce_hash(raw_nonce)
-    now = utcnow()
-    with session_scope() as s:
-        challenge = (
-            s.query(BrowserBindChallenge)
-            .filter(BrowserBindChallenge.nonce_hash == h)
-            .one_or_none()
-        )
-        if challenge is None:
-            return {"ok": True, "status": "missing", "mode": "bind_required"}
-        exp = _aware(challenge.expires_at)
-        if str(challenge.status or "") == "pending" and exp and exp <= now:
-            challenge.status = "expired"
-            challenge.updated_at = now
-            s.add(challenge)
-        return {"ok": True, **_challenge_payload(challenge)}
-
-
-def confirm_browser_bind_nonce(*, nonce: str, companion_id: int) -> dict:
-    raw_nonce = str(nonce or "").strip()
-    cid = int(companion_id or 0)
-    if not raw_nonce or cid <= 0:
-        raise ValueError("nonce and companion_id are required")
-    h = nonce_hash(raw_nonce)
-    now = utcnow()
-    with session_scope() as s:
-        challenge = (
-            s.query(BrowserBindChallenge)
-            .filter(BrowserBindChallenge.nonce_hash == h)
-            .one_or_none()
-        )
-        if challenge is None:
-            raise LookupError("bind challenge not found")
-        exp = _aware(challenge.expires_at)
-        if exp and exp <= now:
-            challenge.status = "expired"
-            challenge.updated_at = now
-            s.add(challenge)
-            raise ValueError("bind challenge expired")
-        companion = s.get(Companion, cid)
-        if companion is None:
-            raise LookupError("Companion not found")
-        if (
-            not (companion.auth_token or "").strip()
-            or str(companion.status or "") != "active"
-        ):
-            raise ValueError("Companion is not paired")
-
-        challenge.status = "confirmed"
-        challenge.companion_id = cid
-        challenge.confirmed_at = now
-        challenge.updated_at = now
-        s.add(challenge)
-
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.browser_session_id
-                == challenge.browser_session_id
-            )
-            .one_or_none()
-        )
-        previous_companion_id = int(binding.companion_id or 0) if binding else 0
-        if binding is None:
-            binding = BrowserCompanionBinding(
-                browser_session_id=challenge.browser_session_id,
-                companion_id=cid,
-                trust_method="nonce_protocol",
-                created_at=now,
-                last_verified_at=now,
-                updated_at=now,
-            )
-        else:
-            binding.companion_id = cid
-            binding.trust_method = "nonce_protocol"
-            binding.last_verified_at = now
-            binding.updated_at = now
-        s.add(binding)
-
-        if previous_companion_id != cid:
-            event_service.record_event(
-                s,
-                kind="float_ball.browser_bound",
-                agent="openfocus/system",
-                task_id=None,
-                payload={
-                    "browser_session_id": challenge.browser_session_id,
-                    "companion_id": cid,
-                    "trust_method": "nonce_protocol",
-                },
-                audit=False,
-            )
-        return {
-            "ok": True,
-            "browser_session_id": challenge.browser_session_id,
-            "companion_id": cid,
-        }
-
-
-def _safe_instance_id(value: str | None) -> str:
-    raw = str(value or "").strip() or "default"
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._")
-    return safe or "default"
-
-
-def handle_browser_bind_proof(proof: Any) -> None:
-    try:
-        confirm_browser_bind_nonce(
-            nonce=str(getattr(proof, "nonce", "") or ""),
-            companion_id=int(getattr(proof, "companion_id", 0) or 0),
-        )
-    except Exception:
-        return
-
-
-def handle_float_ball_action(action_msg: Any) -> None:
-    try:
-        raw = str(getattr(action_msg, "payload_json", "") or "{}")
-        payload = json.loads(raw) if raw else {}
-        if not isinstance(payload, dict):
-            payload = {}
-        record_float_ball_action(
-            browser_session_id=str(getattr(action_msg, "browser_session_id", "") or ""),
-            action=str(getattr(action_msg, "action", "") or ""),
-            payload=payload,
-        )
-    except Exception:
-        return
-
-
-def handle_companion_connected(companion_id: int, conn: Any) -> Any:
-    return restore_desired_float_balls_for_companion(
-        companion_id=int(companion_id or 0), conn=conn
-    )
-
-
-def install_browser_bind_listener_once() -> None:
-    global _BIND_LISTENER_INSTALLED
-    if _BIND_LISTENER_INSTALLED:
-        return
-    add_browser_bind_proof_listener(handle_browser_bind_proof)
-    add_float_ball_action_listener(handle_float_ball_action)
-    add_companion_connected_listener(handle_companion_connected)
-    _BIND_LISTENER_INSTALLED = True
-
-
-def _bound_connection(
-    grpc_server: Any, *, browser_session_id: str
-) -> tuple[BrowserCompanionBinding | None, Companion | None, Any | None, str]:
-    browser_session_id = valid_browser_session_id(browser_session_id)
-    if not browser_session_id:
-        return None, None, None, "missing_browser_session"
-    with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(BrowserCompanionBinding.browser_session_id == browser_session_id)
-            .one_or_none()
-        )
-        if binding is None:
-            return None, None, None, "browser_not_bound"
-        companion = s.get(Companion, int(binding.companion_id or 0))
-        if companion is None:
-            return binding, None, None, "companion_missing"
-        companion_payload = SimpleNamespace(
-            id=companion.id,
-            device_id=companion.device_id,
-            name=companion.name,
-            base_url=companion.base_url,
-            status=companion.status,
-            auth_token=companion.auth_token,
-            last_seen_at=companion.last_seen_at,
-        )
-        binding_payload = SimpleNamespace(
-            browser_session_id=binding.browser_session_id,
-            companion_id=binding.companion_id,
-            trust_method=binding.trust_method,
-            created_at=binding.created_at,
-            last_verified_at=binding.last_verified_at,
-            updated_at=binding.updated_at,
-        )
+    if companion_payload is None:
+        return target_payload, None, None, "target_companion_missing"
     status = companion_service.display_status(companion_payload, grpc_server)
     if status != companion_service.COMPANION_STATUS_ACTIVE:
-        return binding_payload, companion_payload, None, "companion_offline"
+        return target_payload, companion_payload, None, "target_companion_offline"
     conn = grpc_server.registry.get(int(companion_payload.id or 0))
     if conn is None:
-        return binding_payload, companion_payload, None, "companion_offline"
+        return target_payload, companion_payload, None, "target_companion_offline"
     if not _has_system_float_ball_capability(getattr(conn, "capabilities", []) or []):
-        return binding_payload, companion_payload, conn, "unsupported_capability"
-    return binding_payload, companion_payload, conn, "ready"
+        return target_payload, companion_payload, conn, "unsupported_capability"
+    return target_payload, companion_payload, conn, "ready"
+
+
+def target_payload(grpc_server: Any) -> dict:
+    target, companion, conn, reason = _target_connection(grpc_server)
+    return {
+        "ok": True,
+        "reason": reason,
+        "target": _target_payload(target),
+        "companion": _companion_payload(companion, conn),
+        "settings_url": SYSTEM_INBOX_SETTINGS_URL,
+    }
+
+
+def set_target(grpc_server: Any, *, companion_id: int) -> dict:
+    cid = int(companion_id or 0)
+    if cid <= 0:
+        raise HTTPException(status_code=400, detail="companion_id is required")
+    conn = grpc_server.registry.get(cid)
+    with session_scope() as s:
+        companion = s.get(Companion, cid)
+        if companion is None:
+            raise HTTPException(status_code=404, detail="Companion not found")
+        if companion_service.display_status(companion, grpc_server) != (
+            companion_service.COMPANION_STATUS_ACTIVE
+        ):
+            raise HTTPException(status_code=400, detail="Companion is not active")
+        if conn is None:
+            raise HTTPException(
+                status_code=502, detail="Companion is not online (no gRPC connection)"
+            )
+        if not _has_system_float_ball_capability(
+            getattr(conn, "capabilities", []) or []
+        ):
+            raise HTTPException(
+                status_code=400, detail="Companion does not support system inbox"
+            )
+
+        now = utcnow()
+        target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+        previous_companion_id = int(target.companion_id or 0) if target else 0
+        if target is None:
+            target = SystemInboxTarget(
+                id=SYSTEM_INBOX_TARGET_ID,
+                companion_id=cid,
+                created_at=now,
+                updated_at=now,
+            )
+        else:
+            target.companion_id = cid
+            if previous_companion_id != cid:
+                target.browser_session_id = ""
+                target.float_ball_enabled = False
+                target.float_ball_base_url = ""
+                target.float_ball_backend = ""
+                target.float_ball_last_error = ""
+                target.float_ball_last_started_at = None
+            target.updated_at = now
+        s.add(target)
+        event_service.record_event(
+            s,
+            kind="float_ball.target_set",
+            agent="openfocus/system",
+            task_id=None,
+            payload={
+                "previous_companion_id": previous_companion_id or None,
+                "companion_id": cid,
+            },
+            audit=False,
+        )
+    return target_payload(grpc_server)
+
+
+async def clear_target(grpc_server: Any) -> dict:
+    previous_companion_id = 0
+    stop_browser_session_id = ""
+    should_stop = False
+    with session_scope() as s:
+        target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+        previous_companion_id = int(target.companion_id or 0) if target else 0
+        if target is not None:
+            stop_browser_session_id = valid_browser_session_id(
+                str(target.browser_session_id or "")
+            )
+            should_stop = bool(target.float_ball_enabled and stop_browser_session_id)
+            s.delete(target)
+
+    stopped = False
+    stop_error = ""
+    if should_stop and previous_companion_id > 0:
+        conn = grpc_server.registry.get(previous_companion_id)
+        if conn is not None:
+            try:
+                await conn.request_float_ball_stop(
+                    browser_session_id=stop_browser_session_id,
+                    timeout_seconds=5.0,
+                )
+                stopped = True
+            except Exception as exc:
+                stop_error = str(exc)
+        else:
+            stop_error = "target_companion_offline"
+
+    with session_scope() as s:
+        event_service.record_event(
+            s,
+            kind="float_ball.target_cleared",
+            agent="openfocus/system",
+            task_id=None,
+            payload={
+                "previous_companion_id": previous_companion_id or None,
+                "browser_session_id": stop_browser_session_id,
+                "stop_requested": should_stop,
+                "stopped": stopped,
+                "stop_error": stop_error,
+            },
+            audit=False,
+        )
+    return {
+        "ok": True,
+        "reason": "target_required",
+        "target": {"set": False},
+        "stop_requested": should_stop,
+        "stopped": stopped,
+        "stop_error": stop_error,
+    }
 
 
 def preflight_payload(grpc_server: Any, *, browser_session_id: str) -> dict:
-    binding, companion, conn, reason = _bound_connection(
-        grpc_server, browser_session_id=browser_session_id
-    )
+    target, companion, conn, reason = _target_connection(grpc_server)
     mode = "system" if reason == "ready" else "web"
     return {
         "ok": True,
         "mode": mode,
         "reason": reason,
-        "bound": binding is not None,
+        "bound": target is not None,
+        "target": _target_payload(target),
         "companion": _companion_payload(companion, conn),
+        "settings_url": SYSTEM_INBOX_SETTINGS_URL,
     }
 
 
@@ -514,41 +321,26 @@ async def start_float_ball(
     *,
     browser_session_id: str,
     openfocus_base_url: str,
-    client_host: str | None = None,
 ) -> dict:
-    binding, companion, conn, reason = _bound_connection(
-        grpc_server, browser_session_id=browser_session_id
-    )
-    if reason == "browser_not_bound" and _auto_bind_single_loopback_companion(
-        grpc_server,
-        browser_session_id=browser_session_id,
-        openfocus_base_url=openfocus_base_url,
-        client_host=client_host,
-    ):
-        binding, companion, conn, reason = _bound_connection(
-            grpc_server, browser_session_id=browser_session_id
-        )
-    if reason in {
-        "missing_browser_session",
-        "browser_not_bound",
-        "companion_missing",
-        "companion_offline",
-    }:
-        with session_scope() as s:
-            challenge = create_bind_challenge(
-                s,
-                browser_session_id=browser_session_id,
-                openfocus_base_url=openfocus_base_url,
-            )
-        challenge["reason"] = reason
-        return challenge
+    target, companion, conn, reason = _target_connection(grpc_server)
+    if reason == "target_required":
+        return {
+            "ok": False,
+            "mode": "target_required",
+            "reason": reason,
+            "settings_url": SYSTEM_INBOX_SETTINGS_URL,
+            "target": _target_payload(target),
+            "companion": {},
+        }
     if reason != "ready" or conn is None:
         return {
             "ok": False,
             "mode": "web",
             "reason": reason,
-            "bound": binding is not None,
+            "bound": target is not None,
+            "target": _target_payload(target),
             "companion": _companion_payload(companion, conn),
+            "settings_url": SYSTEM_INBOX_SETTINGS_URL,
         }
     try:
         res = await conn.request_float_ball_start(
@@ -563,6 +355,7 @@ async def start_float_ball(
             "mode": "web",
             "reason": "grpc_error",
             "error": str(exc),
+            "target": _target_payload(target),
             "companion": _companion_payload(companion, conn),
         }
     backend = str(getattr(res, "backend", "") or "")
@@ -591,23 +384,25 @@ async def start_float_ball(
         "mode": "system",
         "reason": "started",
         "backend": backend,
+        "target": _target_payload(target),
         "companion": _companion_payload(companion, conn),
     }
 
 
 async def stop_float_ball(grpc_server: Any, *, browser_session_id: str) -> dict:
+    target, companion, conn, reason = _target_connection(grpc_server)
+    stop_browser_session_id = valid_browser_session_id(
+        str(getattr(target, "browser_session_id", "") or "")
+    ) or valid_browser_session_id(browser_session_id)
     with session_scope() as s:
         _remember_float_ball_state(
-            s, browser_session_id=browser_session_id, enabled=False
+            s, browser_session_id=stop_browser_session_id, enabled=False
         )
-    _binding, companion, conn, reason = _bound_connection(
-        grpc_server, browser_session_id=browser_session_id
-    )
     if reason != "ready" or conn is None:
         return {"ok": True, "mode": "web", "reason": reason}
     try:
         await conn.request_float_ball_stop(
-            browser_session_id=browser_session_id, timeout_seconds=5.0
+            browser_session_id=stop_browser_session_id, timeout_seconds=5.0
         )
     except CompanionGrpcError as exc:
         return {"ok": False, "mode": "web", "reason": "grpc_error", "error": str(exc)}
@@ -618,7 +413,7 @@ async def stop_float_ball(grpc_server: Any, *, browser_session_id: str) -> dict:
             agent="openfocus/system",
             task_id=None,
             payload={
-                "browser_session_id": browser_session_id,
+                "browser_session_id": stop_browser_session_id,
                 "companion_id": int(getattr(companion, "id", 0) or 0),
             },
             audit=False,
@@ -643,78 +438,71 @@ async def restore_desired_float_balls_for_companion(
             return 0
         if str(companion.status or "") != "active":
             return 0
-        rows = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.companion_id == cid,
-                BrowserCompanionBinding.float_ball_enabled.is_(True),
-            )
-            .order_by(BrowserCompanionBinding.updated_at.desc())
-            .all()
+        target = s.get(SystemInboxTarget, SYSTEM_INBOX_TARGET_ID)
+        if (
+            target is None
+            or int(target.companion_id or 0) != cid
+            or not bool(target.float_ball_enabled)
+        ):
+            return 0
+        browser_session_id = str(target.browser_session_id or "")
+        openfocus_base_url = str(target.float_ball_base_url or "")
+
+    sid = valid_browser_session_id(browser_session_id)
+    base_url = _base_url(openfocus_base_url)
+    if not sid:
+        return 0
+    try:
+        res = await conn.request_float_ball_start(
+            browser_session_id=sid,
+            openfocus_base_url=base_url,
+            summary_json=_summary_json(),
+            timeout_seconds=10.0,
         )
-        candidates = [
-            (str(x.browser_session_id or ""), str(x.float_ball_base_url or ""))
-            for x in rows
-        ]
-
-    restored = 0
-    for browser_session_id, openfocus_base_url in candidates:
-        sid = valid_browser_session_id(browser_session_id)
-        base_url = _base_url(openfocus_base_url)
-        if not sid:
-            continue
-        try:
-            res = await conn.request_float_ball_start(
-                browser_session_id=sid,
-                openfocus_base_url=base_url,
-                summary_json=_summary_json(),
-                timeout_seconds=10.0,
-            )
-            backend = str(getattr(res, "backend", "") or "")
-        except Exception as exc:
-            with session_scope() as s:
-                _remember_float_ball_state(
-                    s,
-                    browser_session_id=sid,
-                    enabled=True,
-                    error=str(exc),
-                )
-                event_service.record_event(
-                    s,
-                    kind="float_ball.restore_failed",
-                    agent="openfocus/system",
-                    task_id=None,
-                    payload={
-                        "browser_session_id": sid,
-                        "companion_id": cid,
-                        "error": str(exc),
-                    },
-                    audit=False,
-                )
-            continue
-
-        restored += 1
+        backend = str(getattr(res, "backend", "") or "")
+    except Exception as exc:
         with session_scope() as s:
             _remember_float_ball_state(
                 s,
                 browser_session_id=sid,
                 enabled=True,
-                openfocus_base_url=base_url,
-                backend=backend,
+                error=str(exc),
             )
             event_service.record_event(
                 s,
-                kind="float_ball.restored",
+                kind="float_ball.restore_failed",
                 agent="openfocus/system",
                 task_id=None,
                 payload={
                     "browser_session_id": sid,
                     "companion_id": cid,
-                    "backend": backend,
+                    "error": str(exc),
                 },
                 audit=False,
             )
-    return restored
+        return 0
+
+    with session_scope() as s:
+        _remember_float_ball_state(
+            s,
+            browser_session_id=sid,
+            enabled=True,
+            openfocus_base_url=base_url,
+            backend=backend,
+        )
+        event_service.record_event(
+            s,
+            kind="float_ball.restored",
+            agent="openfocus/system",
+            task_id=None,
+            payload={
+                "browser_session_id": sid,
+                "companion_id": cid,
+                "backend": backend,
+            },
+            audit=False,
+        )
+    return 1
 
 
 def record_float_ball_action(
@@ -737,3 +525,33 @@ def record_float_ball_action(
             audit=False,
         )
     return {"ok": True}
+
+
+def handle_float_ball_action(action_msg: Any) -> None:
+    try:
+        raw = str(getattr(action_msg, "payload_json", "") or "{}")
+        payload = json.loads(raw) if raw else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        record_float_ball_action(
+            browser_session_id=str(getattr(action_msg, "browser_session_id", "") or ""),
+            action=str(getattr(action_msg, "action", "") or ""),
+            payload=payload,
+        )
+    except Exception:
+        return
+
+
+def handle_companion_connected(companion_id: int, conn: Any) -> Any:
+    return restore_desired_float_balls_for_companion(
+        companion_id=int(companion_id or 0), conn=conn
+    )
+
+
+def install_float_ball_listeners_once() -> None:
+    global _LISTENER_INSTALLED
+    if _LISTENER_INSTALLED:
+        return
+    add_float_ball_action_listener(handle_float_ball_action)
+    add_companion_connected_listener(handle_companion_connected)
+    _LISTENER_INSTALLED = True

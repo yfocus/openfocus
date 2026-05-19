@@ -31,21 +31,18 @@ def create_router(*, grpc_server: CompanionGrpcServer) -> APIRouter:
         sid = _session_from_request(request, response)
         return float_ball_service.preflight_payload(grpc_server, browser_session_id=sid)
 
-    @router.post("/api/float_ball/bind")
-    def float_ball_bind(request: Request, response: Response) -> dict:
-        sid = _session_from_request(request, response)
-        from ...db import session_scope
+    @router.get("/api/float_ball/target")
+    def float_ball_target() -> dict:
+        return float_ball_service.target_payload(grpc_server)
 
-        with session_scope() as s:
-            return float_ball_service.create_bind_challenge(
-                s,
-                browser_session_id=sid,
-                openfocus_base_url=str(request.base_url).rstrip("/"),
-            )
+    @router.post("/api/float_ball/target")
+    def float_ball_set_target(payload: dict) -> dict:
+        companion_id = int((payload or {}).get("companion_id") or 0)
+        return float_ball_service.set_target(grpc_server, companion_id=companion_id)
 
-    @router.get("/api/float_ball/bind_status")
-    def float_ball_bind_status(nonce: str) -> dict:
-        return float_ball_service.bind_status(nonce=nonce)
+    @router.delete("/api/float_ball/target")
+    async def float_ball_clear_target() -> dict:
+        return await float_ball_service.clear_target(grpc_server)
 
     @router.post("/api/float_ball/start")
     async def float_ball_start(request: Request, response: Response) -> dict:
@@ -54,7 +51,6 @@ def create_router(*, grpc_server: CompanionGrpcServer) -> APIRouter:
             grpc_server,
             browser_session_id=sid,
             openfocus_base_url=str(request.base_url).rstrip("/"),
-            client_host=request.client.host if request.client else None,
         )
 
     @router.post("/api/float_ball/stop")

@@ -218,13 +218,9 @@ AI 时代的个人工作模式正在从“亲力亲为”切换为“提出目�
 - `companions`
   - `id, device_id, name, base_url, status, auth_token, last_seen_at, pair_attempt_window_start, pair_attempt_count, created_at, updated_at`
 
-- `browser_companion_bindings`
-  - `id, browser_session_id, companion_id, trust_method, created_at, last_verified_at, updated_at`
-  - 说明：由 `openfocus://bind` nonce proof 建立，表示当前 browser session 已可信绑定到本机 Companion；系统级悬浮球只能使用该绑定。
-
-- `browser_bind_challenges`
-  - `id, nonce_hash, browser_session_id, status, companion_id, created_at, expires_at, confirmed_at, updated_at`
-  - 说明：短期 nonce challenge，只保存 nonce hash；Companion 通过既有 gRPC 长连接回传 proof 后确认。
+- `system_inbox_targets`
+  - `id, companion_id, browser_session_id, float_ball_enabled, float_ball_base_url, float_ball_backend, float_ball_last_started_at, float_ball_last_error, created_at, updated_at`
+  - 说明：单例配置，记录用户在 Companion 页面显式选择的 System Inbox 目标 Companion；系统级悬浮球只会通过该目标 Companion 启动或恢复。
 
 ### Memory 文件布局与生命周期
 

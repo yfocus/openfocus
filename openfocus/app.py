@@ -77,7 +77,7 @@ COMPANION_GRPC = CompanionGrpcServer()
 streaming.install_agent_chunk_listener_once()
 streaming.install_terminal_listener_once()
 streaming.install_runtime_signal_listener_once()
-float_ball_service.install_browser_bind_listener_once()
+float_ball_service.install_float_ball_listeners_once()
 
 
 # App-level dependency wiring. Business rules live in domain services;
@@ -225,7 +225,7 @@ def _startup() -> None:
 async def _startup_companion_grpc() -> None:
     streaming.install_agent_chunk_listener_once()
     streaming.install_runtime_signal_listener_once()
-    float_ball_service.install_browser_bind_listener_once()
+    float_ball_service.install_float_ball_listeners_once()
     # 测试里可能希望手动控制启动/端口
     if os.environ.get("OPENFOCUS_GRPC_AUTOSTART", "1") == "0":
         return

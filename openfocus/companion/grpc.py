@@ -35,7 +35,6 @@ class CompanionGrpcError(RuntimeError):
 _AGENT_CHUNK_LISTENERS: list[Callable[[pb2.AgentChunk], None]] = []
 _TERMINAL_OUTPUT_LISTENERS: list[Callable[[pb2.TerminalOutput], None]] = []
 _RUNTIME_SIGNAL_LISTENERS: list[Callable[[pb2.AgentRuntimeSignal], None]] = []
-_BROWSER_BIND_PROOF_LISTENERS: list[Callable[[pb2.BrowserBindProof], None]] = []
 _FLOAT_BALL_ACTION_LISTENERS: list[Callable[[pb2.FloatBallAction], None]] = []
 _COMPANION_CONNECTED_LISTENERS: list[Callable[[int, Any], Any]] = []
 
@@ -54,12 +53,6 @@ def add_runtime_signal_listener(
     listener: Callable[[pb2.AgentRuntimeSignal], None],
 ) -> None:
     _RUNTIME_SIGNAL_LISTENERS.append(listener)
-
-
-def add_browser_bind_proof_listener(
-    listener: Callable[[pb2.BrowserBindProof], None],
-) -> None:
-    _BROWSER_BIND_PROOF_LISTENERS.append(listener)
 
 
 def add_float_ball_action_listener(
@@ -687,16 +680,6 @@ class CompanionConnection:
             for cb in list(_RUNTIME_SIGNAL_LISTENERS):
                 try:
                     cb(sig)
-                except Exception:
-                    pass
-            return
-        if which == "browser_bind_proof":
-            proof: pb2.BrowserBindProof = msg.browser_bind_proof
-            if not int(proof.companion_id or 0):
-                proof.companion_id = int(self.companion_id)
-            for cb in list(_BROWSER_BIND_PROOF_LISTENERS):
-                try:
-                    cb(proof)
                 except Exception:
                     pass
             return

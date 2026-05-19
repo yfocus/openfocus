@@ -443,17 +443,14 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
-        "browser_companion_bindings",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column(
-            "browser_session_id", sa.String(length=64), nullable=False, unique=True
-        ),
+        "system_inbox_targets",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=False),
         sa.Column("companion_id", sa.Integer(), nullable=False),
         sa.Column(
-            "trust_method",
+            "browser_session_id",
             sa.String(length=64),
             nullable=False,
-            server_default="nonce_protocol",
+            server_default="",
         ),
         sa.Column(
             "float_ball_enabled",
@@ -481,44 +478,18 @@ def upgrade() -> None:
             server_default="",
         ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_verified_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index(
-        "ix_browser_companion_bindings_companion",
-        "browser_companion_bindings",
+        "ix_system_inbox_targets_companion",
+        "system_inbox_targets",
         ["companion_id"],
-    )
-    op.create_table(
-        "browser_bind_challenges",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("nonce_hash", sa.String(length=64), nullable=False, unique=True),
-        sa.Column("browser_session_id", sa.String(length=64), nullable=False),
-        sa.Column(
-            "status", sa.String(length=32), nullable=False, server_default="pending"
-        ),
-        sa.Column("companion_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("confirmed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.create_index(
-        "ix_browser_bind_challenges_session",
-        "browser_bind_challenges",
-        ["browser_session_id", "created_at"],
-    )
-    op.create_index(
-        "ix_browser_bind_challenges_status",
-        "browser_bind_challenges",
-        ["status", "expires_at"],
     )
 
 
 def downgrade() -> None:
     for table_name in [
-        "browser_bind_challenges",
-        "browser_companion_bindings",
+        "system_inbox_targets",
         "companions",
         "remote_terminal_outputs",
         "remote_terminal_sessions",

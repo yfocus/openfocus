@@ -306,15 +306,6 @@ message TerminalListSessionsResponse {
   string error = 4;
 }
 
-// Browser-to-Companion local proof for trusted system float ball binding.
-
-message BrowserBindProof {
-  string nonce = 1;
-  int64 companion_id = 2;
-  string protocol = 3;
-  int64 received_ts_unix_ms = 4;
-}
-
 // System float ball control surface.
 
 message FloatBallStartRequest {
@@ -390,6 +381,9 @@ message ServerToClient {
 }
 
 message ClientToServer {
+  reserved 50;
+  reserved "browser_bind_proof";
+
   oneof msg {
     Hello hello = 1;
     Pong pong = 2;
@@ -415,7 +409,6 @@ message ClientToServer {
     TerminalListSessionsResponse terminal_list_sessions_resp = 35;
     TerminalMouseModeResponse terminal_mouse_mode_resp = 36;
 
-    BrowserBindProof browser_bind_proof = 50;
     FloatBallStartResponse float_ball_start_resp = 51;
     FloatBallUpdateResponse float_ball_update_resp = 52;
     FloatBallStopResponse float_ball_stop_resp = 53;

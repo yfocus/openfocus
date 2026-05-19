@@ -62,18 +62,19 @@ Companion 是运行在本机（或远端工作机）上的常驻桥接进程，�
 
 > 注：浏览器不直连 Companion；浏览器只调用 OpenFocus API。OpenFocus 负责在控制面做鉴权、审计与状态机。
 
-### Browser 节点可信绑定与系统悬浮球
+### System Inbox 目标 Companion 与系统悬浮球
 
-系统级 `Inbox` 悬浮球必须先证明当前浏览器会话与某个本机 Companion 处在同一节点，不能只根据“存在在线 Companion”判断。OpenFocus 采用 nonce 证明绑定：
+系统级 `Inbox` 悬浮球由用户在 Companion 页面显式选择一个目标 Companion。OpenFocus 不再通过浏览器会话挑战码或本地协议跳转做本机证明。
 
-1. 浏览器点击 `Inbox` 后调用 `POST /api/float_ball/start`。
-2. 若当前 browser session 尚未绑定可用 Companion，OpenFocus 生成短期一次性 nonce，并返回 `openfocus://bind?...&nonce=...`。
-3. 本机 Companion 由系统协议处理器或 helper 接收到该 URL 后，通过本机 protocol socket 交给正在运行的 Companion 进程。
-4. Companion 使用既有 gRPC 长连接向 OpenFocus 回传 `BrowserBindProof(nonce, companion_id)`。
-5. OpenFocus 校验 nonce 未过期、Companion 已配对且在线后，写入 `browser_companion_bindings`。
-6. 只有绑定的 Companion 在线且声明 `system_float_ball` 能力时，OpenFocus 才下发 `FloatBallStartRequest`；否则浏览器回退到页面级悬浮球。
+1. 用户在 `/companions` 中通过开关把一个已配对、在线且声明 `system_float_ball` 能力的 Companion 设置为 System Inbox target；关闭该目标开关会取消目标设置。
+2. OpenFocus 将该选择写入 `system_inbox_targets`。
+3. 浏览器点击 `Inbox` 后调用 `POST /api/float_ball/start`。
+4. 若尚未设置目标 Companion，OpenFocus 返回 `target_required`，浏览器跳转到 `/companions?system_inbox=1` 让用户设置。
+5. 若目标 Companion 在线且仍声明 `system_float_ball` 能力，OpenFocus 通过既有 gRPC 长连接下发 `FloatBallStartRequest`。
+6. 若目标 Companion 缺失、离线或不支持该能力，浏览器不启动系统悬浮球，并展示对应错误状态。
+7. 取消目标设置时，OpenFocus 清除 `system_inbox_targets`，并在此前记录了运行中 helper 时 best-effort 向旧目标 Companion 下发 `FloatBallStopRequest`。
 
-Companion 不为浏览器暴露 HTTP 服务；自定义协议只负责把本机 nonce 送到 Companion，后续认证与命令仍走白名单 gRPC。
+Companion 不为浏览器暴露 HTTP 服务；系统悬浮球命令仍走白名单 gRPC。
 
 ## 安全模型（必须）
 

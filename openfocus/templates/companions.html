@@ -90,6 +90,35 @@
     .btn.pair:hover{ background: color-mix(in srgb, var(--primary) 90%, var(--background)); }
     .btn.code{ background: var(--muted-surface); color: var(--foreground); }
     .btn.code:hover{ background: var(--accent); }
+    .inbox-toggle-wrap{ min-height:36px; display:inline-flex; align-items:center; gap: 8px; color: var(--muted-foreground); font-size:12px; font-weight:600; }
+    .inbox-toggle-label{ white-space:nowrap; }
+    .inbox-toggle{
+      width: 44px;
+      height: 24px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--muted-surface);
+      padding: 2px;
+      cursor: pointer;
+      position: relative;
+      flex: 0 0 auto;
+    }
+    .inbox-toggle::after{
+      content: "";
+      position:absolute;
+      top: 3px;
+      left: 3px;
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      background: var(--muted-foreground);
+      transition: transform .14s ease, background .14s ease;
+    }
+    .inbox-toggle[aria-checked="true"]{ background: color-mix(in srgb, var(--success) 24%, transparent); border-color: color-mix(in srgb, var(--success) 48%, var(--border)); }
+    .inbox-toggle[aria-checked="true"]::after{ transform: translateX(20px); background: var(--success); }
+    .inbox-toggle:hover{ background: var(--accent); }
+    .inbox-toggle[aria-checked="true"]:hover{ background: color-mix(in srgb, var(--success) 30%, transparent); }
+    .inbox-toggle:disabled{ opacity: .65; cursor: default; }
     .btn.del{ background: color-mix(in srgb, var(--destructive) 12%, transparent); color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 45%, var(--border)); }
     .btn.del:hover{ background: color-mix(in srgb, var(--destructive) 18%, transparent); }
 
@@ -116,6 +145,9 @@
 
   <script>
     const STATE = {};
+    let SYSTEM_INBOX_TARGET = {};
+    const NEEDS_SYSTEM_INBOX_TARGET = new URLSearchParams(location.search).get('system_inbox') === '1';
+    let NEEDS_SYSTEM_INBOX_TARGET_PROMPTED = false;
 
     function esc(s){
       const x = String(s ?? '');
@@ -181,9 +213,14 @@
       if(btn) btn.disabled = true;
       box.innerHTML = '<span class="spin"></span> <span class="muted">loading...</span>';
       try{
-        const r = await fetch('/api/companions?limit=50');
+        const [r, targetR] = await Promise.all([
+          fetch('/api/companions?limit=50'),
+          fetch('/api/float_ball/target', { cache: 'no-store' }).catch(()=> null),
+        ]);
         if(!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
+        SYSTEM_INBOX_TARGET = targetR && targetR.ok ? await targetR.json().catch(()=> ({})) : {};
+        const targetId = Number((SYSTEM_INBOX_TARGET.companion && SYSTEM_INBOX_TARGET.companion.id) || (SYSTEM_INBOX_TARGET.target && SYSTEM_INBOX_TARGET.target.companion_id) || 0);
         const items = (data && data.items) ? data.items : [];
         if(!items.length){ box.textContent = 'No companion. Start the companion process and register to OpenFocus.'; return; }
         box.innerHTML = items.map((it)=>{
@@ -193,6 +230,9 @@
           const st = normalizeStatus(status);
           const title = (it.name || it.device_id || 'companion');
           const created = fmtYmd(it.created_at);
+          const isInboxTarget = Number(it.id || 0) === targetId;
+          const canSetInbox = st.key === 'active';
+          const canShowInboxToggle = canSetInbox || isInboxTarget;
           return `
             <div class="comp-item" data-status="${esc(st.key)}">
               <div class="comp-left">
@@ -219,12 +259,31 @@
                       <div class="pair-inline-err js-pair-err"></div>
                     </div>
                   ` : ''}
+                  ${(!st.waiting && canShowInboxToggle) ? `
+                    <div class="inbox-toggle-wrap">
+                      <span class="inbox-toggle-label">System Inbox</span>
+                      <button
+                        type="button"
+                        class="inbox-toggle js-system-inbox-target"
+                        role="switch"
+                        aria-checked="${isInboxTarget ? 'true' : 'false'}"
+                        aria-label="${isInboxTarget ? 'Cancel System Inbox target' : 'Set as System Inbox target'}"
+                        title="${isInboxTarget ? 'Cancel System Inbox target' : 'Set as System Inbox target'}"
+                        data-id="${esc(it.id)}"
+                        data-selected="${isInboxTarget ? '1' : '0'}"
+                      ></button>
+                    </div>
+                  ` : ''}
                   <button type="button" class="btn del js-del" data-id="${esc(it.id)}">Delete</button>
                 </div>
               </div>
             </div>
           `;
         }).join('');
+        if(NEEDS_SYSTEM_INBOX_TARGET && !NEEDS_SYSTEM_INBOX_TARGET_PROMPTED){
+          NEEDS_SYSTEM_INBOX_TARGET_PROMPTED = true;
+          toast('Choose a System Inbox Companion');
+        }
       }catch(e){
         box.textContent = 'Failed: ' + String(e && e.message ? e.message : e);
       }finally{
@@ -248,6 +307,34 @@
           }catch(err){
             toast('delete failed');
             alert('Delete failed: ' + String(err && err.message ? err.message : err));
+          }
+        })();
+        return;
+      }
+      const targetBtn = t.closest('.js-system-inbox-target');
+      if(targetBtn){
+        const id = String(targetBtn.getAttribute('data-id') || '').trim();
+        if(!id) return;
+        const selected = targetBtn.getAttribute('data-selected') === '1' || targetBtn.getAttribute('aria-checked') === 'true';
+        (async ()=>{
+          try{
+            targetBtn.disabled = true;
+            const r = selected
+              ? await fetch('/api/float_ball/target', { method: 'DELETE' })
+              : await fetch('/api/float_ball/target', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ companion_id: Number(id) }),
+                });
+            if(!r.ok){
+              const txt = await r.text().catch(()=> '');
+              throw new Error(txt || ('HTTP ' + r.status));
+            }
+            toast(selected ? 'system inbox target canceled' : 'system inbox target set');
+            await refresh();
+          }catch(err){
+            targetBtn.disabled = false;
+            alert('Update System Inbox target failed: ' + String(err && err.message ? err.message : err));
           }
         })();
         return;

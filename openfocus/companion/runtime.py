@@ -19,7 +19,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import urllib.parse
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -1451,104 +1450,6 @@ class _TerminalManager:
         return bool(enabled)
 
 
-def _protocol_sock_path() -> Path:
-    configured = str(os.environ.get("OPENFOCUS_PROTOCOL_SOCK") or "").strip()
-    if configured:
-        p = Path(configured)
-    else:
-        instance_id = _openfocus_instance_id()
-        if instance_id == "default":
-            p = Path("~/.openfocus/protocol.sock")
-        else:
-            p = Path(f"~/.openfocus/protocol-{instance_id}.sock")
-    return p.expanduser()
-
-
-def send_protocol_url(url: str) -> bool:
-    payload = str(url or "").strip()
-    if not payload:
-        return False
-    sock_path = _protocol_sock_path()
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(2.0)
-            client.connect(str(sock_path))
-            client.sendall(payload.encode("utf-8")[:8192])
-        return True
-    except Exception as exc:
-        try:
-            LOG.error("openfocus protocol delivery failed: %s", exc)
-        except Exception:
-            pass
-        return False
-
-
-def _parse_bind_protocol_url(url: str) -> str:
-    raw = str(url or "").strip()
-    parsed = urllib.parse.urlparse(raw)
-    if parsed.scheme != "openfocus":
-        raise ValueError("unsupported protocol")
-    action = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    if action != "bind":
-        raise ValueError("unsupported openfocus action")
-    qs = urllib.parse.parse_qs(parsed.query)
-    nonce = str((qs.get("nonce") or [""])[0] or "").strip()
-    instance_id = str((qs.get("instance_id") or [""])[0] or "").strip()
-    if instance_id and _safe_instance_id(instance_id) != _openfocus_instance_id():
-        raise ValueError("protocol event belongs to another OpenFocus instance")
-    if not nonce:
-        raise ValueError("nonce is required")
-    return nonce
-
-
-async def _handle_protocol_client(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    out_q: asyncio.Queue[pb2.ClientToServer],
-) -> None:
-    try:
-        data = await reader.read(8192)
-        nonce = _parse_bind_protocol_url(data.decode("utf-8", errors="replace"))
-        await out_q.put(
-            pb2.ClientToServer(
-                browser_bind_proof=pb2.BrowserBindProof(
-                    nonce=nonce,
-                    companion_id=int(getattr(RUNTIME, "server_companion_id", 0) or 0),
-                    protocol="openfocus://",
-                    received_ts_unix_ms=_now_ms(),
-                )
-            )
-        )
-    except Exception as exc:
-        try:
-            LOG.warning("openfocus protocol event ignored: %s", exc)
-        except Exception:
-            pass
-    finally:
-        with contextlib.suppress(Exception):
-            writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
-
-
-async def _start_protocol_server(
-    out_q: asyncio.Queue[pb2.ClientToServer],
-) -> asyncio.AbstractServer:
-    sock_path = _protocol_sock_path()
-    try:
-        sock_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    with contextlib.suppress(FileNotFoundError):
-        sock_path.unlink()
-    server = await asyncio.start_unix_server(
-        lambda r, w: _handle_protocol_client(r, w, out_q), path=str(sock_path)
-    )
-    with contextlib.suppress(Exception):
-        sock_path.chmod(0o600)
-    return server
-
-
 @dataclass
 class _FloatBallSession:
     browser_session_id: str
@@ -1890,7 +1791,6 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
     term_mgr = _TerminalManager()
     float_mgr = _FloatBallManager()
     hook_server: asyncio.AbstractServer | None = None
-    protocol_server: asyncio.AbstractServer | None = None
     hook_spool_task: asyncio.Task | None = None
     connected = False
     connected_at: float | None = None
@@ -1919,13 +1819,6 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
     except Exception as e:
         try:
             LOG.warning("OpenFocus hook socket 启动失败：%s", e)
-        except Exception:
-            pass
-    try:
-        protocol_server = await _start_protocol_server(out_q)
-    except Exception as e:
-        try:
-            LOG.warning("OpenFocus protocol socket 启动失败：%s", e)
         except Exception:
             pass
     hook_spool_task = asyncio.create_task(
@@ -2434,22 +2327,12 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
                 hook_spool_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await hook_spool_task
-            if protocol_server is not None:
-                protocol_server.close()
-                with contextlib.suppress(Exception):
-                    await protocol_server.wait_closed()
             with contextlib.suppress(Exception):
                 await float_mgr.stop_all()
             with contextlib.suppress(Exception):
                 sock_path = _hook_sock_path()
                 if sock_path.exists() and stat.S_ISSOCK(sock_path.stat().st_mode):
                     sock_path.unlink()
-            with contextlib.suppress(Exception):
-                proto_sock_path = _protocol_sock_path()
-                if proto_sock_path.exists() and stat.S_ISSOCK(
-                    proto_sock_path.stat().st_mode
-                ):
-                    proto_sock_path.unlink()
 
 
 def _print_banner() -> None:

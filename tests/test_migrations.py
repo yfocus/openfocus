@@ -109,17 +109,18 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     assert "agent_runtime_sessions" in tables
     assert "agent_turns" in tables
     assert "task_agent_activity" in tables
-    assert "browser_companion_bindings" in tables
-    assert "browser_bind_challenges" in tables
+    assert "system_inbox_targets" in tables
+    assert "browser_companion_bindings" not in tables
+    assert "browser_bind_challenges" not in tables
     assert version == "20260512_0001"
     with engine.begin() as conn:
-        browser_binding_cols = {
+        system_inbox_cols = {
             r[1]
-            for r in conn.exec_driver_sql(
-                "PRAGMA table_info(browser_companion_bindings)"
-            )
+            for r in conn.exec_driver_sql("PRAGMA table_info(system_inbox_targets)")
         }
-    assert {"float_ball_enabled", "float_ball_base_url"}.issubset(browser_binding_cols)
+    assert {"companion_id", "float_ball_enabled", "float_ball_base_url"}.issubset(
+        system_inbox_cols
+    )
 
 
 def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
@@ -196,15 +197,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
             r[1]
             for r in conn.exec_driver_sql("PRAGMA table_info(agent_runtime_sessions)")
         }
-        browser_binding_cols = {
+        system_inbox_cols = {
             r[1]
-            for r in conn.exec_driver_sql(
-                "PRAGMA table_info(browser_companion_bindings)"
-            )
-        }
-        browser_challenge_cols = {
-            r[1]
-            for r in conn.exec_driver_sql("PRAGMA table_info(browser_bind_challenges)")
+            for r in conn.exec_driver_sql("PRAGMA table_info(system_inbox_targets)")
         }
         migration_ids = {
             str(r[0]) for r in conn.execute(text("SELECT id FROM schema_migrations"))
@@ -278,18 +273,14 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         runtime_session_cols
     )
     assert {
-        "browser_session_id",
         "companion_id",
-        "trust_method",
+        "browser_session_id",
         "float_ball_enabled",
         "float_ball_base_url",
         "float_ball_backend",
         "float_ball_last_started_at",
         "float_ball_last_error",
-    }.issubset(browser_binding_cols)
-    assert {"nonce_hash", "browser_session_id", "status", "expires_at"}.issubset(
-        browser_challenge_cols
-    )
+    }.issubset(system_inbox_cols)
     assert terminal_rows[0][1:] == ("agent_space", 12, "task-public-id")
     assert terminal_rows[1][1:] == ("inspiration_space", 34, None)
     assert task_public_id_col[3] == 0
@@ -303,5 +294,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert migrations.AGENT_SPACE_PROMPTS_MIGRATION_ID in migration_ids
     assert migrations.AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID in migration_ids
     assert migrations.AGENT_ACTIVITY_MIGRATION_ID in migration_ids
-    assert migrations.FLOAT_BALL_BINDING_MIGRATION_ID in migration_ids
-    assert migrations.FLOAT_BALL_RESTORE_STATE_MIGRATION_ID in migration_ids
+    assert migrations.SYSTEM_INBOX_TARGET_MIGRATION_ID in migration_ids

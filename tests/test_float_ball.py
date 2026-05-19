@@ -5,10 +5,12 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 
 from openfocus.db import session_scope
 from openfocus.domains.float_ball import service as float_ball_service
-from openfocus.models import BrowserCompanionBinding, Companion, Event
+from openfocus.models import Companion, Event, SystemInboxTarget
 
 
 class _Registry:
@@ -55,54 +57,61 @@ def _paired_companion() -> int:
         return int(comp.id)
 
 
-def test_float_ball_preflight_requires_trusted_browser_binding() -> None:
+def _set_target(companion_id: int, **kwargs) -> None:
+    with session_scope() as s:
+        s.add(
+            SystemInboxTarget(
+                id=float_ball_service.SYSTEM_INBOX_TARGET_ID,
+                companion_id=companion_id,
+                **kwargs,
+            )
+        )
+
+
+def test_float_ball_preflight_requires_system_inbox_target() -> None:
     payload = float_ball_service.preflight_payload(
         _Grpc(conn=_FloatBallConn()), browser_session_id="browser-session-id-12345"
     )
 
     assert payload["mode"] == "web"
-    assert payload["reason"] == "browser_not_bound"
-    assert payload["bound"] is False
+    assert payload["reason"] == "target_required"
+    assert payload["target"]["set"] is False
+    assert payload["settings_url"] == "/companions?system_inbox=1"
 
 
-def test_nonce_proof_confirms_binding_to_paired_companion() -> None:
+def test_set_system_inbox_target_requires_capability() -> None:
     cid = _paired_companion()
-    browser_session_id = "browser-session-id-12345"
+    conn = SimpleNamespace(capabilities=["terminal"])
+
+    with pytest.raises(HTTPException):
+        float_ball_service.set_target(_Grpc(conn=conn), companion_id=cid)
+
     with session_scope() as s:
-        challenge = float_ball_service.create_bind_challenge(
-            s,
-            browser_session_id=browser_session_id,
-            openfocus_base_url="http://testserver",
+        assert (
+            s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID) is None
         )
-    nonce = challenge["bind"]["nonce"]
-
-    result = float_ball_service.confirm_browser_bind_nonce(
-        nonce=nonce, companion_id=cid
-    )
-
-    assert result["ok"] is True
-    assert result["companion_id"] == cid
-    with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(BrowserCompanionBinding.browser_session_id == browser_session_id)
-            .one()
-        )
-        assert binding.companion_id == cid
-        assert binding.trust_method == "nonce_protocol"
 
 
-def test_float_ball_preflight_checks_capability_after_binding() -> None:
+def test_set_system_inbox_target_records_target() -> None:
     cid = _paired_companion()
+    conn = _FloatBallConn()
+
+    payload = float_ball_service.set_target(_Grpc(conn=conn), companion_id=cid)
+
+    assert payload["ok"] is True
+    assert payload["reason"] == "ready"
+    assert payload["target"]["companion_id"] == cid
+    assert payload["companion"]["id"] == cid
     with session_scope() as s:
-        s.add(
-            BrowserCompanionBinding(
-                browser_session_id="browser-session-id-12345",
-                companion_id=cid,
-                trust_method="nonce_protocol",
-                last_verified_at=dt.datetime.now(dt.timezone.utc),
-            )
-        )
+        target = s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
+        assert target is not None
+        assert target.companion_id == cid
+        assert s.query(Event).filter(Event.kind == "float_ball.target_set").count() == 1
+
+
+def test_float_ball_preflight_checks_capability_after_target_selection() -> None:
+    cid = _paired_companion()
+    _set_target(cid)
 
     conn = SimpleNamespace(capabilities=["terminal"])
     payload = float_ball_service.preflight_payload(
@@ -111,22 +120,14 @@ def test_float_ball_preflight_checks_capability_after_binding() -> None:
 
     assert payload["mode"] == "web"
     assert payload["reason"] == "unsupported_capability"
-    assert payload["bound"] is True
+    assert payload["target"]["set"] is True
 
 
-def test_float_ball_start_uses_bound_capable_companion() -> None:
+def test_float_ball_start_uses_selected_target_companion() -> None:
     import asyncio
 
     cid = _paired_companion()
-    with session_scope() as s:
-        s.add(
-            BrowserCompanionBinding(
-                browser_session_id="browser-session-id-12345",
-                companion_id=cid,
-                trust_method="nonce_protocol",
-                last_verified_at=dt.datetime.now(dt.timezone.utc),
-            )
-        )
+    _set_target(cid)
     conn = _FloatBallConn()
 
     async def _run() -> dict:
@@ -146,36 +147,48 @@ def test_float_ball_start_uses_bound_capable_companion() -> None:
     assert conn.started[0]["openfocus_base_url"] == "http://testserver"
     assert "summary_json" in conn.started[0]
     with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
-            )
-            .one()
+        target = s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
+        assert target.float_ball_enabled is True
+        assert target.browser_session_id == "browser-session-id-12345"
+        assert target.float_ball_base_url == "http://testserver"
+        assert target.float_ball_backend == "test"
+        assert target.float_ball_last_started_at is not None
+        assert target.float_ball_last_error == ""
+
+
+def test_float_ball_start_without_target_redirects_to_companions() -> None:
+    import asyncio
+
+    _paired_companion()
+    conn = _FloatBallConn()
+
+    async def _run() -> dict:
+        return await float_ball_service.start_float_ball(
+            _Grpc(conn=conn),
+            browser_session_id="browser-session-id-12345",
+            openfocus_base_url="http://127.0.0.1:8001",
         )
-        assert binding.float_ball_enabled is True
-        assert binding.float_ball_base_url == "http://testserver"
-        assert binding.float_ball_backend == "test"
-        assert binding.float_ball_last_started_at is not None
-        assert binding.float_ball_last_error == ""
+
+    payload = asyncio.run(_run())
+
+    assert payload["ok"] is False
+    assert payload["mode"] == "target_required"
+    assert payload["reason"] == "target_required"
+    assert payload["settings_url"] == "/companions?system_inbox=1"
+    assert not conn.started
 
 
 def test_float_ball_stop_clears_persisted_restore_intent_when_offline() -> None:
     import asyncio
 
     cid = _paired_companion()
-    with session_scope() as s:
-        s.add(
-            BrowserCompanionBinding(
-                browser_session_id="browser-session-id-12345",
-                companion_id=cid,
-                trust_method="nonce_protocol",
-                float_ball_enabled=True,
-                float_ball_base_url="http://testserver",
-                float_ball_backend="test",
-                last_verified_at=dt.datetime.now(dt.timezone.utc),
-            )
-        )
+    _set_target(
+        cid,
+        browser_session_id="browser-session-id-12345",
+        float_ball_enabled=True,
+        float_ball_base_url="http://testserver",
+        float_ball_backend="test",
+    )
 
     async def _run() -> dict:
         return await float_ball_service.stop_float_ball(
@@ -185,34 +198,23 @@ def test_float_ball_stop_clears_persisted_restore_intent_when_offline() -> None:
     payload = asyncio.run(_run())
 
     assert payload["ok"] is True
-    assert payload["reason"] == "companion_offline"
+    assert payload["reason"] == "target_companion_offline"
     with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
-            )
-            .one()
-        )
-        assert binding.float_ball_enabled is False
+        target = s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
+        assert target.float_ball_enabled is False
 
 
 def test_restore_desired_float_ball_for_reconnected_companion() -> None:
     import asyncio
 
     cid = _paired_companion()
-    with session_scope() as s:
-        s.add(
-            BrowserCompanionBinding(
-                browser_session_id="browser-session-id-12345",
-                companion_id=cid,
-                trust_method="nonce_protocol",
-                float_ball_enabled=True,
-                float_ball_base_url="http://testserver",
-                float_ball_backend="test",
-                last_verified_at=dt.datetime.now(dt.timezone.utc),
-            )
-        )
+    _set_target(
+        cid,
+        browser_session_id="browser-session-id-12345",
+        float_ball_enabled=True,
+        float_ball_base_url="http://testserver",
+        float_ball_backend="test",
+    )
     conn = _FloatBallConn()
 
     restored = asyncio.run(
@@ -226,180 +228,58 @@ def test_restore_desired_float_ball_for_reconnected_companion() -> None:
     assert conn.started[0]["browser_session_id"] == "browser-session-id-12345"
     assert conn.started[0]["openfocus_base_url"] == "http://testserver"
     with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
-            )
-            .one()
-        )
-        assert binding.float_ball_enabled is True
-        assert binding.float_ball_last_error == ""
+        target = s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
+        assert target.float_ball_enabled is True
+        assert target.float_ball_last_error == ""
         assert s.query(Event).filter(Event.kind == "float_ball.restored").count() == 1
 
 
-def test_float_ball_start_auto_binds_single_loopback_companion() -> None:
-    import asyncio
+@pytest.mark.anyio
+async def test_float_ball_target_routes_drive_system_inbox_flow() -> None:
+    from fastapi import FastAPI
+
+    from openfocus.web.routes.float_ball import create_router
 
     cid = _paired_companion()
     conn = _FloatBallConn()
+    app = FastAPI()
+    app.include_router(create_router(grpc_server=_Grpc(conn=conn)))
 
-    async def _run() -> dict:
-        return await float_ball_service.start_float_ball(
-            _Grpc(conn=conn),
-            browser_session_id="browser-session-id-12345",
-            openfocus_base_url="http://127.0.0.1:8001",
-            client_host="127.0.0.1",
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        target_res = await client.get("/api/float_ball/target")
+        assert target_res.status_code == 200
+        assert target_res.json()["reason"] == "target_required"
+
+        missing_start = await client.post("/api/float_ball/start")
+        assert missing_start.status_code == 200
+        missing_payload = missing_start.json()
+        assert missing_payload["mode"] == "target_required"
+        assert missing_payload["settings_url"] == "/companions?system_inbox=1"
+        assert not conn.started
+
+        set_res = await client.post(
+            "/api/float_ball/target", json={"companion_id": cid}
         )
+        assert set_res.status_code == 200
+        set_payload = set_res.json()
+        assert set_payload["reason"] == "ready"
+        assert set_payload["target"]["companion_id"] == cid
 
-    payload = asyncio.run(_run())
+        started = await client.post("/api/float_ball/start")
+        assert started.status_code == 200
+        assert started.json()["mode"] == "system"
+        assert len(conn.started) == 1
 
-    assert payload["ok"] is True
-    assert payload["mode"] == "system"
-    assert payload["backend"] == "test"
-    assert conn.started
-    with session_scope() as s:
-        binding = (
-            s.query(BrowserCompanionBinding)
-            .filter(
-                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
+        cleared = await client.delete("/api/float_ball/target")
+        assert cleared.status_code == 200
+        clear_payload = cleared.json()
+        assert clear_payload["target"]["set"] is False
+        assert clear_payload["stop_requested"] is True
+        assert clear_payload["stopped"] is True
+        assert len(conn.stopped) == 1
+        with session_scope() as s:
+            assert (
+                s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
+                is None
             )
-            .one()
-        )
-        assert binding.companion_id == cid
-        assert binding.trust_method == "loopback_auto"
-
-
-def test_float_ball_start_requires_protocol_binding_for_non_loopback_browser() -> None:
-    import asyncio
-
-    _paired_companion()
-    conn = _FloatBallConn()
-
-    async def _run() -> dict:
-        return await float_ball_service.start_float_ball(
-            _Grpc(conn=conn),
-            browser_session_id="browser-session-id-12345",
-            openfocus_base_url="http://127.0.0.1:8001",
-            client_host="192.168.1.20",
-        )
-
-    payload = asyncio.run(_run())
-
-    assert payload["mode"] == "bind_required"
-    assert payload["reason"] == "browser_not_bound"
-    assert not conn.started
-
-
-def test_float_ball_nonce_protocol_binding_and_start_via_grpc(tmp_path) -> None:
-    import asyncio
-    import os
-    import socket
-    import tempfile
-    import uuid
-
-    from httpx import ASGITransport, AsyncClient
-
-    async def _wait_until_companion_ready(client: AsyncClient) -> dict:
-        from openfocus.app import COMPANION_GRPC
-
-        deadline = asyncio.get_running_loop().time() + 2.0
-        last = None
-        while asyncio.get_running_loop().time() < deadline:
-            r = await client.get("/api/companions")
-            assert r.status_code == 200
-            items = r.json().get("items") or []
-            if items:
-                comp = items[0]
-                cid = int(comp.get("id") or 0)
-                if cid and COMPANION_GRPC.registry.get(cid) is not None:
-                    return comp
-            last = items
-            await asyncio.sleep(0.02)
-        raise AssertionError(f"companion not ready, last={last}")
-
-    async def _run() -> None:
-        os.environ["OPENFOCUS_COMPANION_STATE"] = str(tmp_path / "companion_state.json")
-        os.environ["OPENFOCUS_TEST_PAIRING_CODE"] = "A1B2C3D4E5"
-        os.environ["OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND"] = "test"
-        short_sock_dir = tempfile.gettempdir()
-        os.environ["OPENFOCUS_HOOK_SOCK"] = os.path.join(
-            short_sock_dir, f"of-hook-{uuid.uuid4().hex}.sock"
-        )
-        os.environ["OPENFOCUS_PROTOCOL_SOCK"] = os.path.join(
-            short_sock_dir, f"of-proto-{uuid.uuid4().hex}.sock"
-        )
-        os.environ["OPENFOCUS_GRPC_AUTOSTART"] = "0"
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
-        except PermissionError:
-            pytest.skip("sandbox does not allow binding localhost sockets")
-        os.environ["OPENFOCUS_GRPC_PORT"] = str(port)
-
-        from openfocus.app import COMPANION_GRPC, app
-        from openfocus.companion import run_companion
-        from openfocus.companion.runtime import send_protocol_url
-
-        await COMPANION_GRPC.start()
-        assert COMPANION_GRPC.bound_addr
-        stop = asyncio.Event()
-        comp_task = asyncio.create_task(
-            run_companion(grpc_addr=COMPANION_GRPC.bound_addr, stop_event=stop)
-        )
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(
-                transport=transport, base_url="http://testserver"
-            ) as client:
-                comp = await _wait_until_companion_ready(client)
-                cid = int(comp["id"])
-                r = await client.post(f"/api/companions/{cid}/pairing_code")
-                assert r.status_code == 200
-                r = await client.post(
-                    f"/api/companions/{cid}/pair", json={"code": "A1B2C3D4E5"}
-                )
-                assert r.status_code == 200
-
-                r = await client.post("/api/float_ball/start")
-                assert r.status_code == 200
-                first = r.json()
-                assert first["mode"] == "bind_required"
-                bind = first["bind"]
-                assert send_protocol_url(bind["open_url"]) is True
-
-                deadline = asyncio.get_running_loop().time() + 2.0
-                status = {}
-                while asyncio.get_running_loop().time() < deadline:
-                    r = await client.get(
-                        "/api/float_ball/bind_status",
-                        params={"nonce": bind["nonce"]},
-                    )
-                    assert r.status_code == 200
-                    status = r.json()
-                    if status.get("status") == "confirmed":
-                        break
-                    await asyncio.sleep(0.02)
-                assert status.get("status") == "confirmed"
-                assert status.get("companion_id") == cid
-
-                r = await client.post("/api/float_ball/start")
-                assert r.status_code == 200
-                started = r.json()
-                assert started["ok"] is True
-                assert started["mode"] == "system"
-                assert started["backend"] == "test"
-        finally:
-            stop.set()
-            await asyncio.wait_for(comp_task, timeout=5.0)
-            await COMPANION_GRPC.stop()
-            for key in (
-                "OPENFOCUS_TEST_PAIRING_CODE",
-                "OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND",
-                "OPENFOCUS_HOOK_SOCK",
-                "OPENFOCUS_PROTOCOL_SOCK",
-            ):
-                os.environ.pop(key, None)
-
-    asyncio.run(_run())
