@@ -610,6 +610,19 @@ class BrowserCompanionBinding(Base):
     trust_method: Mapped[str] = mapped_column(
         String(64), nullable=False, default="nonce_protocol"
     )
+    float_ball_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    float_ball_base_url: Mapped[str] = mapped_column(
+        String(1024), nullable=False, default=""
+    )
+    float_ball_backend: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=""
+    )
+    float_ball_last_started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    float_ball_last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )

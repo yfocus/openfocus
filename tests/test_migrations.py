@@ -112,6 +112,14 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     assert "browser_companion_bindings" in tables
     assert "browser_bind_challenges" in tables
     assert version == "20260512_0001"
+    with engine.begin() as conn:
+        browser_binding_cols = {
+            r[1]
+            for r in conn.exec_driver_sql(
+                "PRAGMA table_info(browser_companion_bindings)"
+            )
+        }
+    assert {"float_ball_enabled", "float_ball_base_url"}.issubset(browser_binding_cols)
 
 
 def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
@@ -269,9 +277,16 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert {"session_id", "agent_runtime", "task_public_id", "state"}.issubset(
         runtime_session_cols
     )
-    assert {"browser_session_id", "companion_id", "trust_method"}.issubset(
-        browser_binding_cols
-    )
+    assert {
+        "browser_session_id",
+        "companion_id",
+        "trust_method",
+        "float_ball_enabled",
+        "float_ball_base_url",
+        "float_ball_backend",
+        "float_ball_last_started_at",
+        "float_ball_last_error",
+    }.issubset(browser_binding_cols)
     assert {"nonce_hash", "browser_session_id", "status", "expires_at"}.issubset(
         browser_challenge_cols
     )
@@ -289,3 +304,4 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
     assert migrations.AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID in migration_ids
     assert migrations.AGENT_ACTIVITY_MIGRATION_ID in migration_ids
     assert migrations.FLOAT_BALL_BINDING_MIGRATION_ID in migration_ids
+    assert migrations.FLOAT_BALL_RESTORE_STATE_MIGRATION_ID in migration_ids

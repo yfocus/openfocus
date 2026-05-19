@@ -9,3 +9,7 @@ Owns trusted browser-to-Companion binding and system float ball orchestration.
   fixed page-level floating bubble is not used as a fallback.
 - The navigation inbox can request/stop the system float ball. A successful start
   response means the system helper has acknowledged that its window is visible.
+- A successful system float ball start persists the browser session's desired
+  running state. When the bound Companion reconnects after an OpenFocus or
+  Companion reload, OpenFocus restores those desired system float balls without
+  requiring another browser click. An explicit stop clears that desired state.

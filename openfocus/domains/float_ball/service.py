@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from ...companion.grpc import (
     CompanionGrpcError,
     add_browser_bind_proof_listener,
+    add_companion_connected_listener,
     add_float_ball_action_listener,
 )
 from ...db import session_scope
@@ -85,6 +86,38 @@ def _companion_payload(companion: Companion | None, conn: Any | None = None) -> 
 def _base_url(value: str) -> str:
     raw = str(value or "").strip().rstrip("/")
     return raw or "http://127.0.0.1:8000"
+
+
+def _remember_float_ball_state(
+    s: Session,
+    *,
+    browser_session_id: str,
+    enabled: bool,
+    openfocus_base_url: str = "",
+    backend: str = "",
+    error: str = "",
+) -> None:
+    browser_session_id = valid_browser_session_id(browser_session_id)
+    if not browser_session_id:
+        return
+    binding = (
+        s.query(BrowserCompanionBinding)
+        .filter(BrowserCompanionBinding.browser_session_id == browser_session_id)
+        .one_or_none()
+    )
+    if binding is None:
+        return
+    now = utcnow()
+    binding.float_ball_enabled = bool(enabled)
+    if openfocus_base_url:
+        binding.float_ball_base_url = _base_url(openfocus_base_url)
+    if backend:
+        binding.float_ball_backend = str(backend or "").strip()
+    binding.float_ball_last_error = str(error or "")[:4000]
+    if enabled and not error:
+        binding.float_ball_last_started_at = now
+    binding.updated_at = now
+    s.add(binding)
 
 
 def _is_loopback_host(value: str | None) -> bool:
@@ -395,12 +428,19 @@ def handle_float_ball_action(action_msg: Any) -> None:
         return
 
 
+def handle_companion_connected(companion_id: int, conn: Any) -> Any:
+    return restore_desired_float_balls_for_companion(
+        companion_id=int(companion_id or 0), conn=conn
+    )
+
+
 def install_browser_bind_listener_once() -> None:
     global _BIND_LISTENER_INSTALLED
     if _BIND_LISTENER_INSTALLED:
         return
     add_browser_bind_proof_listener(handle_browser_bind_proof)
     add_float_ball_action_listener(handle_float_ball_action)
+    add_companion_connected_listener(handle_companion_connected)
     _BIND_LISTENER_INSTALLED = True
 
 
@@ -527,6 +567,13 @@ async def start_float_ball(
         }
     backend = str(getattr(res, "backend", "") or "")
     with session_scope() as s:
+        _remember_float_ball_state(
+            s,
+            browser_session_id=browser_session_id,
+            enabled=True,
+            openfocus_base_url=openfocus_base_url,
+            backend=backend,
+        )
         event_service.record_event(
             s,
             kind="float_ball.started",
@@ -549,6 +596,10 @@ async def start_float_ball(
 
 
 async def stop_float_ball(grpc_server: Any, *, browser_session_id: str) -> dict:
+    with session_scope() as s:
+        _remember_float_ball_state(
+            s, browser_session_id=browser_session_id, enabled=False
+        )
     _binding, companion, conn, reason = _bound_connection(
         grpc_server, browser_session_id=browser_session_id
     )
@@ -573,6 +624,97 @@ async def stop_float_ball(grpc_server: Any, *, browser_session_id: str) -> dict:
             audit=False,
         )
     return {"ok": True, "mode": "system", "reason": "stopped"}
+
+
+async def restore_desired_float_balls_for_companion(
+    *, companion_id: int, conn: Any
+) -> int:
+    cid = int(companion_id or 0)
+    if cid <= 0 or conn is None:
+        return 0
+    if not _has_system_float_ball_capability(getattr(conn, "capabilities", []) or []):
+        return 0
+
+    with session_scope() as s:
+        companion = s.get(Companion, cid)
+        if companion is None:
+            return 0
+        if not (companion.auth_token or "").strip():
+            return 0
+        if str(companion.status or "") != "active":
+            return 0
+        rows = (
+            s.query(BrowserCompanionBinding)
+            .filter(
+                BrowserCompanionBinding.companion_id == cid,
+                BrowserCompanionBinding.float_ball_enabled.is_(True),
+            )
+            .order_by(BrowserCompanionBinding.updated_at.desc())
+            .all()
+        )
+        candidates = [
+            (str(x.browser_session_id or ""), str(x.float_ball_base_url or ""))
+            for x in rows
+        ]
+
+    restored = 0
+    for browser_session_id, openfocus_base_url in candidates:
+        sid = valid_browser_session_id(browser_session_id)
+        base_url = _base_url(openfocus_base_url)
+        if not sid:
+            continue
+        try:
+            res = await conn.request_float_ball_start(
+                browser_session_id=sid,
+                openfocus_base_url=base_url,
+                summary_json=_summary_json(),
+                timeout_seconds=10.0,
+            )
+            backend = str(getattr(res, "backend", "") or "")
+        except Exception as exc:
+            with session_scope() as s:
+                _remember_float_ball_state(
+                    s,
+                    browser_session_id=sid,
+                    enabled=True,
+                    error=str(exc),
+                )
+                event_service.record_event(
+                    s,
+                    kind="float_ball.restore_failed",
+                    agent="openfocus/system",
+                    task_id=None,
+                    payload={
+                        "browser_session_id": sid,
+                        "companion_id": cid,
+                        "error": str(exc),
+                    },
+                    audit=False,
+                )
+            continue
+
+        restored += 1
+        with session_scope() as s:
+            _remember_float_ball_state(
+                s,
+                browser_session_id=sid,
+                enabled=True,
+                openfocus_base_url=base_url,
+                backend=backend,
+            )
+            event_service.record_event(
+                s,
+                kind="float_ball.restored",
+                agent="openfocus/system",
+                task_id=None,
+                payload={
+                    "browser_session_id": sid,
+                    "companion_id": cid,
+                    "backend": backend,
+                },
+                audit=False,
+            )
+    return restored
 
 
 def record_float_ball_action(

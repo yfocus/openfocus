@@ -17,6 +17,7 @@ AGENT_SPACE_PROMPTS_MIGRATION_ID = "20260516_agent_space_prompts"
 AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID = "20260517_agent_space_prompt_auto"
 AGENT_ACTIVITY_MIGRATION_ID = "20260517_agent_activity"
 FLOAT_BALL_BINDING_MIGRATION_ID = "20260517_float_ball_binding"
+FLOAT_BALL_RESTORE_STATE_MIGRATION_ID = "20260519_float_ball_restore_state"
 
 
 def _table_columns(conn: Any, table_name: str) -> list[str]:
@@ -582,6 +583,11 @@ def _migrate_float_ball_binding(conn: Any) -> None:
             "browser_session_id VARCHAR(64) NOT NULL UNIQUE, "
             "companion_id INTEGER NOT NULL, "
             "trust_method VARCHAR(64) NOT NULL DEFAULT 'nonce_protocol', "
+            "float_ball_enabled BOOLEAN NOT NULL DEFAULT 0, "
+            "float_ball_base_url VARCHAR(1024) NOT NULL DEFAULT '', "
+            "float_ball_backend VARCHAR(32) NOT NULL DEFAULT '', "
+            "float_ball_last_started_at DATETIME, "
+            "float_ball_last_error TEXT NOT NULL DEFAULT '', "
             "created_at DATETIME, "
             "last_verified_at DATETIME, "
             "updated_at DATETIME"
@@ -623,6 +629,45 @@ def _migrate_float_ball_binding(conn: Any) -> None:
     )
 
 
+def _migrate_float_ball_restore_state(conn: Any) -> None:
+    columns = set(_table_columns(conn, "browser_companion_bindings"))
+    if "float_ball_enabled" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE browser_companion_bindings "
+                "ADD COLUMN float_ball_enabled BOOLEAN NOT NULL DEFAULT 0"
+            )
+        )
+    if "float_ball_base_url" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE browser_companion_bindings "
+                "ADD COLUMN float_ball_base_url VARCHAR(1024) NOT NULL DEFAULT ''"
+            )
+        )
+    if "float_ball_backend" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE browser_companion_bindings "
+                "ADD COLUMN float_ball_backend VARCHAR(32) NOT NULL DEFAULT ''"
+            )
+        )
+    if "float_ball_last_started_at" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE browser_companion_bindings "
+                "ADD COLUMN float_ball_last_started_at DATETIME"
+            )
+        )
+    if "float_ball_last_error" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE browser_companion_bindings "
+                "ADD COLUMN float_ball_last_error TEXT NOT NULL DEFAULT ''"
+            )
+        )
+
+
 STARTUP_MIGRATIONS = [
     (STARTUP_SCHEMA_MIGRATION_ID, _migrate_startup_schema_baseline),
     (REMOTE_TERMINAL_OWNER_MIGRATION_ID, _migrate_remote_terminal_owner_fields),
@@ -636,4 +681,5 @@ STARTUP_MIGRATIONS = [
     (AGENT_SPACE_PROMPT_AUTO_MIGRATION_ID, _migrate_agent_space_prompt_auto),
     (AGENT_ACTIVITY_MIGRATION_ID, _migrate_agent_activity),
     (FLOAT_BALL_BINDING_MIGRATION_ID, _migrate_float_ball_binding),
+    (FLOAT_BALL_RESTORE_STATE_MIGRATION_ID, _migrate_float_ball_restore_state),
 ]

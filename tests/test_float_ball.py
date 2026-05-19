@@ -8,7 +8,7 @@ import pytest
 
 from openfocus.db import session_scope
 from openfocus.domains.float_ball import service as float_ball_service
-from openfocus.models import BrowserCompanionBinding, Companion
+from openfocus.models import BrowserCompanionBinding, Companion, Event
 
 
 class _Registry:
@@ -145,6 +145,97 @@ def test_float_ball_start_uses_bound_capable_companion() -> None:
     assert conn.started[0]["browser_session_id"] == "browser-session-id-12345"
     assert conn.started[0]["openfocus_base_url"] == "http://testserver"
     assert "summary_json" in conn.started[0]
+    with session_scope() as s:
+        binding = (
+            s.query(BrowserCompanionBinding)
+            .filter(
+                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
+            )
+            .one()
+        )
+        assert binding.float_ball_enabled is True
+        assert binding.float_ball_base_url == "http://testserver"
+        assert binding.float_ball_backend == "test"
+        assert binding.float_ball_last_started_at is not None
+        assert binding.float_ball_last_error == ""
+
+
+def test_float_ball_stop_clears_persisted_restore_intent_when_offline() -> None:
+    import asyncio
+
+    cid = _paired_companion()
+    with session_scope() as s:
+        s.add(
+            BrowserCompanionBinding(
+                browser_session_id="browser-session-id-12345",
+                companion_id=cid,
+                trust_method="nonce_protocol",
+                float_ball_enabled=True,
+                float_ball_base_url="http://testserver",
+                float_ball_backend="test",
+                last_verified_at=dt.datetime.now(dt.timezone.utc),
+            )
+        )
+
+    async def _run() -> dict:
+        return await float_ball_service.stop_float_ball(
+            _Grpc(conn=None), browser_session_id="browser-session-id-12345"
+        )
+
+    payload = asyncio.run(_run())
+
+    assert payload["ok"] is True
+    assert payload["reason"] == "companion_offline"
+    with session_scope() as s:
+        binding = (
+            s.query(BrowserCompanionBinding)
+            .filter(
+                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
+            )
+            .one()
+        )
+        assert binding.float_ball_enabled is False
+
+
+def test_restore_desired_float_ball_for_reconnected_companion() -> None:
+    import asyncio
+
+    cid = _paired_companion()
+    with session_scope() as s:
+        s.add(
+            BrowserCompanionBinding(
+                browser_session_id="browser-session-id-12345",
+                companion_id=cid,
+                trust_method="nonce_protocol",
+                float_ball_enabled=True,
+                float_ball_base_url="http://testserver",
+                float_ball_backend="test",
+                last_verified_at=dt.datetime.now(dt.timezone.utc),
+            )
+        )
+    conn = _FloatBallConn()
+
+    restored = asyncio.run(
+        float_ball_service.restore_desired_float_balls_for_companion(
+            companion_id=cid, conn=conn
+        )
+    )
+
+    assert restored == 1
+    assert len(conn.started) == 1
+    assert conn.started[0]["browser_session_id"] == "browser-session-id-12345"
+    assert conn.started[0]["openfocus_base_url"] == "http://testserver"
+    with session_scope() as s:
+        binding = (
+            s.query(BrowserCompanionBinding)
+            .filter(
+                BrowserCompanionBinding.browser_session_id == "browser-session-id-12345"
+            )
+            .one()
+        )
+        assert binding.float_ball_enabled is True
+        assert binding.float_ball_last_error == ""
+        assert s.query(Event).filter(Event.kind == "float_ball.restored").count() == 1
 
 
 def test_float_ball_start_auto_binds_single_loopback_companion() -> None:

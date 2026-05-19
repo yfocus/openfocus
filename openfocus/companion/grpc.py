@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import inspect
 import os
 import uuid
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 
 import grpc
 
@@ -36,6 +37,7 @@ _TERMINAL_OUTPUT_LISTENERS: list[Callable[[pb2.TerminalOutput], None]] = []
 _RUNTIME_SIGNAL_LISTENERS: list[Callable[[pb2.AgentRuntimeSignal], None]] = []
 _BROWSER_BIND_PROOF_LISTENERS: list[Callable[[pb2.BrowserBindProof], None]] = []
 _FLOAT_BALL_ACTION_LISTENERS: list[Callable[[pb2.FloatBallAction], None]] = []
+_COMPANION_CONNECTED_LISTENERS: list[Callable[[int, Any], Any]] = []
 
 
 def add_agent_chunk_listener(listener: Callable[[pb2.AgentChunk], None]) -> None:
@@ -64,6 +66,22 @@ def add_float_ball_action_listener(
     listener: Callable[[pb2.FloatBallAction], None],
 ) -> None:
     _FLOAT_BALL_ACTION_LISTENERS.append(listener)
+
+
+def add_companion_connected_listener(listener: Callable[[int, Any], Any]) -> None:
+    _COMPANION_CONNECTED_LISTENERS.append(listener)
+
+
+async def _notify_companion_connected(
+    companion_id: int, conn: "CompanionConnection"
+) -> None:
+    for cb in list(_COMPANION_CONNECTED_LISTENERS):
+        try:
+            result = cb(int(companion_id), conn)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
 
 
 @dataclass
@@ -857,6 +875,10 @@ class CompanionControlServicer(pb2_grpc.CompanionControlServicer):
             pb2.ServerToClient(welcome=pb2.Welcome(companion_id=assigned_id))
         )
         await conn.start_ping_loop()
+        asyncio.create_task(
+            _notify_companion_connected(assigned_id, conn),
+            name=f"companion-connected:{assigned_id}",
+        )
 
         async def _consume() -> None:
             try:
