@@ -740,6 +740,10 @@ def create_router(
                 "goal": goal,
                 "space": space,
                 "companion": companion,
+                "auto_start_agent_command": str(
+                    request.query_params.get("autostart") or ""
+                ).strip()
+                == "1",
                 "agent_prefix": _build_openfocus_ttyd_agent_prefix(
                     base_url=_openfocus_base_url(request),
                     task_public_id=str(task.public_id or ""),

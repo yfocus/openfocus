@@ -17,6 +17,8 @@ The Agent Spaces domain owns terminal ownership and local terminal lifecycle sta
 - Routes pass owner information and Companion results into the domain service.
 - AgentSpace prompt `enabled` controls prompt zone visibility.
 - AgentSpace prompt `auto_enabled` controls automatic prompt concatenation on AgentSpace terminal input submit; it must not create runtime activity by itself.
+- Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
+- When an AgentSpace is created with `start_agent_command`, only the automatically created default terminal should submit that command; user-created terminals must remain blank.
 
 ## Invariants
 

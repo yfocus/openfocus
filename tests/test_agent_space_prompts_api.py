@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import html
+import json
+import re
+
 from httpx import ASGITransport, AsyncClient
 
 
@@ -37,6 +41,7 @@ def test_terminal_prompt_zone_loads_custom_prompts():
     assert "rt-prompt-list" in css
     assert "rt-zone-divider" in css
     assert "rt-auto-switch" in css
+    assert "rt-prompt-row-single" not in css
     assert "min-height:32px" in css
     assert "text-align:left" in css
     assert "text-align:center" in css
@@ -143,6 +148,52 @@ def test_agent_space_prompt_crud_and_page_render():
             )
             assert r.status_code == 200
             assert r.json()["items"] == []
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_view_passes_task_basic_and_autostart_config():
+    async def _run() -> None:
+        import datetime as dt
+
+        from openfocus.app import app
+        from openfocus.db import session_scope
+        from openfocus.models import AgentSpace, Goal, Task
+
+        task_basic = "Investigate the failing prompt zone flow.\nRun focused tests."
+
+        with session_scope() as s:
+            g = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(g)
+            s.flush()
+            t = Task(goal_id=g.id, title="t", content=task_basic, status="todo")
+            s.add(t)
+            s.flush()
+            sp = AgentSpace(
+                task_public_id=t.public_id,
+                root_path="/tmp/openfocus-ws",
+                start_agent_command="coco -y",
+            )
+            s.add(sp)
+            s.flush()
+            task_public_id = str(t.public_id)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get(f"/tasks/{task_public_id}/agent_space?autostart=1")
+            assert r.status_code == 200
+
+        match = re.search(
+            r'id="agent-space-react-root"[^>]*data-config=\'([^\']+)\'',
+            r.text,
+        )
+        assert match is not None
+        config = json.loads(html.unescape(match.group(1)))
+        assert config["taskBasic"] == task_basic
+        assert config["startAgentCommand"] == "coco -y"
+        assert config["autoStartDefaultTerminal"] is True
 
     import asyncio
 

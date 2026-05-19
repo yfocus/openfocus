@@ -2055,8 +2055,8 @@
           throw new Error(txt || ('HTTP ' + r.status));
         }
         if(startAgentCommand) localStorage.setItem(AGENT_SPACE_LAST_START_COMMAND_KEY, startAgentCommand);
-        // 创建成功后跳转到 AgentSpace 页面
-        location.href = '/tasks/' + encodeURIComponent(pid) + '/agent_space';
+        // After creation, only the default terminal may auto-run the saved command once.
+        location.href = '/tasks/' + encodeURIComponent(pid) + '/agent_space' + (startAgentCommand ? '?autostart=1' : '');
       }catch(e){
         if(err) err.textContent = String(e && e.message ? e.message : e);
         toast('create failed');

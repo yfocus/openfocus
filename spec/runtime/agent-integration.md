@@ -183,12 +183,14 @@ Runtime events 是 OpenFocus 内部规范事件，通常来自 Companion gRPC，
 ### Prompt Zone Auto Prompts
 
 - AgentSpace prompt zone 中每个 prompt 都有独立 `auto` 开关。
+- AgentSpace prompt zone 中的内置 `send basic` 手动触发时把当前 Task 的 `content` 注入当前 terminal 输入区，不自动发送 Enter；其 `auto` 开启后参与 terminal input submit 的 auto prompt 拼接。
 - `agent_space_prompts.enabled` 控制 prompt 是否展示；`agent_space_prompts.auto_enabled` 控制自定义 prompt 是否在 AgentSpace terminal input submit 时自动拼接。
 - Terminal 中的 built-in prompt（例如 `report progress`、`pua`）也可以在 prompt zone 中开启 `auto`；这类开关属于浏览器侧偏好，运行时通过 `/api/agent_spaces/{space_id}/terminals/{terminal_id}/auto_prompts` 同步到 Core 的 ttyd input rewrite 状态。
 - 对 terminal agent：每次用户在 ttyd 中提交一条输入时，Core 在转发到 ttyd upstream 前把当前启用的 auto prompt 文本作为同一次 bracketed paste 追加到回车之前，行为等价于旧的 terminal-level Agent Mode，但粒度从 terminal 改为 prompt。
 - `report progress` 内置 prompt 只要求在重要进展时上报 `task.progress`，例如多步骤任务中某个步骤启动或完成、有重要中间结果、长期任务每约 5 分钟同步一次进展；不要求 agent/任务启动、结束、成功或失败类上报。
 - 对 Agent Session：`POST /api/agent_spaces/{space_id}/agent/sessions/{session_id}/send` 只注入 OpenFocus event spec prompt，不追加 Prompt Zone 自定义 prompts。
 - Auto prompt 只修改提示词内容，不创建 runtime activity，不写 business Task 状态，也不绕过用户对外部沟通、执行命令或任务完成的确认要求。
+- 创建 AgentSpace 后，如果该空间保存了 `start_agent_command`，前端自动创建的第一个默认 terminal 会提交该命令；用户显式点击 `+` 创建的新 terminal 不自动提交命令。
 
 ### 鉴权与可靠性
 

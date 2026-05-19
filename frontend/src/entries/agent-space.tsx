@@ -26,9 +26,11 @@ import type { FileEntry } from '../types/openfocus';
 type AgentSpaceConfig = {
   spaceId: number;
   taskPublicId: string;
+  taskBasic?: string;
   rootPath: string;
   agentPrefix?: string;
   startAgentCommand?: string;
+  autoStartDefaultTerminal?: boolean;
 };
 
 type TerminalApi = {
@@ -938,8 +940,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       const api = window.OpenFocusRemoteTerminal.mount(el, {
         spaceId: config.spaceId,
         taskPublicId: config.taskPublicId,
+        taskBasic: config.taskBasic || '',
         agentPrefix: config.agentPrefix,
         startAgentCommand: config.startAgentCommand || '',
+        autoStartDefaultTerminal: !!config.autoStartDefaultTerminal,
       }) || el.__openfocusRemoteTerminal || null;
       terminalApiRef.current = api;
     } catch (err) {
@@ -947,7 +951,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       console.error(err);
       window.alert(`Terminal initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [config.agentPrefix, config.spaceId, config.startAgentCommand, config.taskPublicId]);
+  }, [config.agentPrefix, config.autoStartDefaultTerminal, config.spaceId, config.startAgentCommand, config.taskBasic, config.taskPublicId]);
 
   useEffect(() => {
     const copyButton = document.getElementById('space-copy-task');

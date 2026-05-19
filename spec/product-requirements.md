@@ -145,8 +145,10 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    - 终端默认以 AgentSpace 的工作目录作为启动目录（cwd=root_path）。
    - 终端 session 在 AgentSpace 生命周期内保留；若 Companion 重启/崩溃，允许终端 session 丢失。
    - Terminal area includes a `prompt zone`; it is not a separate Agent chat tab.
+   - `prompt zone` 提供 `send basic`，点击后把当前 Task 的 `Basic` 内容注入当前 terminal 输入区，但不得自动发送 Enter；其 `auto` 开启后，每次 terminal input submit 都会拼接 Task `Basic` 内容。
    - `prompt zone` 中的每个 prompt 都可以手动注入当前 terminal；每个 prompt 还有独立 `auto` 开关。`auto` 开启后，用户每次在 AgentSpace terminal 中提交消息时，OpenFocus 会在回车提交前把该 prompt 拼接进同一次输入。
    - AgentSpace 不再提供 terminal 级 `Agent Mode` 开关；agent 当前运行态与提醒由 Companion runtime hooks 驱动。
+   - 创建 AgentSpace 时，如果用户配置了 `Start Agent command`，页面自动创建的默认 terminal 必须直接执行该命令；用户后续点击 `+` 新建 terminal 时只创建空 terminal，不自动执行该命令。
    - 在 `FILES` 文件/目录节点右键时，AgentSpace 显示自定义菜单并提供 `Send Path to Terminal`，向当前 terminal 注入 shell 转义后的相对路径；该动作不得自动发送 Enter。
    - 在 `PREVIEW` 右键时，若没有选中文本，显示 `Send File Reference to Terminal` 并注入当前文件引用（如 `@harness.md`）；若存在选中文本，注入当前文件加选区起始行的文件引用（如 `@harness.md#L10`）；以上动作均不得自动发送 Enter。
    - Agent TUI 输出中的链接/文件引用只在 macOS `Command` + 左键、其他平台 `Ctrl` + 左键时激活；普通点击继续交给 terminal/TUI。`http://` 与 `https://` 链接在新浏览器标签页打开；工作区内相对路径、工作区根目录下绝对路径、`file://` URL、`@path`、`path:line[:column]` 和 `path#Lline` 文件引用应打开 `PREVIEW` 并跳到目标行。

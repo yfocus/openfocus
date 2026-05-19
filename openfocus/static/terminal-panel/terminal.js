@@ -49,7 +49,9 @@
     const isInspiration = mode === 'inspiration';
     const commandApi = String(opts && opts.commandApi ? opts.commandApi : `/api/agent_spaces/${spaceId}/start_agent_command`).replace(/\/+$/, '');
     const promptApi = String(opts && opts.promptApi ? opts.promptApi : '/api/agent_space_prompts').replace(/\/+$/, '');
+    const taskBasic = String(opts && opts.taskBasic ? opts.taskBasic : '');
     let startAgentCommand = String(opts && opts.startAgentCommand ? opts.startAgentCommand : '').trim();
+    let autoStartDefaultTerminalPending = !!(opts && opts.autoStartDefaultTerminal) && !!startAgentCommand;
     let customPrompts = [];
     const goalResources = Array.isArray(opts && opts.goalResources)
       ? opts.goalResources.map((r)=> ({ id: Number(r && r.id ? r.id : 0), title: String(r && r.title ? r.title : '') })).filter((r)=> r.id && r.title)
@@ -104,6 +106,7 @@
       const prefix = buildAgentPrefix();
       const k = String(kind || 'context');
       if(k === 'draft_summary') return `[OpenFocus Summary Request] ${String(opts && opts.draftSummaryPrompt ? opts.draftSummaryPrompt : '')}`;
+      if(k === 'task_basic') return taskBasic;
       if(k === 'report_progress') return `[OpenFocus Report Progress]\n${prefix}`;
       if(k === 'pua') return PUA_PROACTIVITY_PROMPT;
       return prefix;
@@ -128,7 +131,7 @@
         <div class="rt-side">
           <div class="rt-side-title">prompt zone</div>
           <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-report-progress">report progress</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="report_progress" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="pua" /><span>auto</span></label></div></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal.">start agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button></div>'}
+          ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-send-basic" title="send the task Basic content into the active terminal without pressing enter.">send basic</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="task_basic" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-report-progress">report progress</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="report_progress" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="pua" /><span>auto</span></label></div></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal.">start agent</button><button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button></div>'}
         </div>
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
       </div>
@@ -140,6 +143,7 @@
     const btnNew = $('#rt-new', rootEl);
     const mouseSwitch = $('#rt-mouse-switch', rootEl);
     const mouseText = $('#rt-mouse-text', rootEl);
+    const btnSendBasic = $('#rt-send-basic', rootEl);
     const btnReportProgress = $('#rt-report-progress', rootEl);
     const btnPua = $('#rt-pua', rootEl);
     const customPromptsEl = $('#rt-custom-prompts', rootEl);
@@ -213,6 +217,7 @@
     function autoPromptTexts(){
       if(isInspiration) return [];
       const out = [];
+      if(loadBuiltinAutoPrompt('task_basic')) out.push(normalizeAutoPromptText(buildPasteText('task_basic')));
       if(loadBuiltinAutoPrompt('report_progress')) out.push(normalizeAutoPromptText(buildPasteText('report_progress')));
       if(loadBuiltinAutoPrompt('pua')) out.push(normalizeAutoPromptText(buildPasteText('pua')));
       for(const p of customPrompts){
@@ -288,7 +293,9 @@
     function pasteToActive(text){
       const s = String(text || '');
       if(!s) return;
-      void injectPromptToTerminal(activeTerminal(), s, { bracketedPaste: true, focus: true }).catch((err)=>{
+      void injectPromptToTerminal(activeTerminal(), s, { bracketedPaste: true, focus: true }).then((ok)=>{
+        if(!ok) toast('terminal unavailable');
+      }).catch((err)=>{
         try{ console.warn('OpenFocus prompt injection failed:', err); }catch(_){ }
         try{
           void navigator.clipboard.writeText(s)
@@ -403,6 +410,30 @@
       if(!it){ toast('terminal unavailable'); return; }
       await injectPromptToTerminal(it, cmd, { bracketedPaste: false, submit: true, focus: true });
       toast('Agent started');
+    }
+
+    function clearAutoStartLocationFlag(){
+      try{
+        const url = new URL(window.location.href);
+        if(!url.searchParams.has('autostart')) return;
+        url.searchParams.delete('autostart');
+        window.history.replaceState(window.history.state, '', url.pathname + (url.search || '') + (url.hash || ''));
+      }catch(_){ }
+    }
+
+    async function maybeAutoStartDefaultTerminal(it){
+      if(isInspiration || !autoStartDefaultTerminalPending) return;
+      autoStartDefaultTerminalPending = false;
+      clearAutoStartLocationFlag();
+      const cmd = String(startAgentCommand || '').trim();
+      if(!cmd) return;
+      if(!it){ toast('terminal unavailable'); return; }
+      try{
+        const ok = await injectPromptToTerminal(it, cmd, { bracketedPaste: false, submit: true, focus: true });
+        toast(ok ? 'Agent started' : 'terminal unavailable');
+      }catch(err){
+        toast(String(err && err.message ? err.message : err || 'start failed'));
+      }
     }
 
     function isNameTaken(name, exceptTid){
@@ -565,7 +596,8 @@
         const first = terminals.keys().next();
         if(!first.done) activate(first.value);
       }else if(online){
-        await createNew();
+        const it = await createNew();
+        await maybeAutoStartDefaultTerminal(it);
       }
     }
 
@@ -597,6 +629,14 @@
           toast(String(err && err.message ? err.message : err || 'mouse mode failed'));
         })
         .finally(()=> focusActive());
+    });
+    btnSendBasic?.addEventListener('click', ()=> {
+      const text = buildPasteText('task_basic');
+      if(!String(text || '').trim()){
+        toast('Task Basic is empty');
+        return;
+      }
+      pasteToActive(text);
     });
     btnReportProgress?.addEventListener('click', ()=> pasteToActive(buildPasteText('report_progress')));
     btnPua?.addEventListener('click', ()=> pasteToActive(buildPasteText('pua')));

@@ -10,6 +10,14 @@ def test_agent_space_prompt_zone_exposes_pua_button_and_prompt():
     assert "PUA_PROACTIVITY_PROMPT" in source
     assert "https://mcpmarket.com/tools/skills/pua-proactivity-engine" in source
     assert "buildPasteText('pua')" in source
+    assert 'id="rt-send-basic"' in source
+    assert "send basic" in source
+    assert "buildPasteText('task_basic')" in source
+    assert "if(k === 'task_basic') return taskBasic" in source
+    assert 'data-auto-builtin="task_basic"' in source
+    assert "loadBuiltinAutoPrompt('task_basic')" in source
+    assert "autoStartDefaultTerminal" in source
+    assert "maybeAutoStartDefaultTerminal(it)" in source
     assert 'id="rt-report-progress"' in source
     assert "report progress" in source
     assert "buildPasteText('report_progress')" in source
@@ -26,3 +34,6 @@ def test_agent_space_prompt_zone_exposes_pua_button_and_prompt():
     )
     assert "主动性升级模式" not in source
     assert "`${PUA_PROACTIVITY_PROMPT}\\n" not in source
+
+    goals_source = open("openfocus/templates/goals.html", encoding="utf-8").read()
+    assert "startAgentCommand ? '?autostart=1' : ''" in goals_source
