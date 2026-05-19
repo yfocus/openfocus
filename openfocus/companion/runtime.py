@@ -1557,10 +1557,10 @@ class _FloatBallSession:
     summary_json: str = ""
 
 
-async def _wait_for_float_ball_ready(
-    proc: subprocess.Popen, ready_path: Path
-) -> None:
-    timeout_s = float(os.environ.get("OPENFOCUS_FLOAT_BALL_READY_TIMEOUT_SECONDS") or "8")
+async def _wait_for_float_ball_ready(proc: subprocess.Popen, ready_path: Path) -> None:
+    timeout_s = float(
+        os.environ.get("OPENFOCUS_FLOAT_BALL_READY_TIMEOUT_SECONDS") or "8"
+    )
     timeout_s = max(0.5, min(timeout_s, 30.0))
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
@@ -1605,7 +1605,10 @@ class _FloatBallManager:
         env = os.environ.copy()
         env["OPENFOCUS_FLOAT_BALL_SUMMARY_JSON"] = str(summary_json or "")
         env["OPENFOCUS_FLOAT_BALL_BACKEND"] = backend
-        ready_path = Path(tempfile.gettempdir()) / f"openfocus-float-ball-ready-{uuid.uuid4().hex}"
+        ready_path = (
+            Path(tempfile.gettempdir())
+            / f"openfocus-float-ball-ready-{uuid.uuid4().hex}"
+        )
         env["OPENFOCUS_FLOAT_BALL_READY_FILE"] = str(ready_path)
         helper_python = _float_ball_helper_python()
         proc = subprocess.Popen(

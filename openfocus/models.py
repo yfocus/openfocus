@@ -634,7 +634,9 @@ class BrowserBindChallenge(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc)
     )
-    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     confirmed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

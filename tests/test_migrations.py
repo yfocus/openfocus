@@ -190,7 +190,9 @@ def test_migration_service_upgrades_minimal_legacy_tables(tmp_path):
         }
         browser_binding_cols = {
             r[1]
-            for r in conn.exec_driver_sql("PRAGMA table_info(browser_companion_bindings)")
+            for r in conn.exec_driver_sql(
+                "PRAGMA table_info(browser_companion_bindings)"
+            )
         }
         browser_challenge_cols = {
             r[1]

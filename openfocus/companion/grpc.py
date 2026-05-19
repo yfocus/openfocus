@@ -55,13 +55,13 @@ def add_runtime_signal_listener(
 
 
 def add_browser_bind_proof_listener(
-    listener: Callable[[pb2.BrowserBindProof], None]
+    listener: Callable[[pb2.BrowserBindProof], None],
 ) -> None:
     _BROWSER_BIND_PROOF_LISTENERS.append(listener)
 
 
 def add_float_ball_action_listener(
-    listener: Callable[[pb2.FloatBallAction], None]
+    listener: Callable[[pb2.FloatBallAction], None],
 ) -> None:
     _FLOAT_BALL_ACTION_LISTENERS.append(listener)
 

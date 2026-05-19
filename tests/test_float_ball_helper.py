@@ -102,7 +102,7 @@ def test_helper_visual_contract_is_dark_green_popover() -> None:
     assert 'NSButton(title: "Close"' not in helper.SWIFT_HELPER
     assert "singleLine: Bool = false" in helper.SWIFT_HELPER
     assert "maximumNumberOfLines = 1" in helper.SWIFT_HELPER
-    assert "clean(item[\"summary\"]).isEmpty ? 118 : 150" in helper.SWIFT_HELPER
+    assert 'clean(item["summary"]).isEmpty ? 118 : 150' in helper.SWIFT_HELPER
     assert "if section.1.isEmpty && !section.3" in helper.SWIFT_HELPER
     assert "NSClickGestureRecognizer" not in helper.SWIFT_HELPER
     assert "NextMove recommendations" in helper.SWIFT_HELPER

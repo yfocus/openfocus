@@ -131,9 +131,7 @@ def _bucket_items(summary: dict[str, Any], bucket: str) -> list[dict[str, Any]]:
     items = _as_list_of_dicts(summary.get("items"))
     if bucket == "waiting":
         return [
-            x
-            for x in items
-            if str(x.get("bucket") or "") in {"waiting", "completed"}
+            x for x in items if str(x.get("bucket") or "") in {"waiting", "completed"}
         ]
     return [x for x in items if str(x.get("bucket") or "") == bucket]
 
@@ -228,7 +226,9 @@ def _dismiss_path(item: dict[str, Any]) -> str:
 
 
 def _item_title(item: dict[str, Any]) -> str:
-    return _clean_text(item.get("title") or item.get("task_title") or "Untitled", max_len=120)
+    return _clean_text(
+        item.get("title") or item.get("task_title") or "Untitled", max_len=120
+    )
 
 
 SWIFT_HELPER = r"""
@@ -945,7 +945,14 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
             wraplength=314,
         )
         title_label.pack(fill="x", anchor="w")
-        meta_bits = [x for x in (_agent_label(item), _clean_text(item.get("goal_title"), max_len=80)) if x]
+        meta_bits = [
+            x
+            for x in (
+                _agent_label(item),
+                _clean_text(item.get("goal_title"), max_len=80),
+            )
+            if x
+        ]
         meta_label = tk.Label(
             card,
             text=" / ".join(meta_bits) if meta_bits else "No goal",
@@ -998,7 +1005,9 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
                 pady=3,
             ).pack(side="left")
             for widget in (card, title_label, meta_label, state_label):
-                widget.bind("<Double-Button-1>", lambda _event, url=action_url: open_url(url))
+                widget.bind(
+                    "<Double-Button-1>", lambda _event, url=action_url: open_url(url)
+                )
         dismiss_path = _dismiss_path(item)
         dismiss_url = _absolute_url(base_url, dismiss_path)
         if dismiss_url:
@@ -1015,7 +1024,9 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
                 pady=3,
             ).pack(side="left", padx=(6, 0))
 
-    def render_section(parent: Any, label: str, items: list[dict[str, Any]], empty: str = "") -> None:
+    def render_section(
+        parent: Any, label: str, items: list[dict[str, Any]], empty: str = ""
+    ) -> None:
         if not items and not empty:
             return
         section = tk.Frame(parent, bg=FLOAT_BALL_PANEL_BG)
@@ -1080,7 +1091,9 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
         header.grid_columnconfigure(0, weight=1)
 
-        canvas = tk.Canvas(pop, bg=FLOAT_BALL_PANEL_BG, highlightthickness=0, width=380, height=444)
+        canvas = tk.Canvas(
+            pop, bg=FLOAT_BALL_PANEL_BG, highlightthickness=0, width=380, height=444
+        )
         scrollbar = tk.Scrollbar(pop, orient="vertical", command=canvas.yview)
         body = tk.Frame(canvas, bg=FLOAT_BALL_PANEL_BG, padx=12, pady=4)
         window_id = canvas.create_window((0, 0), window=body, anchor="nw")
@@ -1088,13 +1101,21 @@ def _run_tk_helper(args: argparse.Namespace, summary: dict[str, Any]) -> int:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        body.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window_id, width=event.width),
+        )
 
         sections = _section_items(_as_dict(state.get("summary")))
         render_section(body, "Running spaces", sections["running"])
         render_section(body, "Waiting / review", sections["waiting"])
-        render_section(body, "NextMove recommendations", sections["next_move"], "no suggestion.")
+        render_section(
+            body, "NextMove recommendations", sections["next_move"], "no suggestion."
+        )
 
     def refresh_async(*, render: bool) -> None:
         if state.get("refreshing"):

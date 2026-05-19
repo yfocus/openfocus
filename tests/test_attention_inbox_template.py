@@ -13,7 +13,9 @@ def test_attention_inbox_lives_in_nav_not_fixed_web_bubble() -> None:
 
     assert 'id="attention-fab-wrap"' in source
     assert 'id="nav-attention"' not in source
-    wrap_css = source[source.index(".attention-fab-wrap") : source.index(".attention-fab{")]
+    wrap_css = source[
+        source.index(".attention-fab-wrap") : source.index(".attention-fab{")
+    ]
     assert "position: fixed" not in wrap_css
     assert "attention_bubble" not in source
     assert "attention-hide" not in source
@@ -33,7 +35,9 @@ def test_attention_inbox_has_system_float_ball_toggle_states() -> None:
 
 def test_attention_inbox_uses_standard_nav_button_style() -> None:
     source = _base_template()
-    style = source[source.index(".attention-fab{") : source.index(".attention-fab:hover")]
+    style = source[
+        source.index(".attention-fab{") : source.index(".attention-fab:hover")
+    ]
 
     assert "background: transparent" in style
     assert "color: var(--muted-foreground)" in style

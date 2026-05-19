@@ -84,30 +84,89 @@ During lunch, walking, commuting, or discussions with other people, keep observi
 
 ## Quick Start
 
-**Install dependencies**
+This guide starts a local-first OpenFocus instance on `127.0.0.1`. The default
+database is created automatically at `.data/openfocus.db`.
+
+### Prerequisites
+
+Install these tools before running the project:
+
+- Python `3.11` or newer.
+- Poetry for Python dependency management.
+- Node.js `18` or newer and npm.
+- `make`.
+
+Check your local environment:
 
 ```shell
+python3 --version
+poetry --version
+node --version
+npm --version
+make --version
+```
+
+### Install
+
+From a fresh checkout:
+
+```shell
+git clone <openfocus-repository-url>
+cd openfocus
 poetry install
 npm install
+cp .env-default .env
 ```
 
-**Build frontend assets**
+> [!TIP]
+> You can give this `README.md` to an agent and ask it to install OpenFocus for
+> you. The agent should read this file, run the commands in this section from
+> the repository root, create `.env` from `.env-default`, build the frontend, and
+> start the local service.
+
+The default `.env` is enough to launch the web service. Add an OpenAI-compatible
+or Ark-compatible API key only if you want built-in LLM workflows such as
+Inspiration follow-up and draft generation:
+
+```dotenv
+OPENFOCUS_OPENAI_API_KEY=
+OPENFOCUS_OPENAI_BASE_URL=https://api.openai.com/v1
+OPENFOCUS_OPENAI_MODEL=gpt-4.1-mini
+```
+
+Common local settings:
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_HOST=127.0.0.1
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_HOST=127.0.0.1
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+Existing shell environment variables take precedence over `.env`. To use an
+isolated database, set `OPENFOCUS_DB_PATH=/absolute/path/to/openfocus.db`; if
+unset, OpenFocus uses `.data/openfocus.db`.
+
+### Build Frontend Assets
 
 ```shell
 npm run build
 ```
 
-OpenFocus serves frontend assets from `openfocus/static/dist`, so you must build the frontend before starting the app and rebuild it after frontend source changes.
+OpenFocus serves frontend assets from `openfocus/static/dist`, so build the
+frontend before starting the app and rebuild it after frontend source changes.
 
-**Start OpenFocus**
+### Start OpenFocus
 
 ```shell
-npm run build
 make serve
 ```
 
-`make serve` loads configuration from the repository root `.env` before starting
-the OpenFocus service.
+`make serve` loads configuration from the repository root `.env`, starts the
+FastAPI app with reload enabled, initializes the SQLite database, and starts the
+Companion gRPC listener unless `OPENFOCUS_GRPC_AUTOSTART=0` is set.
 
 Then open:
 
@@ -115,17 +174,30 @@ Then open:
 http://127.0.0.1:8001/goals
 ```
 
-**Start Companion**
+Useful health checks:
 
-Run this on a machine that should host workspaces, terminals, or command-line agents:
+```shell
+curl http://127.0.0.1:8001/goals
+ls -lh .data/openfocus.db
+```
+
+If you changed `OPENFOCUS_PORT`, replace `8001` with your configured port.
+
+### Start Companion
+
+Open a second terminal in the same repository root and run this on a machine
+that should host workspaces, terminals, or command-line agents:
 
 ```shell
 make companion
 ```
 
-This target loads configuration from the repository root `.env` before starting the companion.
+This target loads configuration from the repository root `.env` before starting
+the Companion. Then open the Companion page in OpenFocus and pair the device:
 
-Then pair it from the Companion page in OpenFocus.
+```text
+http://127.0.0.1:8001/companions
+```
 
 **Install agent runtime hooks**
 

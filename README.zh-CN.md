@@ -84,14 +84,64 @@ Agent 极大降低了把想法变成现实的成本。每当有一个好点子�
 
 ## Quick Start
 
-**安装依赖**
+本指南会在 `127.0.0.1` 启动一个 local-first 的 OpenFocus 实例。默认数据库会自动创建在 `.data/openfocus.db`。
+
+### 前置依赖
+
+启动项目前，请先安装这些工具：
+
+- Python `3.11` 或更新版本。
+- Poetry，用于管理 Python 依赖。
+- Node.js `18` 或更新版本，以及 npm。
+- `make`。
+
+检查本地环境：
 
 ```shell
-poetry install
-npm install
+python3 --version
+poetry --version
+node --version
+npm --version
+make --version
 ```
 
-**构建前端资源**
+### 安装
+
+从一个新的 checkout 开始：
+
+```shell
+git clone <openfocus-repository-url>
+cd openfocus
+poetry install
+npm install
+cp .env-default .env
+```
+
+> [!TIP]
+> 你可以把这份 `README.md` 告诉 agent，并让它帮你安装 OpenFocus。agent 应该阅读本文档，在仓库根目录执行本节命令，从 `.env-default` 创建 `.env`，构建前端资源，并启动本地服务。
+
+默认 `.env` 已足够启动 Web 服务。只有在需要使用 Inspiration follow-up、draft generation 等内置 LLM 工作流时，才需要补充 OpenAI-compatible 或 Ark-compatible API key：
+
+```dotenv
+OPENFOCUS_OPENAI_API_KEY=
+OPENFOCUS_OPENAI_BASE_URL=https://api.openai.com/v1
+OPENFOCUS_OPENAI_MODEL=gpt-4.1-mini
+```
+
+常用本地配置：
+
+```dotenv
+OPENFOCUS_INSTANCE_ID=dev
+OPENFOCUS_HOST=127.0.0.1
+OPENFOCUS_PORT=8001
+OPENFOCUS_GRPC_HOST=127.0.0.1
+OPENFOCUS_GRPC_PORT=17891
+OPENFOCUS_SERVER_GRPC_ADDR=127.0.0.1:17891
+```
+
+已有的 shell 环境变量优先级高于 `.env`。如需使用隔离数据库，设置 `OPENFOCUS_DB_PATH=/absolute/path/to/openfocus.db`；如果不设置，OpenFocus 会使用 `.data/openfocus.db`。
+
+### 构建前端资源
 
 ```shell
 npm run build
@@ -99,14 +149,13 @@ npm run build
 
 OpenFocus 会直接从 `openfocus/static/dist` 提供前端静态资源，因此启动服务前必须先构建前端；如果修改了前端源码，也需要重新执行构建。
 
-**启动 OpenFocus**
+### 启动 OpenFocus
 
 ```shell
-npm run build
 make serve
 ```
 
-`make serve` 会在启动 OpenFocus service 前加载仓库根目录的 `.env`。
+`make serve` 会加载仓库根目录的 `.env`，以 reload 模式启动 FastAPI app，初始化 SQLite 数据库，并启动 Companion gRPC listener；除非设置了 `OPENFOCUS_GRPC_AUTOSTART=0`。
 
 然后打开：
 
@@ -114,17 +163,28 @@ make serve
 http://127.0.0.1:8001/goals
 ```
 
-**启动 Companion**
-
-在需要托管 workspace、terminal 或命令行 Agent 的机器上运行：
+可用这些命令做快速检查：
 
 ```shell
-poetry run python -m openfocus.companion
+curl http://127.0.0.1:8001/goals
+ls -lh .data/openfocus.db
 ```
 
-Companion 会在启动时加载仓库根目录的 `.env`；使用 `make companion` 时也会加载同一个文件。
+如果修改了 `OPENFOCUS_PORT`，请把上面的 `8001` 替换成你的端口。
 
-然后在 OpenFocus 的 Companion 页面完成配对。
+### 启动 Companion
+
+在同一个仓库根目录打开第二个终端，并在需要托管 workspace、terminal 或命令行 Agent 的机器上运行：
+
+```shell
+make companion
+```
+
+该 target 会在启动 Companion 前加载仓库根目录的 `.env`。然后打开 OpenFocus 的 Companion 页面完成配对：
+
+```text
+http://127.0.0.1:8001/companions
+```
 
 **安装 Agent runtime hooks**
 

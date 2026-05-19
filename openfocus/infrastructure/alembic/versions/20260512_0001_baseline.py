@@ -445,7 +445,9 @@ def upgrade() -> None:
     op.create_table(
         "browser_companion_bindings",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("browser_session_id", sa.String(length=64), nullable=False, unique=True),
+        sa.Column(
+            "browser_session_id", sa.String(length=64), nullable=False, unique=True
+        ),
         sa.Column("companion_id", sa.Integer(), nullable=False),
         sa.Column(
             "trust_method",
