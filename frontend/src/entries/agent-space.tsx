@@ -20,13 +20,18 @@ import { python } from '@codemirror/lang-python';
 import { rust } from '@codemirror/lang-rust';
 import { sql } from '@codemirror/lang-sql';
 import { xml } from '@codemirror/lang-xml';
-import { listFiles, rawFileUrl, readFile, releaseTaskAgentSpace } from '../api/agentSpaces';
+import { listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
 import type { FileEntry } from '../types/openfocus';
 
 type AgentSpaceConfig = {
   spaceId: number;
   taskPublicId: string;
+  taskTitle?: string;
   taskBasic?: string;
+  taskUrl?: string;
+  taskDueDate?: string;
+  spaceCompanion?: string;
+  spaceCreatedAt?: string;
   rootPath: string;
   agentPrefix?: string;
   startAgentCommand?: string;
@@ -38,7 +43,19 @@ type TerminalApi = {
     text: string,
     options?: { bracketedPaste?: boolean; submit?: boolean; focus?: boolean },
   ) => Promise<boolean>;
+  applyAgentSpaceSettings?: (settings?: AgentSpaceSettings) => unknown;
 };
+
+type AgentSpaceSettings = {
+  filesFontSize: number;
+  previewFontSize: number;
+  terminalFontSize: number;
+  showFiles: boolean;
+  showPreview: boolean;
+  showTerminal: boolean;
+};
+
+type AgentSpacePane = 'files' | 'preview' | 'terminal';
 
 type PreviewState = {
   path?: string;
@@ -104,6 +121,72 @@ function clamp(value: number, minValue: number, maxValue: number): number {
   if (value < minValue) return minValue;
   if (value > maxValue) return maxValue;
   return value;
+}
+
+const AGENT_SPACE_SETTINGS_KEY = 'openfocus.agent_space.settings.v1';
+const AGENT_SPACE_SETTINGS_EVENT = 'openfocus:agent-space-settings-changed';
+const DEFAULT_AGENT_SPACE_SETTINGS: AgentSpaceSettings = {
+  filesFontSize: 13,
+  previewFontSize: 12,
+  terminalFontSize: 13,
+  showFiles: true,
+  showPreview: true,
+  showTerminal: true,
+};
+
+function clampSetting(value: unknown, minValue: number, maxValue: number, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.round(clamp(n, minValue, maxValue));
+}
+
+function normalizeAgentSpaceSettings(raw: Partial<AgentSpaceSettings> | null | undefined): AgentSpaceSettings {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    filesFontSize: clampSetting(src.filesFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.filesFontSize),
+    previewFontSize: clampSetting(src.previewFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.previewFontSize),
+    terminalFontSize: clampSetting(src.terminalFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.terminalFontSize),
+    showFiles: src.showFiles !== false,
+    showPreview: src.showPreview !== false,
+    showTerminal: src.showTerminal !== false,
+  };
+}
+
+function loadAgentSpaceSettings(): AgentSpaceSettings {
+  try {
+    const raw = localStorage.getItem(AGENT_SPACE_SETTINGS_KEY);
+    return normalizeAgentSpaceSettings(raw ? JSON.parse(raw) as Partial<AgentSpaceSettings> : null);
+  } catch (_) {
+    return normalizeAgentSpaceSettings(null);
+  }
+}
+
+function saveAgentSpaceSettings(settings: Partial<AgentSpaceSettings>, source = 'agent-space'): AgentSpaceSettings {
+  const next = normalizeAgentSpaceSettings(settings);
+  try {
+    localStorage.setItem(AGENT_SPACE_SETTINGS_KEY, JSON.stringify(next));
+  } catch (_) {
+    // ignore storage failures
+  }
+  try {
+    window.dispatchEvent(new CustomEvent(AGENT_SPACE_SETTINGS_EVENT, { detail: { settings: next, source } }));
+  } catch (_) {
+    // ignore event failures
+  }
+  return next;
+}
+
+function paneGridColumn(pane: AgentSpacePane, visiblePanes: AgentSpacePane[], index: number): string {
+  if (visiblePanes.length <= 1) return 'minmax(0, 1fr)';
+  if (visiblePanes.length === 3) {
+    if (pane === 'files') return 'minmax(220px, var(--files-w))';
+    if (pane === 'terminal') return 'minmax(320px, var(--term-w))';
+    return 'minmax(320px, 1fr)';
+  }
+  if (pane === 'files') return 'minmax(220px, var(--files-w))';
+  if (pane === 'terminal' && visiblePanes.includes('preview')) return 'minmax(320px, var(--term-w))';
+  if (index >= 1) return 'minmax(0, 1fr)';
+  return 'minmax(320px, 1fr)';
 }
 
 function positiveInt(value: unknown): number | undefined {
@@ -530,6 +613,7 @@ function CodeMirrorPreview({
   targetLine,
   targetColumn,
   targetNonce,
+  fontSize,
 }: {
   content: string;
   name: string;
@@ -538,6 +622,7 @@ function CodeMirrorPreview({
   targetLine?: number;
   targetColumn?: number;
   targetNonce?: number;
+  fontSize: number;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -564,7 +649,7 @@ function CodeMirrorPreview({
               height: '100%',
               color: 'var(--text)',
               backgroundColor: 'transparent',
-              fontSize: '12px',
+              fontSize: `${fontSize}px`,
             },
             '.cm-scroller': {
               fontFamily: 'var(--mono)',
@@ -629,7 +714,7 @@ function CodeMirrorPreview({
       view.destroy();
       viewRef.current = null;
     };
-  }, [content, name, onScroll, onSelectionChange]);
+  }, [content, fontSize, name, onScroll, onSelectionChange]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -662,6 +747,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const previewContentRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<HTMLDivElement | null>(null);
+  const terminalSideRef = useRef<HTMLDivElement | null>(null);
   const terminalApiRef = useRef<TerminalApi | null>(null);
   const previewSelectionRef = useRef<PreviewSelectionState>({ text: '' });
   const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
@@ -673,6 +759,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: false,
     error: '',
   }));
+  const [settings, setSettings] = useState<AgentSpaceSettings>(() => loadAgentSpaceSettings());
 
   const openPreview = useCallback(
     async (relPath: string, name: string, target?: PreviewTarget) => {
@@ -740,6 +827,27 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       targetLine ? { line: targetLine, column: positiveInt(state.targetColumn) } : undefined,
     );
   }, [config.spaceId, openPreview]);
+
+  useEffect(() => {
+    const applySettings = (next: AgentSpaceSettings) => {
+      const normalized = normalizeAgentSpaceSettings(next);
+      setSettings(normalized);
+      terminalApiRef.current?.applyAgentSpaceSettings?.(normalized);
+    };
+    const onSettings = (event: Event) => {
+      const custom = event as CustomEvent<{ settings?: AgentSpaceSettings }>;
+      applySettings(custom.detail?.settings ? normalizeAgentSpaceSettings(custom.detail.settings) : loadAgentSpaceSettings());
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === AGENT_SPACE_SETTINGS_KEY) applySettings(loadAgentSpaceSettings());
+    };
+    window.addEventListener(AGENT_SPACE_SETTINGS_EVENT, onSettings);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(AGENT_SPACE_SETTINGS_EVENT, onSettings);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   const savePreviewScroll = useCallback(
     (scrollTop: number, topLine: number) => {
@@ -935,114 +1043,125 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
   useEffect(() => {
     const el = terminalRef.current;
+    const sideEl = terminalSideRef.current;
     if (!el || !window.OpenFocusRemoteTerminal?.mount) return;
     try {
       const api = window.OpenFocusRemoteTerminal.mount(el, {
         spaceId: config.spaceId,
         taskPublicId: config.taskPublicId,
+        taskTitle: config.taskTitle || '',
         taskBasic: config.taskBasic || '',
+        taskUrl: config.taskUrl || '',
+        taskDueDate: config.taskDueDate || '',
+        spaceCompanion: config.spaceCompanion || '',
+        spaceCreatedAt: config.spaceCreatedAt || '',
         agentPrefix: config.agentPrefix,
         startAgentCommand: config.startAgentCommand || '',
         autoStartDefaultTerminal: !!config.autoStartDefaultTerminal,
+        sideRoot: sideEl || undefined,
       }) || el.__openfocusRemoteTerminal || null;
       terminalApiRef.current = api;
+      api?.applyAgentSpaceSettings?.(settings);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);
       window.alert(`Terminal initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [config.agentPrefix, config.autoStartDefaultTerminal, config.spaceId, config.startAgentCommand, config.taskBasic, config.taskPublicId]);
+  }, [config.agentPrefix, config.autoStartDefaultTerminal, config.spaceCreatedAt, config.spaceCompanion, config.spaceId, config.startAgentCommand, config.taskBasic, config.taskDueDate, config.taskPublicId, config.taskTitle, config.taskUrl]);
 
-  useEffect(() => {
-    const copyButton = document.getElementById('space-copy-task');
-    const cleanupButton = document.getElementById('space-release');
-    const copyTaskId = async () => {
-      try {
-        await navigator.clipboard.writeText(config.taskPublicId);
-        toast('Copied');
-      } catch (_) {
-        toast('Copy failed');
-      }
-    };
-    const releaseSpace = async () => {
-      if (!window.confirm('Release this AgentSpace? This only deletes OpenFocus records and will not delete local files.')) return;
-      try {
-        await releaseTaskAgentSpace(config.taskPublicId);
-        toast('Released');
-        window.location.href = `/goals?task=${encodeURIComponent(config.taskPublicId)}`;
-      } catch (err) {
-        toast('Release failed');
-        window.alert(`Release failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    };
-    copyButton?.addEventListener('click', copyTaskId);
-    cleanupButton?.addEventListener('click', releaseSpace);
-    return () => {
-      copyButton?.removeEventListener('click', copyTaskId);
-      cleanupButton?.removeEventListener('click', releaseSpace);
-    };
-  }, [config.taskPublicId]);
+  const visiblePanes = useMemo<AgentSpacePane[]>(() => {
+    const panes: AgentSpacePane[] = [];
+    if (settings.showFiles) panes.push('files');
+    if (settings.showPreview) panes.push('preview');
+    if (settings.showTerminal) panes.push('terminal');
+    return panes;
+  }, [settings.showFiles, settings.showPreview, settings.showTerminal]);
+  const showSplitters = visiblePanes.length === 3;
+  const gridColumns = useMemo(
+    () => {
+      const workColumns = showSplitters
+        ? 'minmax(220px, var(--files-w)) 10px minmax(320px, 1fr) 10px minmax(320px, var(--term-w))'
+        : (visiblePanes.length ? visiblePanes.map((pane, index) => paneGridColumn(pane, visiblePanes, index)).join(' ') : 'minmax(0, 1fr)');
+      return `${workColumns} var(--agent-space-settings-w, 172px)`;
+    },
+    [showSplitters, visiblePanes],
+  );
 
   return (
     <>
-      <div ref={splitRef} id="agent-space-split" className="agent-space-split" style={{ flex: '1 1 0', minHeight: 0, height: 'auto' }}>
-        <div className="panel" style={{ height: '100%', padding: 0 }}>
-          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="pad" style={{ padding: 14, flex: '0 0 auto' }}>
-              <div className="muted" style={{ fontSize: 12 }} title={config.rootPath}>
-                {config.rootPath}
+      <div
+        ref={splitRef}
+        id="agent-space-split"
+        className="agent-space-split"
+        style={{ flex: '1 1 0', minHeight: 0, height: 'auto', gridTemplateColumns: gridColumns, gap: showSplitters ? 0 : 10 }}
+      >
+        {!visiblePanes.length ? <div aria-hidden="true" /> : null}
+        {visiblePanes.includes('files') ? (
+          <div className="panel" style={{ height: '100%', padding: 0 }}>
+            <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <div className="pad" style={{ padding: 14, flex: '0 0 auto' }}>
+                <div className="muted" style={{ fontSize: 12 }} title={config.rootPath}>
+                  {config.rootPath}
+                </div>
               </div>
-            </div>
-            <div className="divider" />
-            <div className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12 }}>
-              <FileTree spaceId={config.spaceId} onOpenFile={openPreview} onFileContextMenu={handleFileContextMenu} />
-            </div>
-          </div>
-        </div>
-
-        <div className="agent-space-splitter" data-split="left" title="Drag to resize FILES / PREVIEW" onMouseDown={(event) => startDrag('left', event)} onTouchStart={(event) => startDrag('left', event)} onDoubleClick={() => {
-          const root = splitRef.current;
-          if (!root) return;
-          root.style.setProperty('--files-w', '340px');
-          root.style.setProperty('--term-w', '420px');
-          saveLayoutState(config.spaceId, { filesW: 340, termW: 420, ts: Date.now() });
-        }} />
-
-        <div className="panel" style={{ height: '100%', padding: 0 }}>
-          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
-                <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
-              </div>
-            </div>
-            <div className="divider" />
-            <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
-              <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
-                {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
-                {preview.error ? preview.error : null}
-                {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
-                {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} /> : null}
-                {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
+              <div className="divider" />
+              <div className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, fontSize: `${settings.filesFontSize}px` }}>
+                <FileTree spaceId={config.spaceId} onOpenFile={openPreview} onFileContextMenu={handleFileContextMenu} />
               </div>
             </div>
           </div>
-        </div>
+        ) : null}
 
-        <div className="agent-space-splitter" data-split="right" title="Drag to resize PREVIEW / TERMINAL" onMouseDown={(event) => startDrag('right', event)} onTouchStart={(event) => startDrag('right', event)} onDoubleClick={() => {
-          const root = splitRef.current;
-          if (!root) return;
-          root.style.setProperty('--files-w', '340px');
-          root.style.setProperty('--term-w', '420px');
-          saveLayoutState(config.spaceId, { filesW: 340, termW: 420, ts: Date.now() });
-        }} />
+        {showSplitters ? (
+          <div className="agent-space-splitter" data-split="left" title="Drag to resize FILES / PREVIEW" onMouseDown={(event) => startDrag('left', event)} onTouchStart={(event) => startDrag('left', event)} onDoubleClick={() => {
+            const root = splitRef.current;
+            if (!root) return;
+            root.style.setProperty('--files-w', '340px');
+            root.style.setProperty('--term-w', '420px');
+            saveLayoutState(config.spaceId, { filesW: 340, termW: 420, ts: Date.now() });
+          }} />
+        ) : null}
 
-        <div className="panel" style={{ height: '100%', padding: 0 }}>
-          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="pad" style={{ flex: '1 1 auto', minHeight: 0, minWidth: 0, height: 'auto', padding: 12 }}>
-              <div ref={terminalRef} id="remote-terminal" style={{ height: '100%', minHeight: 0 }} />
+        {visiblePanes.includes('preview') ? (
+          <div className="panel" style={{ height: '100%', padding: 0 }}>
+            <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                  <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
+                </div>
+              </div>
+              <div className="divider" />
+              <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto', fontSize: `${settings.previewFontSize}px` }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
+                <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
+                  {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
+                  {preview.error ? preview.error : null}
+                  {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
+                  {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
+                </div>
+              </div>
             </div>
           </div>
+        ) : null}
+
+        {showSplitters ? (
+          <div className="agent-space-splitter" data-split="right" title="Drag to resize PREVIEW / TERMINAL" onMouseDown={(event) => startDrag('right', event)} onTouchStart={(event) => startDrag('right', event)} onDoubleClick={() => {
+            const root = splitRef.current;
+            if (!root) return;
+            root.style.setProperty('--files-w', '340px');
+            root.style.setProperty('--term-w', '420px');
+            saveLayoutState(config.spaceId, { filesW: 340, termW: 420, ts: Date.now() });
+          }} />
+        ) : null}
+
+        <div className="panel" style={{ height: '100%', padding: 0, display: settings.showTerminal ? undefined : 'none' }}>
+            <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <div className="pad" style={{ flex: '1 1 auto', minHeight: 0, minWidth: 0, height: 'auto', padding: 12, fontSize: `${settings.terminalFontSize}px` }}>
+                <div ref={terminalRef} id="remote-terminal" style={{ height: '100%', minHeight: 0 }} />
+              </div>
+            </div>
         </div>
+        <div ref={terminalSideRef} className="agent-space-settings-column" />
       </div>
       {contextMenu ? (
         <div

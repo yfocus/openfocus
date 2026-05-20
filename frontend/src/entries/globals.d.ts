@@ -7,6 +7,7 @@ declare global {
       text: string,
       options?: { bracketedPaste?: boolean; submit?: boolean; focus?: boolean },
     ) => Promise<boolean>;
+    applyAgentSpaceSettings?: (settings?: unknown) => unknown;
   };
 
   interface Window {

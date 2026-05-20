@@ -132,10 +132,14 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    After AgentSpace creation succeeds, the page auto-jumps to AgentSpace. For tasks that already have a workspace, clicking `Space` opens AgentSpace.
    - Task 详情页的 `Create Space/Space` 左侧提供一个 `Goal` 按钮，用于跳回该 task 所属 goal，默认落到 goal 详情的 `ALL`。
    - Task 详情页点击 `Edit` 时，不弹出独立窗口；而是切换到 `Basic` 选项卡直接内联编辑，同时顶部动作区临时收敛为单个 `Save` 按钮；保存后恢复普通动作按钮。
-2. AgentSpace uses the current three-column layout: `FILES` + `PREVIEW` + `TERMINAL`.
+2. AgentSpace prioritizes working space for the three active work areas: `FILES` + `PREVIEW` + `TERMINAL`.
    - `FILES` is a read-only tree.
    - `PREVIEW` is read-only preview for code / markdown / image files.
    - `TERMINAL` is the remote terminal area.
+   - `FILES` / `PREVIEW` / `TERMINAL` support per-browser font-size settings.
+   - `FILES` / `PREVIEW` / `TERMINAL` can be individually opened/closed from the AgentSpace layout settings. Hidden columns do not reserve space; remaining visible columns expand into the freed area.
+   - The AgentSpace settings/prompt column is fixed-width, always visible, and cannot be closed.
+   - Global `System` in the top navigation opens system settings. The first supported settings are the AgentSpace `FILES` / `PREVIEW` / `TERMINAL` font sizes.
 3. 远程终端支持选项卡：
    - 点击右侧终端区的 `+` 创建一个新的终端 tab（每个 tab 对应一个独立的 PTY/session）。
    - 点击 tab 右上角的 `x` 关闭该终端（关闭后该 session 不再保留）。
@@ -145,10 +149,13 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    - 终端默认以 AgentSpace 的工作目录作为启动目录（cwd=root_path）。
    - 终端 session 在 AgentSpace 生命周期内保留；若 Companion 重启/崩溃，允许终端 session 丢失。
    - Terminal area includes a `prompt zone`; it is not a separate Agent chat tab.
+   - Task metadata and `Task` / `Cleanup` actions live in a fixed settings area above the prompt zone. The settings area is taller than the old compact title row, shows the task title, `Show`, three circular `FILES` / `PREVIEW` / `TERMINAL` open-state icons, and the Start Agent edit button. Lit icons mean the pane is open; dim icons mean it is closed. Clicking the task title returns to task detail, while `Show` opens details with task title, task Basic, companion, elapsed AgentSpace duration, and DDL. The details view must not expose a task-id copy action.
+   - The prompt zone is below the settings area. If the `TERMINAL` pane is closed, the prompt zone disappears while the settings area remains visible.
    - `prompt zone` 提供 `send basic`，点击后把当前 Task 的 `Basic` 内容注入当前 terminal 输入区，但不得自动发送 Enter；其 `auto` 开启后，每次 terminal input submit 都会拼接 Task `Basic` 内容。
    - `prompt zone` 中的每个 prompt 都可以手动注入当前 terminal；每个 prompt 还有独立 `auto` 开关。`auto` 开启后，用户每次在 AgentSpace terminal 中提交消息时，OpenFocus 会在回车提交前把该 prompt 拼接进同一次输入。
    - AgentSpace 不再提供 terminal 级 `Agent Mode` 开关；agent 当前运行态与提醒由 Companion runtime hooks 驱动。
    - 创建 AgentSpace 时，如果用户配置了 `Start Agent command`，页面自动创建的默认 terminal 必须直接执行该命令；用户后续点击 `+` 新建 terminal 时只创建空 terminal，不自动执行该命令。
+   - The Start Agent edit button in the settings area opens AgentSpace layout settings modal, where users can edit Start Agent command, adjust three-pane font sizes, and choose each pane's open/close state.
    - 在 `FILES` 文件/目录节点右键时，AgentSpace 显示自定义菜单并提供 `Send Path to Terminal`，向当前 terminal 注入 shell 转义后的相对路径；该动作不得自动发送 Enter。
    - 在 `PREVIEW` 右键时，若没有选中文本，显示 `Send File Reference to Terminal` 并注入当前文件引用（如 `@harness.md`）；若存在选中文本，注入当前文件加选区起始行的文件引用（如 `@harness.md#L10`）；以上动作均不得自动发送 Enter。
    - Agent TUI 输出中的链接/文件引用只在 macOS `Command` + 左键、其他平台 `Ctrl` + 左键时激活；普通点击继续交给 terminal/TUI。`http://` 与 `https://` 链接在新浏览器标签页打开；工作区内相对路径、工作区根目录下绝对路径、`file://` URL、`@path`、`path:line[:column]` 和 `path#Lline` 文件引用应打开 `PREVIEW` 并跳到目标行。

@@ -31,6 +31,8 @@ def test_agent_space_ttyd_bridge_supports_command_click_link_messages():
     assert "registerLinkProvider" in script
     assert "file:\\/\\/" in script
     assert "value[0] === '@'" in script
+    assert "openfocus:terminal-font-size" in script
+    assert "applyTerminalFontSize" in script
 
 
 def test_agent_space_ttyd_bridge_injection_is_html_only_and_idempotent():

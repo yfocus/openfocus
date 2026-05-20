@@ -19,6 +19,8 @@ The Agent Spaces domain owns terminal ownership and local terminal lifecycle sta
 - AgentSpace prompt `auto_enabled` controls automatic prompt concatenation on AgentSpace terminal input submit; it must not create runtime activity by itself.
 - Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
 - When an AgentSpace is created with `start_agent_command`, only the automatically created default terminal should submit that command; user-created terminals must remain blank.
+- AgentSpace UI settings are client-side presentation state. They may control files/preview/terminal font sizes and pane visibility without changing domain ownership or terminal lifecycle records.
+- The AgentSpace fixed settings/prompt column owns task metadata display, pane visibility icons, Start Agent command settings, and workspace cleanup actions so the surrounding page can devote more space to files, preview, and terminal.
 
 ## Invariants
 
@@ -28,3 +30,5 @@ The Agent Spaces domain owns terminal ownership and local terminal lifecycle sta
 - Terminal names are unique per owner.
 - Closing/releasing a terminal removes its output rows as well as its session row.
 - Auto prompts are applied only to active AgentSpace terminal input. They do not apply to Agent Session `/send` or Inspiration terminal `Summary` / `Create Goal` flows.
+- Hiding an AgentSpace pane is layout-only and must not close terminals, release the AgentSpace, or mutate workspace files.
+- The settings column cannot be hidden. When the terminal pane is hidden, prompt-zone controls are hidden but settings controls remain available.

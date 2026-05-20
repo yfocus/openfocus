@@ -192,8 +192,14 @@ def test_agent_space_view_passes_task_basic_and_autostart_config():
         assert match is not None
         config = json.loads(html.unescape(match.group(1)))
         assert config["taskBasic"] == task_basic
+        assert config["taskTitle"] == "t"
+        assert config["taskUrl"] == f"/goals?task={task_public_id}"
+        assert config["taskDueDate"] == str(dt.date.today())
+        assert "spaceCreatedAt" in config
+        assert "spaceCompanion" in config
         assert config["startAgentCommand"] == "coco -y"
         assert config["autoStartDefaultTerminal"] is True
+        assert "space-copy-task" not in r.text
 
     import asyncio
 

@@ -543,6 +543,25 @@
       .cal-item a:hover{ color: var(--foreground); text-decoration: underline; }
       .cal-item .meta{ font-size: 11px; color: var(--muted-foreground); }
 
+      dialog.system-dialog{
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        background: var(--popover);
+        color: var(--text);
+        box-shadow: 0 22px 70px rgba(0,0,0,0.55);
+        width: min(520px, calc(100% - 24px));
+        padding: 0;
+      }
+      dialog.system-dialog::backdrop{ background: rgba(0,0,0,0.55); }
+      .system-body{ padding: 14px; display:flex; flex-direction:column; gap: 12px; }
+      .system-grid{ display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      .system-field{ display:flex; flex-direction:column; gap: 6px; }
+      .system-field label{ font-size: 12px; color: var(--muted-foreground); }
+      .system-field input{ padding: 8px 9px; font-size: 13px; }
+      @media (max-width: 640px){
+        .system-grid{ grid-template-columns: 1fr; }
+      }
+
       .swim{ border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.02); padding: 12px; }
       .swim-header{ display:grid; grid-template-columns: 260px 1fr; gap: 12px; align-items:end; padding: 2px 6px 10px; }
       .swim-hlabel{ font-size: 11px; color: rgba(215,255,233,0.62); }
@@ -588,6 +607,8 @@
           <a href="javascript:void(0)" id="nav-calendar">Calendar</a>
           <span class="nav-sep">|</span>
           <a href="/agent_space_prompts">Agent Prompts</a>
+          <span class="nav-sep">|</span>
+          <a href="javascript:void(0)" id="nav-system">System</a>
           <span class="nav-sep">|</span>
           <div class="attention-fab-wrap" id="attention-fab-wrap">
             <button type="button" class="attention-fab" id="attention-fab" aria-label="Open attention inbox" title="Attention Inbox · R=running W=waiting/review">
@@ -646,6 +667,41 @@
       </div>
     </dialog>
 
+    <dialog id="system-dialog" class="system-dialog">
+      <form method="dialog" style="margin:0;">
+        <div class="cal-head">
+          <div>
+            <div class="cal-title">System</div>
+            <div class="cal-sub">AgentSpace display settings</div>
+          </div>
+          <div class="cal-actions">
+            <button type="submit" class="btn-ghost" aria-label="Close">×</button>
+          </div>
+        </div>
+      </form>
+      <div class="cal-divider"></div>
+      <div class="system-body">
+        <div class="system-grid">
+          <div class="system-field">
+            <label for="system-files-font-size">Files font</label>
+            <input id="system-files-font-size" type="number" min="10" max="24" step="1" />
+          </div>
+          <div class="system-field">
+            <label for="system-preview-font-size">Preview font</label>
+            <input id="system-preview-font-size" type="number" min="10" max="24" step="1" />
+          </div>
+          <div class="system-field">
+            <label for="system-terminal-font-size">Terminal font</label>
+            <input id="system-terminal-font-size" type="number" min="10" max="24" step="1" />
+          </div>
+        </div>
+        <div class="cal-actions" style="justify-content:flex-end;">
+          <button type="button" class="btn-ghost" id="system-reset-fonts">Reset</button>
+          <button type="button" class="btn-primary" id="system-save">Save</button>
+        </div>
+      </div>
+    </dialog>
+
     <script>
       const $ = (sel, root=document) => root.querySelector(sel);
       const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
@@ -682,6 +738,98 @@
       }
 
       document.getElementById('nav-new-goal')?.addEventListener('click', openNewGoal);
+
+      // Global System settings.
+      (function(){
+        const btn = document.getElementById('nav-system');
+        const dlg = document.getElementById('system-dialog');
+        const filesEl = document.getElementById('system-files-font-size');
+        const previewEl = document.getElementById('system-preview-font-size');
+        const terminalEl = document.getElementById('system-terminal-font-size');
+        const saveBtn = document.getElementById('system-save');
+        const resetBtn = document.getElementById('system-reset-fonts');
+        if(!btn || !dlg || !filesEl || !previewEl || !terminalEl || !saveBtn || !resetBtn) return;
+
+        const KEY = 'openfocus.agent_space.settings.v1';
+        const EVENT = 'openfocus:agent-space-settings-changed';
+        const DEFAULTS = {
+          filesFontSize: 13,
+          previewFontSize: 12,
+          terminalFontSize: 13,
+          showFiles: true,
+          showPreview: true,
+          showTerminal: true,
+        };
+        function clampNumber(value, min, max, fallback){
+          const n = Number(value);
+          if(!Number.isFinite(n)) return fallback;
+          return Math.max(min, Math.min(max, Math.round(n)));
+        }
+        function normalize(raw){
+          const src = raw && typeof raw === 'object' ? raw : {};
+          const next = {
+            filesFontSize: clampNumber(src.filesFontSize, 10, 24, DEFAULTS.filesFontSize),
+            previewFontSize: clampNumber(src.previewFontSize, 10, 24, DEFAULTS.previewFontSize),
+            terminalFontSize: clampNumber(src.terminalFontSize, 10, 24, DEFAULTS.terminalFontSize),
+            showFiles: src.showFiles !== false,
+            showPreview: src.showPreview !== false,
+            showTerminal: src.showTerminal !== false,
+          };
+          return next;
+        }
+        function load(){
+          try{
+            const raw = localStorage.getItem(KEY);
+            return normalize(raw ? JSON.parse(raw) : {});
+          }catch(_){
+            return normalize({});
+          }
+        }
+        function save(settings){
+          const next = normalize(settings);
+          try{ localStorage.setItem(KEY, JSON.stringify(next)); }catch(_){ }
+          try{ window.dispatchEvent(new CustomEvent(EVENT, { detail: { settings: next, source: 'system' } })); }catch(_){ }
+          return next;
+        }
+        function fill(){
+          const settings = load();
+          filesEl.value = String(settings.filesFontSize);
+          previewEl.value = String(settings.previewFontSize);
+          terminalEl.value = String(settings.terminalFontSize);
+        }
+        function openDialog(e){
+          if(e) e.preventDefault();
+          fill();
+          if(typeof dlg.showModal === 'function') dlg.showModal();
+          else dlg.setAttribute('open', '');
+        }
+        btn.addEventListener('click', openDialog);
+        saveBtn.addEventListener('click', ()=>{
+          const current = load();
+          save({
+            ...current,
+            filesFontSize: filesEl.value,
+            previewFontSize: previewEl.value,
+            terminalFontSize: terminalEl.value,
+          });
+          toast('System settings saved');
+          if(typeof dlg.close === 'function') dlg.close();
+          else dlg.removeAttribute('open');
+        });
+        resetBtn.addEventListener('click', ()=>{
+          const current = load();
+          const next = save({
+            ...current,
+            filesFontSize: DEFAULTS.filesFontSize,
+            previewFontSize: DEFAULTS.previewFontSize,
+            terminalFontSize: DEFAULTS.terminalFontSize,
+          });
+          filesEl.value = String(next.filesFontSize);
+          previewEl.value = String(next.previewFontSize);
+          terminalEl.value = String(next.terminalFontSize);
+          toast('AgentSpace fonts reset');
+        });
+      })();
 
       // Global Attention Inbox in the navigation bar.
       (function(){

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 
 def test_agent_space_prompt_zone_exposes_pua_button_and_prompt():
     source = open(
@@ -37,3 +39,45 @@ def test_agent_space_prompt_zone_exposes_pua_button_and_prompt():
 
     goals_source = open("openfocus/templates/goals.html", encoding="utf-8").read()
     assert "startAgentCommand ? '?autostart=1' : ''" in goals_source
+
+
+def test_agent_space_task_panel_and_layout_settings_are_exposed():
+    source = open(
+        "openfocus/static/terminal-panel/terminal.js", encoding="utf-8"
+    ).read()
+    css = open("openfocus/static/terminal-panel/terminal.css", encoding="utf-8").read()
+    agent_space_template = open(
+        "openfocus/templates/agent_space.html", encoding="utf-8"
+    ).read()
+    base_template = open("openfocus/templates/base.html", encoding="utf-8").read()
+
+    assert 'id="rt-task-show"' in source
+    assert 'id="rt-task-details-modal"' in source
+    assert 'id="rt-task-cleanup"' in source
+    assert 'id="rt-start-settings-modal"' in source
+    assert 'id="rt-start-command-input"' in source
+    assert 'id="rt-show-files"' in source
+    assert 'id="rt-show-preview"' in source
+    assert 'id="rt-show-terminal"' in source
+    assert 'data-rt-pane="${esc(pane)}"' in source
+    assert "toggleAgentSpacePane" in source
+    assert (
+        "showFiles" in source and "showPreview" in source and "showTerminal" in source
+    )
+    assert "sideRoot" in source
+    assert 'id="rt-start-agent-edit"' in source
+    assert "openfocus.agent_space.settings.v1" in source
+    assert "prompt('Start Agent command'" not in source
+    assert ".rt-task-panel" in css
+    assert ".rt-settings-panel" in css
+    assert ".rt-pane-icon.on" in css
+    assert ".rt-pane-toggles" in css
+    assert '.rt-side[data-terminal-open="0"] .rt-prompt-zone' in css
+    assert "space-copy-task" not in agent_space_template
+    assert "agent-space-settings-column" in Path(
+        "frontend/src/entries/agent-space.tsx"
+    ).read_text(encoding="utf-8")
+    assert 'id="nav-system"' in base_template
+    assert 'id="system-dialog"' in base_template
+    assert "system-files-font-size" in base_template
+    assert "openfocus.agent_space.settings.v1" in base_template

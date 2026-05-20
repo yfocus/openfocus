@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 {% extends "base.html" %}
 {% block content %}
-  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=17">
+  <link rel="stylesheet" href="/static/terminal-panel/terminal.css?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19">
   <style>
     .agent-preview-content { height: 100%; min-height: 0; }
     .codebox.cm-preview { height: 100%; min-height: 0; overflow: hidden; border-radius: var(--radius); background: var(--background); border: 1px solid var(--border); }
@@ -52,60 +52,22 @@
       .agent-space-splitter { display: none; }
     }
 
-    .space-actions{ display:flex; gap: 8px; align-items:center; justify-content:flex-end; }
-    .space-btn{
-      padding: 2px 8px;
-      border-radius: calc(var(--radius) - 2px);
-      border: 1px solid var(--border);
-      text-decoration:none;
-      font-size: 14px;
-      line-height: 1.2;
-      background: transparent;
-    }
-    .space-btn:hover{ text-decoration:none; }
-    .space-btn.ok{ border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
-    .space-btn.ok:hover{ background: color-mix(in srgb, var(--primary) 90%, var(--background)); }
-    .space-btn.danger{ border-color: var(--destructive); background: color-mix(in srgb, var(--destructive) 12%, transparent); color: var(--destructive); }
-    .space-btn.danger:hover{ background: color-mix(in srgb, var(--destructive) 18%, transparent); }
   </style>
+  {% set _companion_name = (companion.name or companion.device_id) if companion else ((space.companion_id|string) if space and space.companion_id else '') %}
   <div style="height: 100%; min-height: 0; display: flex; flex-direction: column;">
+  {% if not space %}
   <div class="panel pad" style="margin-top: 10px; padding: 10px 12px;">
-    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap;">
-      {% set _companion_name = (companion.name or companion.device_id) if companion else (space.companion_id if space else '') %}
-      <div style="min-width: 0;">
-        <div style="font-size: 14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-          {% if goal %}
-            <a href="/goals?goal={{ goal.id }}" class="btn-ghost" role="button" style="padding: 0;">{{ goal.title }}</a>
-          {% else %}
-            <span class="muted">—</span>
-          {% endif %}
-          | <a href="/goals?task={{ task.public_id }}" class="btn-ghost" role="button" style="padding: 0;">{{ task.title }}</a>
-          | <span id="space-task-id">{{ task.public_id }}</span>
-          <button type="button" class="btn-ghost" id="space-copy-task" title="Copy Task ID" style="padding: 2px 8px;">copy</button>
-          | {{ _companion_name }}
-        </div>
-      </div>
-      <div class="space-actions">
-        <a href="/goals?task={{ task.public_id }}" class="space-btn ok" role="button">Task</a>
-        {% if space %}
-          <button type="button" class="space-btn danger" id="space-release">Cleanup</button>
-        {% endif %}
-      </div>
-    </div>
-    <div class="divider"></div>
-
-    {% if not space %}
       <div class="muted">No workspace has been created yet. Go back to the task detail and click “Create Workspace”.</div>
-    {% endif %}
   </div>
+  {% endif %}
 
   {% if space %}
-  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "taskBasic": {{ (task.content or "")|tojson }}, "rootPath": {{ space.root_path|tojson }}, "agentPrefix": {{ agent_prefix|tojson }}, "startAgentCommand": {{ (space.start_agent_command or "")|tojson }}, "autoStartDefaultTerminal": {{ "true" if auto_start_agent_command else "false" }}}'>
+  <div id="agent-space-react-root" style="flex: 1 1 0; min-height: 0; height: auto; display: flex; flex-direction: column;" data-config='{"spaceId": {{ space.id }}, "taskPublicId": {{ task.public_id|tojson }}, "taskTitle": {{ (task.title or "")|tojson }}, "taskBasic": {{ (task.content or "")|tojson }}, "taskUrl": {{ ("/goals?task=" ~ task.public_id)|tojson }}, "taskDueDate": {{ (goal.due_date.isoformat() if goal and goal.due_date else "")|tojson }}, "spaceCompanion": {{ (_companion_name or "")|tojson }}, "spaceCreatedAt": {{ (space.created_at.isoformat() if space.created_at else "")|tojson }}, "rootPath": {{ space.root_path|tojson }}, "agentPrefix": {{ agent_prefix|tojson }}, "startAgentCommand": {{ (space.start_agent_command or "")|tojson }}, "autoStartDefaultTerminal": {{ "true" if auto_start_agent_command else "false" }}}'>
     <div class="muted" style="padding: 12px;">Loading AgentSpace…</div>
   </div>
 
-  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=18"></script>
-  <script type="module" src="/static/dist/assets/agent-space.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=1"></script>
+  <script src="/static/terminal-panel/terminal.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=19"></script>
+  <script type="module" src="/static/dist/assets/agent-space.js?v={{ (space.updated_at.timestamp()|int) if space and space.updated_at else 0 }}&asset=2"></script>
   {% endif %}
   </div>
 {% endblock %}

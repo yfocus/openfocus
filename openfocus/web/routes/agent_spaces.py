@@ -204,6 +204,28 @@ def _ttyd_bridge_script() -> str:
     }catch(_){ return ''; }
   }
 
+  function applyTerminalFontSize(raw){
+    const n = Number(raw);
+    if(!Number.isFinite(n)) return;
+    const size = Math.max(10, Math.min(24, Math.round(n)));
+    let style = document.getElementById('openfocus-terminal-font-style');
+    if(!style){
+      style = document.createElement('style');
+      style.id = 'openfocus-terminal-font-style';
+      document.head.appendChild(style);
+    }
+    style.textContent = '.xterm, .terminal, .xterm-rows, .xterm-screen { font-size: ' + size + 'px !important; }';
+    try{ window.dispatchEvent(new Event('resize')); }catch(_){ }
+  }
+
+  window.addEventListener('message', function(event){
+    try{
+      if(event.origin !== window.location.origin) return;
+      const data = event.data || {};
+      if(data && data.type === 'openfocus:terminal-font-size') applyTerminalFontSize(data.fontSize);
+    }catch(_){ }
+  });
+
   function stripToken(raw){
     let s = String(raw || '').trim();
     while(s.length >= 2 && "'\"`".indexOf(s[0]) >= 0 && s[s.length - 1] === s[0]) s = s.slice(1, -1).trim();
