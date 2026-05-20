@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 ---
 name: focus_report
-description: Report task execution results (name/prompt/response/status) from external agents back to OpenFocus, and let OpenFocus persist it as events and auto-mark tasks done when appropriate.
+description: Report task execution results (name/prompt/response/status) from external agents back to OpenFocus, where reports are persisted as events and task completion still requires human confirmation.
 metadata:
   {
     "openclaw": {
@@ -17,6 +17,7 @@ metadata:
 OpenFocus 服务端接收后会：
 
 - 把每次上报持久化为一条 `events` 记录（`kind=skill.focus_report`）
+- 不会自动把 Task 标记为 `done`；用户需要在 Task detail 中点击 `Finish` 完成人工确认。
 
 ## 服务端依赖
 
