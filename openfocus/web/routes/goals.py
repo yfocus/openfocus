@@ -13,7 +13,16 @@ from ...db import session_scope
 from ...domains.events import service as event_service
 from ...domains.goals import service as goal_service
 from ...domains.memory import service as memory_service
-from ...models import AgentSpace, Event, Goal, Task
+from ...models import AgentSpace, Event, Goal, Task, TaskAgentActivity
+
+HOOK_ACTIVE_TASK_STATES = {
+    "running",
+    "waiting",
+    "review_ready",
+    "failed",
+    "stale",
+    "canceled",
+}
 
 
 def _truncate_zh(text: str, n: int = 20) -> str:
@@ -94,19 +103,24 @@ def create_router(
                 for sp in spaces:
                     agent_spaces_by_task[sp.task_public_id] = sp
 
-            # 尽量用已有 events 推断“进行中/进度百分比/最近更新时间”
             public_ids = [t.public_id for t in tasks]
-            latest_event_by_task: dict[str, Event] = {}
+            activity_by_task: dict[str, TaskAgentActivity] = {}
             if public_ids:
-                evs = (
-                    s.query(Event)
-                    .filter(Event.task_id.in_(public_ids))
-                    .order_by(Event.id.desc())
+                activities = (
+                    s.query(TaskAgentActivity)
+                    .filter(TaskAgentActivity.task_public_id.in_(public_ids))
+                    .order_by(
+                        TaskAgentActivity.updated_at.desc(),
+                        TaskAgentActivity.id.desc(),
+                    )
                     .all()
                 )
-                for ev in evs:
-                    if ev.task_id and ev.task_id not in latest_event_by_task:
-                        latest_event_by_task[ev.task_id] = ev
+                for activity in activities:
+                    if (
+                        activity.task_public_id
+                        and activity.task_public_id not in activity_by_task
+                    ):
+                        activity_by_task[activity.task_public_id] = activity
 
             # 任务详情栏需要展示“与该任务相关的事件”（只展示最近 N 条，避免页面过重）。
             # 注意：事件展示面向人，不直接暴露内部 kind/status 码。
@@ -202,19 +216,18 @@ def create_router(
             task_meta: dict[str, dict] = {}
             now = memory_service.utcnow()
             for t in tasks:
-                ev = latest_event_by_task.get(t.public_id)
+                activity = activity_by_task.get(t.public_id)
                 last_at = None
-                kind = None
-                if ev is not None:
-                    kind = ev.kind
-                    last_at = ev.created_at
+                activity_state = ""
+                if activity is not None:
+                    activity_state = str(activity.state or "").strip().lower()
+                    last_at = activity.last_activity_at or activity.state_started_at
 
                 ui_status = "todo"
                 if t.status == "done":
                     ui_status = "done"
-                else:
-                    if kind in {"task.started", "task.progress"}:
-                        ui_status = "in_progress"
+                elif activity_state in HOOK_ACTIVE_TASK_STATES:
+                    ui_status = "in_progress"
 
                 task_meta[t.public_id] = {
                     "ui_status": ui_status,

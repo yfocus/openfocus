@@ -343,6 +343,159 @@ async def test_agent_space_view_embeds_full_agent_prefix():
 
 
 @pytest.mark.anyio
+async def test_dashboard_task_status_uses_hook_runtime_not_journal_events():
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import Event, Goal, Task
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/goals",
+            data={
+                "title": "hook status goal",
+                "content": "verify hook task status",
+                "due_date": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        with session_scope() as s:
+            goal = s.query(Goal).order_by(Goal.id.desc()).first()
+            assert goal is not None
+            goal_id = int(goal.id)
+            hook_task = Task(
+                goal_id=goal_id,
+                title="hook-running",
+                content="d",
+                status="todo",
+            )
+            journal_task = Task(
+                goal_id=goal_id,
+                title="journal-only",
+                content="d",
+                status="todo",
+            )
+            s.add_all([hook_task, journal_task])
+            s.flush()
+            hook_public_id = hook_task.public_id
+            journal_public_id = journal_task.public_id
+            s.add(
+                Event(
+                    kind="task.progress",
+                    agent="test",
+                    task_id=journal_public_id,
+                    payload={"status": "running", "message": "journal only"},
+                )
+            )
+
+        with session_scope() as s:
+            result = agent_activity_service.handle_runtime_signal(
+                s,
+                raw_kind="UserPromptSubmit",
+                agent_runtime="codex",
+                turn_id="turn-hook-running",
+                task_public_id=hook_public_id,
+                source="test",
+                payload={"message": "working"},
+            )
+            assert result["activity_state"] == "running"
+
+        r = await client.get(f"/goals?goal={goal_id}")
+        assert r.status_code == 200
+        matched = re.search(
+            rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
+        assert matched is not None
+        html = matched.group("html")
+        hook_row = re.search(
+            r'<tr class="js-open-task"[^>]*data-sort-title="hook-running"(?P<html>.*?)</tr>',
+            html,
+            re.S,
+        )
+        journal_row = re.search(
+            r'<tr class="js-open-task"[^>]*data-sort-title="journal-only"(?P<html>.*?)</tr>',
+            html,
+            re.S,
+        )
+        assert hook_row is not None
+        assert journal_row is not None
+        assert ">In progress<" in hook_row.group("html")
+        assert ">Not started<" in journal_row.group("html")
+
+
+@pytest.mark.anyio
+async def test_dashboard_task_status_ignores_dismissed_inbox_activity():
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import Goal, Task, TaskAgentActivity
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        with session_scope() as s:
+            goal = Goal(
+                title="dismiss status goal",
+                content="verify dismiss keeps status",
+                due_date=dt.date.today() + dt.timedelta(days=7),
+            )
+            s.add(goal)
+            s.flush()
+            task = Task(
+                goal_id=int(goal.id),
+                title="dismissed-running",
+                content="d",
+                status="todo",
+            )
+            s.add(task)
+            s.flush()
+            goal_id = int(goal.id)
+            public_id = task.public_id
+
+        with session_scope() as s:
+            result = agent_activity_service.handle_runtime_signal(
+                s,
+                raw_kind="UserPromptSubmit",
+                agent_runtime="codex",
+                turn_id="turn-dismissed-running",
+                task_public_id=public_id,
+                source="test",
+                payload={"message": "working"},
+            )
+            assert result["activity_state"] == "running"
+            activity = (
+                s.query(TaskAgentActivity)
+                .filter(TaskAgentActivity.task_public_id == public_id)
+                .one()
+            )
+            agent_activity_service.dismiss_activity(s, activity_id=int(activity.id))
+
+        r = await client.get("/api/agent_activity/summary")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+        r = await client.get(f"/goals?goal={goal_id}")
+        assert r.status_code == 200
+        matched = re.search(
+            rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
+        assert matched is not None
+        row = re.search(
+            r'<tr class="js-open-task"[^>]*data-sort-title="dismissed-running"(?P<html>.*?)</tr>',
+            matched.group("html"),
+            re.S,
+        )
+        assert row is not None
+        assert ">In progress<" in row.group("html")
+
+
+@pytest.mark.anyio
 async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
     from openfocus.app import app
 
@@ -410,7 +563,8 @@ async def test_goal_due_date_edit_refreshes_status_dot(monkeypatch):
 async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monkeypatch):
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import Event, Goal, Task
+    from openfocus.domains.agent_activity import service as agent_activity_service
+    from openfocus.models import Goal, Task
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -450,14 +604,19 @@ async def test_dashboard_goal_detail_tasks_default_order_and_sort_controls(monke
             rows["done-last"].created_at = now
             rows["done-last"].status = "done"
             rows["done-last"].completed_at = now
-            s.add(
-                Event(
-                    kind="task.started",
-                    agent="test",
-                    task_id=rows["doing-mid"].public_id,
-                    payload={"task_public_id": rows["doing-mid"].public_id},
-                )
+            doing_public_id = rows["doing-mid"].public_id
+
+        with session_scope() as s:
+            result = agent_activity_service.handle_runtime_signal(
+                s,
+                raw_kind="UserPromptSubmit",
+                agent_runtime="codex",
+                turn_id="turn-doing-mid",
+                task_public_id=doing_public_id,
+                source="test",
+                payload={"message": "working"},
             )
+            assert result["ok"] is True
 
         r = await client.get(f"/goals?goal={goal_id}")
         assert r.status_code == 200
