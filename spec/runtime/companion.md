@@ -193,10 +193,13 @@ activity。
 - `openfocus/hooks/openfocus-coco-hook.sh`
 
 Codex `~/.codex/hooks.json` installation must use Codex CLI config event keys:
-`SessionStart`、`UserPromptSubmit`、`PermissionRequest`、`Stop`。这些 key
+`SessionStart`、`UserPromptSubmit`、`PermissionRequest`、`PreToolUse`、
+`PostToolUse`、`Stop`。这些 key
 和 app-server/UI 输出里的 lower-camel 或 wire 名称不是同一个配置层；installer
 不得只写 `sessionStart` / `userPromptSubmit` / `permissionRequest`，否则 Codex
-TUI 不会按预期执行 default OpenFocus hook。`Stop` 映射为
+TUI 不会按预期执行 default OpenFocus hook。`PreToolUse` / `PostToolUse`
+映射为 `runtime.turn.activity`，用于 approval 后将 waiting turn 恢复为 running。
+`Stop` 映射为
 `runtime.turn.completed`，用于 turn 结束后提醒。
 Codex 安装 hook 后还必须由用户在 Codex TUI 中运行 `/hooks`，并显式 trust
 OpenFocus default hook entries；未 trust 前 Codex 不会把 hook events 发送给

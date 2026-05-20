@@ -42,6 +42,20 @@ def test_codex_install_adds_instance_specific_hook_commands(tmp_path: Path) -> N
     assert "user-prompt-submit" in command
     assert hook["timeout"] == 5
     assert "timeoutSec" not in hook
+    pre_tool_hook = data["hooks"]["PreToolUse"][0]["hooks"][0]
+    pre_tool_command = pre_tool_hook["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in pre_tool_command
+    assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in pre_tool_command
+    assert f"OPENFOCUS_HOOK_SPOOL_DIR={hook_spool_dir}" in pre_tool_command
+    assert " pre-tool-use" in pre_tool_command
+    assert pre_tool_hook["timeout"] == 5
+    post_tool_hook = data["hooks"]["PostToolUse"][0]["hooks"][0]
+    post_tool_command = post_tool_hook["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in post_tool_command
+    assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in post_tool_command
+    assert f"OPENFOCUS_HOOK_SPOOL_DIR={hook_spool_dir}" in post_tool_command
+    assert " post-tool-use" in post_tool_command
+    assert post_tool_hook["timeout"] == 5
     stop_command = data["hooks"]["Stop"][0]["hooks"][0]["command"]
     assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in stop_command
     assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in stop_command

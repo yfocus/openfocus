@@ -263,6 +263,8 @@ Codex 不会执行新注册的 hook，直到你在 Codex TUI 中显式信任它�
 - `SessionStart`：关联 session。
 - `UserPromptSubmit`：识别 turn 启动和 running 状态。
 - `PermissionRequest`：识别 waiting-for-approval 状态。
+- `PreToolUse`：approval 后恢复 running activity。
+- `PostToolUse`：approval 后恢复 running activity 的 fallback。
 - `Stop`：识别 turn completed / review-ready 状态。
 
 完成 trust 后，Codex 才会把 hook events 发送给 OpenFocus。

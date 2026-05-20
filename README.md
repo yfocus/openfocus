@@ -280,6 +280,8 @@ Trust the OpenFocus entries for these Codex events:
 - `SessionStart`: session correlation.
 - `UserPromptSubmit`: turn start/running state.
 - `PermissionRequest`: waiting-for-approval state.
+- `PreToolUse`: running activity after approval.
+- `PostToolUse`: running activity fallback after approval.
 - `Stop`: turn completed/review-ready state.
 
 Codex will only send hook events to OpenFocus after these entries are trusted.

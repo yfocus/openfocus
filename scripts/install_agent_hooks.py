@@ -28,6 +28,8 @@ CODEX_EVENTS = {
     "SessionStart": ("session-start", 5),
     "UserPromptSubmit": ("user-prompt-submit", 5),
     "PermissionRequest": ("permission-request", 600),
+    "PreToolUse": ("pre-tool-use", 5),
+    "PostToolUse": ("post-tool-use", 5),
     "Stop": ("stop", 5),
 }
 NON_CANONICAL_CODEX_EVENTS = {

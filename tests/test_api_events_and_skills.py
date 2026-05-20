@@ -187,12 +187,12 @@ async def test_runtime_activity_tracks_running_waiting_then_review_ready():
         s.flush()
         public_id = t.public_id
 
-    def emit(kind: str, payload: dict) -> None:
+    def emit(raw_kind: str, payload: dict) -> None:
         with session_scope() as s:
             result = agent_activity_service.handle_runtime_signal(
                 s,
-                kind=kind,
-                agent_runtime="coco",
+                raw_kind=raw_kind,
+                agent_runtime="codex",
                 turn_id="turn-1",
                 task_public_id=public_id,
                 source="test",
@@ -202,7 +202,7 @@ async def test_runtime_activity_tracks_running_waiting_then_review_ready():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        emit("runtime.turn.started", {"message": "working"})
+        emit("UserPromptSubmit", {"message": "working"})
         r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert body["count"] == 1
@@ -210,12 +210,12 @@ async def test_runtime_activity_tracks_running_waiting_then_review_ready():
         running = body["buckets"]["running"][0]
         assert running["type"] == "running"
         assert running["bucket"] == "running"
-        assert running["agent_runtime"] == "coco"
-        assert running["agent_name"] == "coco"
+        assert running["agent_runtime"] == "codex"
+        assert running["agent_name"] == "codex"
         assert running["state_since"]
         assert isinstance(running["state_age_seconds"], int)
 
-        emit("runtime.turn.waiting_for_approval", {"message": "needs approval"})
+        emit("PermissionRequest", {"message": "needs approval"})
         r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert body["count"] == 1
@@ -224,7 +224,15 @@ async def test_runtime_activity_tracks_running_waiting_then_review_ready():
         assert body["buckets"]["waiting"][0]["type"] == "waiting"
         assert body["buckets"]["waiting"][0]["waiting_kind"].endswith("approval")
 
-        emit("runtime.turn.completed", {"status": "succeeded", "summary": "done"})
+        emit("PreToolUse", {"message": "tool resumed after approval"})
+        r = await client.get("/api/agent_activity/summary")
+        body = r.json()
+        assert body["count"] == 1
+        assert len(body["buckets"]["running"]) == 1
+        assert len(body["buckets"]["waiting"]) == 0
+        assert body["buckets"]["running"][0]["type"] == "running"
+
+        emit("Stop", {"status": "succeeded", "summary": "done"})
         r = await client.get("/api/agent_activity/summary")
         body = r.json()
         assert len(body["buckets"]["running"]) == 0
