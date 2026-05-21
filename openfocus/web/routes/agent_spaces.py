@@ -6,7 +6,6 @@ import base64
 import contextlib
 import json
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 
@@ -20,6 +19,7 @@ from ...domains.agent_activity import service as agent_activity_service
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
+from ...domains.terminals import gateway as terminal_gateway
 from ...models import (
     AgentMessage,
     AgentSession,
@@ -28,7 +28,6 @@ from ...models import (
     Companion,
     Goal,
     RemoteTerminalOutput,
-    RemoteTerminalSession,
     Task,
 )
 from ...schemas import AgentSpaceCreateIn, AgentSpacePromptIn
@@ -37,8 +36,9 @@ _TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _ttyd_embed_path(space_id: int, terminal_id: str) -> str:
-    tid = urllib.parse.quote(str(terminal_id or ""), safe="")
-    return f"/api/agent_spaces/{int(space_id)}/terminals/{tid}/ttyd/"
+    return terminal_gateway.ttyd_embed_path(
+        "/api/agent_spaces", int(space_id), terminal_id
+    )
 
 
 def _openfocus_base_url(request: Request) -> str:
@@ -179,427 +179,11 @@ async def delete_agent_space_for_task(
 
 
 def _ttyd_bridge_script() -> str:
-    return r"""
-<script>
-(function(){
-  if(window.__openfocusTtydBridgeInstalled) return;
-  window.__openfocusTtydBridgeInstalled = true;
-
-  function disableBeforeUnload(){
-    try{ window.onbeforeunload = null; }catch(_){ }
-  }
-
-  try{
-    const rawAdd = window.addEventListener.bind(window);
-    window.addEventListener = function(type, listener, options){
-      if(String(type || '').toLowerCase() === 'beforeunload') return;
-      return rawAdd(type, listener, options);
-    };
-  }catch(_){ }
-
-  function terminalIdFromLocation(){
-    try{
-      const m = String(window.location && window.location.pathname || '').match(/\/terminals\/([^/]+)\/ttyd(?:\/|$)/);
-      return m ? decodeURIComponent(m[1]) : '';
-    }catch(_){ return ''; }
-  }
-
-  function applyTerminalFontSize(raw){
-    const n = Number(raw);
-    if(!Number.isFinite(n)) return;
-    const size = Math.max(10, Math.min(24, Math.round(n)));
-    let style = document.getElementById('openfocus-terminal-font-style');
-    if(!style){
-      style = document.createElement('style');
-      style.id = 'openfocus-terminal-font-style';
-      document.head.appendChild(style);
-    }
-    style.textContent = '.xterm, .terminal, .xterm-rows, .xterm-screen { font-size: ' + size + 'px !important; }';
-    try{ window.dispatchEvent(new Event('resize')); }catch(_){ }
-  }
-
-  window.addEventListener('message', function(event){
-    try{
-      if(event.origin !== window.location.origin) return;
-      const data = event.data || {};
-      if(data && data.type === 'openfocus:terminal-font-size') applyTerminalFontSize(data.fontSize);
-    }catch(_){ }
-  });
-
-  function stripToken(raw){
-    let s = String(raw || '').trim();
-    while(s.length >= 2 && "'\"`".indexOf(s[0]) >= 0 && s[s.length - 1] === s[0]) s = s.slice(1, -1).trim();
-    const pairs = { '(': ')', '[': ']', '{': '}', '<': '>' };
-    let changed = true;
-    while(changed && s.length >= 2){
-      changed = false;
-      const end = pairs[s[0]];
-      if(end && s[s.length - 1] === end){
-        s = s.slice(1, -1).trim();
-        changed = true;
-      }
-    }
-    while(/[.,;]$/.test(s)) s = s.slice(0, -1);
-    if(/:\d+:$/.test(s)) s = s.slice(0, -1);
-    return s;
-  }
-
-  function parseTarget(raw){
-    let value = stripToken(raw);
-    if(!value) return null;
-    if(/^https?:\/\//i.test(value)) return { href: value, text: value };
-    if(value[0] === '@' && value.length > 1) value = stripToken(value.slice(1));
-
-    let cameFromFileUrl = false;
-    if(/^file:\/\//i.test(value)){
-      cameFromFileUrl = true;
-      try{
-        const url = new URL(value);
-        value = decodeURIComponent(url.pathname || '');
-      }catch(_){
-        value = value.replace(/^file:\/\//i, '');
-      }
-    }
-
-    let line = null;
-    let column = null;
-    const anchor = value.match(/#L(\d+)(?:C(\d+))?$/i);
-    if(anchor){
-      line = Number(anchor[1] || 0) || null;
-      column = Number(anchor[2] || 0) || null;
-      value = value.slice(0, anchor.index).trim();
-    }else{
-      const suffix = value.match(/:(\d+)(?::(\d+))?$/);
-      if(suffix){
-        line = Number(suffix[1] || 0) || null;
-        column = Number(suffix[2] || 0) || null;
-        value = value.slice(0, suffix.index).trim();
-      }
-    }
-
-    value = stripToken(value);
-    if(value[0] === '@' && value.length > 1) value = stripToken(value.slice(1));
-    if(!value) return null;
-    if(!cameFromFileUrl && !(/^\.{1,2}\//.test(value) || /^\//.test(value) || value.indexOf('/') >= 0 || /[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]{1,12}$/.test(value))) return null;
-    return { path: value, text: raw, line: line, column: column };
-  }
-
-  function parseAnchorTarget(eventTarget){
-    try{
-      const el = eventTarget && eventTarget.closest ? eventTarget : (eventTarget && eventTarget.parentElement);
-      const anchor = el && el.closest ? el.closest('a[href]') : null;
-      if(!anchor) return null;
-      const attr = anchor.getAttribute('href') || '';
-      return parseTarget(attr) || parseTarget(anchor.href || '') || null;
-    }catch(_){ return null; }
-  }
-
-  function isXtermLike(value){
-    try{
-      return !!(value && typeof value.registerLinkProvider === 'function' && value.buffer && value.buffer.active && typeof value.buffer.active.getLine === 'function');
-    }catch(_){ return false; }
-  }
-
-  function discoverXterm(root, depth, seen){
-    if(!root || depth < 0) return null;
-    if(isXtermLike(root)) return root;
-    if(typeof root !== 'object' && typeof root !== 'function') return null;
-    if(seen.has(root)) return null;
-    seen.add(root);
-    const preferred = ['term', 'terminal', 'xterm', '_term', '_terminal', 'instance', 'client', 'app'];
-    for(const key of preferred){
-      try{
-        const found = discoverXterm(root[key], depth - 1, seen);
-        if(found) return found;
-      }catch(_){ }
-    }
-    if(depth <= 0) return null;
-    let keys = [];
-    try{ keys = Object.keys(root).slice(0, 80); }catch(_){ keys = []; }
-    for(const key of keys){
-      if(preferred.indexOf(key) >= 0) continue;
-      try{
-        const found = discoverXterm(root[key], depth - 1, seen);
-        if(found) return found;
-      }catch(_){ }
-    }
-    return null;
-  }
-
-  function findXterm(){
-    const seen = new WeakSet();
-    const direct = discoverXterm(window, 3, seen);
-    if(direct) return direct;
-    try{
-      const roots = document.querySelectorAll('.terminal, .xterm');
-      for(const root of roots){
-        const found = discoverXterm(root, 2, seen);
-        if(found) return found;
-      }
-    }catch(_){ }
-    return null;
-  }
-
-  function terminalLineElement(eventTarget){
-    let el = eventTarget && eventTarget.nodeType === 1 ? eventTarget : (eventTarget && eventTarget.parentElement);
-    while(el && el !== document.body){
-      const parent = el.parentElement;
-      if(parent && parent.classList && parent.classList.contains('xterm-rows')) return el;
-      if(parent && parent.classList && parent.classList.contains('xterm-accessibility-tree')) return el;
-      el = parent;
-    }
-    return null;
-  }
-
-  function rowFromContainerAtPoint(selector, x, y){
-    try{
-      const containers = Array.from(document.querySelectorAll(selector));
-      for(const container of containers){
-        const rect = container.getBoundingClientRect();
-        if(x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
-        const children = Array.from(container.children || []).filter((child)=> String(child.textContent || '').trim());
-        if(!children.length) continue;
-        let best = null;
-        let bestDistance = Infinity;
-        for(const child of children){
-          const childRect = child.getBoundingClientRect();
-          const inside = y >= childRect.top && y <= childRect.bottom;
-          const distance = inside ? 0 : Math.min(Math.abs(y - childRect.top), Math.abs(y - childRect.bottom));
-          if(distance < bestDistance){
-            bestDistance = distance;
-            best = child;
-          }
-        }
-        if(best) return best;
-      }
-    }catch(_){ }
-    return null;
-  }
-
-  function terminalLineElementAtPoint(event){
-    return terminalLineElement(event.target)
-      || rowFromContainerAtPoint('.xterm-rows', event.clientX, event.clientY)
-      || rowFromContainerAtPoint('.xterm-accessibility-tree', event.clientX, event.clientY);
-  }
-
-  function estimateCellWidth(row){
-    try{
-      const probe = document.createElement('span');
-      const style = window.getComputedStyle(row);
-      probe.textContent = '0000000000';
-      probe.style.position = 'absolute';
-      probe.style.visibility = 'hidden';
-      probe.style.whiteSpace = 'pre';
-      probe.style.font = style.font;
-      row.appendChild(probe);
-      const width = probe.getBoundingClientRect().width / 10;
-      probe.remove();
-      if(width > 0) return width;
-    }catch(_){ }
-    return 8;
-  }
-
-  function candidateTokens(line){
-    const text = String(line || '');
-    if(!text) return [];
-    const re = /(?:@?file:\/\/[^\s<>"'`\)\]\}]+|https?:\/\/[^\s<>"'`\)\]\}]+|@?(?:\.{1,2}\/|\/|[A-Za-z0-9_.@+-]+\/)[^\s<>"'`\)\]\}]+|@?[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]{1,16}(?::\d+){0,2}(?:#L\d+(?:C\d+)?)?)/g;
-    const out = [];
-    let match;
-    while((match = re.exec(text))){
-      const raw = match[0] || '';
-      if(raw) out.push({ raw: raw, start: match.index || 0, end: (match.index || 0) + raw.length });
-    }
-    return out;
-  }
-
-  function linkCandidates(line){
-    const out = [];
-    for(const candidate of candidateTokens(line)){
-      const target = parseTarget(candidate.raw);
-      if(target) out.push({ raw: candidate.raw, start: candidate.start, end: candidate.end, target: target });
-    }
-    return out;
-  }
-
-  function tokenNearOffset(line, offset){
-    const candidates = linkCandidates(line);
-    if(!candidates.length) return '';
-    let best = '';
-    let bestDistance = Infinity;
-    for(const candidate of candidates){
-      const raw = candidate.raw || '';
-      const start = candidate.start || 0;
-      const end = candidate.end || start;
-      if(offset >= start && offset <= end) return stripToken(raw);
-      const distance = offset < start ? start - offset : offset - end;
-      if(distance < bestDistance){
-        bestDistance = distance;
-        best = raw;
-      }
-    }
-    return bestDistance <= 2 ? stripToken(best) : '';
-  }
-
-  function textOffsetFromNode(row, node, offset){
-    try{
-      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
-      let current;
-      let total = 0;
-      while((current = walker.nextNode())){
-        if(current === node) return total + Math.max(0, Math.min(String(current.nodeValue || '').length, Number(offset || 0)));
-        total += String(current.nodeValue || '').length;
-      }
-    }catch(_){ }
-    return null;
-  }
-
-  function caretOffsetFromPoint(row, x, y){
-    try{
-      if(document.caretPositionFromPoint){
-        const pos = document.caretPositionFromPoint(x, y);
-        if(pos && pos.offsetNode && row.contains(pos.offsetNode)){
-          const off = textOffsetFromNode(row, pos.offsetNode, pos.offset);
-          if(Number.isFinite(off)) return off;
-        }
-      }
-    }catch(_){ }
-    try{
-      if(document.caretRangeFromPoint){
-        const range = document.caretRangeFromPoint(x, y);
-        if(range && range.startContainer && row.contains(range.startContainer)){
-          const off = textOffsetFromNode(row, range.startContainer, range.startOffset);
-          if(Number.isFinite(off)) return off;
-        }
-      }
-    }catch(_){ }
-    return null;
-  }
-
-  function parseTextTarget(event){
-    const row = terminalLineElementAtPoint(event);
-    if(!row) return null;
-    const text = String(row.textContent || '');
-    if(!text) return null;
-    const rect = row.getBoundingClientRect();
-    const cellWidth = estimateCellWidth(row);
-    const caretOffset = caretOffsetFromPoint(row, event.clientX, event.clientY);
-    const offset = Number.isFinite(caretOffset) ? Number(caretOffset) : Math.max(0, Math.min(text.length, Math.floor((event.clientX - rect.left) / Math.max(1, cellWidth))));
-    const token = tokenNearOffset(text, offset);
-    return token ? parseTarget(token) : null;
-  }
-
-  let lastOpenKey = '';
-  let lastOpenTs = 0;
-
-  function postOpen(target){
-    if(!target) return false;
-    const key = [target.href || '', target.path || '', target.line || '', target.column || ''].join('|');
-    const now = Date.now();
-    if(key && key === lastOpenKey && now - lastOpenTs < 350) return true;
-    lastOpenKey = key;
-    lastOpenTs = now;
-    const payload = {
-      type: 'openfocus:terminal-link-open',
-      href: target.href || '',
-      text: target.text || '',
-      path: target.path || '',
-      line: target.line || null,
-      column: target.column || null,
-      terminalId: terminalIdFromLocation()
-    };
-    try{
-      window.parent && window.parent.postMessage(payload, window.location.origin);
-      return true;
-    }catch(_){ return false; }
-  }
-
-  function consumeEvent(event){
-    try{ event.preventDefault(); }catch(_){ }
-    try{ event.stopPropagation(); }catch(_){ }
-    try{ event.stopImmediatePropagation(); }catch(_){ }
-  }
-
-  function isCommandOpenEvent(event){
-    if(!event || event.button !== 0) return;
-    return !!(event.metaKey || event.ctrlKey);
-  }
-
-  function onCommandOpenEvent(event){
-    if(!isCommandOpenEvent(event)) return;
-    const target = parseAnchorTarget(event.target) || parseTextTarget(event);
-    if(!target) return;
-    if(!postOpen(target)) return;
-    consumeEvent(event);
-  }
-
-  const registeredXterms = new WeakSet();
-
-  function installXtermLinkProvider(){
-    const term = findXterm();
-    if(!term || registeredXterms.has(term)) return false;
-    try{
-      const disposable = term.registerLinkProvider({
-        provideLinks: function(y, callback){
-          try{
-            const active = term.buffer && term.buffer.active;
-            const line = active && active.getLine ? active.getLine(Number(active.baseY || 0) + Number(y || 1) - 1) : null;
-            const text = line && line.translateToString ? line.translateToString(true) : '';
-            const links = linkCandidates(text).map((candidate)=> ({
-              text: candidate.raw,
-              range: { start: { x: candidate.start + 1, y: Number(y || 1) }, end: { x: candidate.end, y: Number(y || 1) } },
-              activate: function(event){
-                if(!event || !(event.metaKey || event.ctrlKey)) return;
-                if(postOpen(candidate.target)) consumeEvent(event);
-              }
-            }));
-            callback(links);
-          }catch(_){
-            callback([]);
-          }
-        }
-      });
-      registeredXterms.add(term);
-      try{ window.__openfocusTtydLinkProvider = disposable; }catch(_){ }
-      return true;
-    }catch(_){ return false; }
-  }
-
-  disableBeforeUnload();
-  try{ setInterval(disableBeforeUnload, 1000); }catch(_){ }
-  try{ document.addEventListener('pointerdown', onCommandOpenEvent, true); }catch(_){ }
-  try{ document.addEventListener('mousedown', onCommandOpenEvent, true); }catch(_){ }
-  try{ document.addEventListener('click', onCommandOpenEvent, true); }catch(_){ }
-  try{
-    let attempts = 0;
-    const timer = setInterval(function(){
-      attempts += 1;
-      if(installXtermLinkProvider() || attempts > 40) clearInterval(timer);
-    }, 250);
-  }catch(_){ }
-})();
-</script>
-"""
+    return terminal_gateway.ttyd_bridge_script()
 
 
 def _maybe_inject_ttyd_bridge(data: bytes, media_type: str) -> bytes:
-    mt = str(media_type or "").lower()
-    if "text/html" not in mt:
-        return data
-    try:
-        html = bytes(data or b"").decode("utf-8")
-    except Exception:
-        return data
-    if "__openfocusTtydBridgeInstalled" in html:
-        return data
-    script = _ttyd_bridge_script()
-    lower = html.lower()
-    i = lower.find("<head>")
-    if i >= 0:
-        j = i + len("<head>")
-        html = html[:j] + script + html[j:]
-    else:
-        html = script + html
-    return html.encode("utf-8")
+    return terminal_gateway.maybe_inject_ttyd_bridge(data, media_type)
 
 
 def create_router(
@@ -737,6 +321,7 @@ def create_router(
     _rewrite_ttyd_input_for_auto_prompts = rewrite_ttyd_input_for_auto_prompts
     _try_audit_memory = memory_service.try_audit_memory
     _memory_decode_terminal_bytes = memory_service.decode_terminal_bytes
+    terminal_ops = terminal_gateway.RemoteTerminalGateway()
 
     @router.get("/tasks/{task_public_id}/agent_space", response_class=HTMLResponse)
     def agent_space_view(request: Request, task_public_id: str) -> HTMLResponse:
@@ -965,15 +550,6 @@ def create_router(
         cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
         online = bool(cid and (grpc_server.registry.get(cid) is not None))
 
-        def _terminal_payload(t: RemoteTerminalSession) -> dict:
-            out = terminal_service.terminal_payload(t)
-            backend = str(getattr(t, "backend", "") or "ttyd").strip() or "ttyd"
-            connect_url = str(getattr(t, "connect_url", "") or "").strip()
-            tid = str(t.terminal_id or "")
-            if backend == "ttyd" and connect_url:
-                out["embed_url"] = _ttyd_embed_path(int(sp.id), tid)
-            return out
-
         return {
             "ok": True,
             "companion": {
@@ -981,7 +557,12 @@ def create_router(
                 "status": _companion_display_status(comp) if comp is not None else None,
                 "online": online,
             },
-            "terminals": [_terminal_payload(t) for t in terms],
+            "terminals": [
+                terminal_gateway.terminal_payload(
+                    int(sp.id), t, route_prefix="/api/agent_spaces"
+                )
+                for t in terms
+            ],
         }
 
     @router.post("/api/agent_spaces/{space_id}/terminals/new")
@@ -989,79 +570,62 @@ def create_router(
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
 
-        terminal_id = str(uuid.uuid4())
-        ttyd_base_path = _ttyd_embed_path(int(sp.id), terminal_id)
         try:
-            res = await conn.request_terminal_start(
-                terminal_id=terminal_id,
-                root_path=str(sp.root_path or ""),
-                base_path=ttyd_base_path,
-                task_public_id=str(sp.task_public_id or ""),
-                timeout_seconds=10.0,
-            )
-        except CompanionGrpcError as e:
-            raise HTTPException(
-                status_code=502, detail=f"Companion terminal failed to start: {e}"
-            )
-
-        real_tid = (res.terminal_id or "").strip() or terminal_id
-        backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
-        connect_url = str(getattr(res, "connect_url", "") or "").strip()
-
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            t = terminal_service.create_terminal_record(
-                s,
-                owner=owner,
-                task_public_id=str(sp.task_public_id or ""),
+            result = await terminal_ops.start_terminal(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                conn=conn,
                 companion_id=int(getattr(comp, "id", 0) or 0)
                 if comp is not None
                 else None,
                 root_path=str(sp.root_path or ""),
-                terminal_id=real_tid,
-                backend=backend,
-                connect_url=connect_url,
+                base_path=f"/api/agent_spaces/{int(sp.id)}/terminals/{{terminal_id}}/ttyd/",
+                task_public_id=str(sp.task_public_id or ""),
+                timeout_seconds=10.0,
             )
-            name = str(t.name or "")
+        except terminal_gateway.TerminalStartError as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
         _try_audit_memory(
             kind="terminal.created",
             source="web",
-            summary=f"Created terminal `{name}`.",
-            detail=f"AgentSpace {int(sp.id)} created terminal {real_tid} at {str(sp.root_path or '')}.",
+            summary=f"Created terminal `{result.name}`.",
+            detail=f"AgentSpace {int(sp.id)} created terminal {result.terminal_id} at {str(sp.root_path or '')}.",
             task_public_id=str(sp.task_public_id or "") or None,
-            metadata={"space_id": int(sp.id), "terminal_id": real_tid, "name": name},
+            metadata={
+                "space_id": int(sp.id),
+                "terminal_id": result.terminal_id,
+                "name": result.name,
+            },
         )
 
-        terminal_payload = {"terminal_id": real_tid, "name": name, "backend": backend}
-        if backend == "ttyd" and connect_url:
-            terminal_payload["embed_url"] = _ttyd_embed_path(int(sp.id), real_tid)
+        terminal_payload = {
+            "terminal_id": result.terminal_id,
+            "name": result.name,
+            "backend": result.backend,
+        }
+        if result.backend == "ttyd" and result.connect_url:
+            terminal_payload["embed_url"] = _ttyd_embed_path(
+                int(sp.id), result.terminal_id
+            )
         return {"ok": True, "terminal": terminal_payload}
 
     @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/rename")
     async def terminals_rename(space_id: int, terminal_id: str, payload: dict) -> dict:
         sp, _ = _load_space_and_optional_companion(space_id)
 
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-
-        raw_name = str((payload or {}).get("name") or "").strip()
-        if not raw_name:
-            raise HTTPException(status_code=400, detail="name is required")
-        if len(raw_name) > 128:
-            raise HTTPException(status_code=400, detail="name is too long (<=128)")
-
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.rename_terminal(
-                    s, owner=owner, terminal_id=tid, name=raw_name
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            except terminal_service.TerminalNameConflict:
-                raise HTTPException(status_code=400, detail="name already exists")
+        try:
+            raw_name = terminal_ops.rename_terminal(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=terminal_id,
+                name=str((payload or {}).get("name") or ""),
+            )
+            tid = str(terminal_id or "").strip()
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_service.TerminalNameConflict:
+            raise HTTPException(status_code=400, detail="name already exists")
 
         return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
@@ -1069,30 +633,21 @@ def create_router(
     async def terminals_inject(space_id: int, terminal_id: str, payload: dict) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
-
         tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-
-        raw = b""
-        data_b64 = str((payload or {}).get("data_b64") or "")
-        if data_b64:
-            try:
-                raw = base64.b64decode(data_b64)
-            except Exception:
-                raw = b""
-        if not raw:
-            text_value = str((payload or {}).get("text") or "")
-            raw = text_value.encode("utf-8")
-        if not raw:
-            raise HTTPException(status_code=400, detail="data is required")
+        try:
+            raw = await terminal_ops.inject_input(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=terminal_id,
+                payload=payload,
+                conn=conn,
+                timeout_seconds=10.0,
+            )
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalInputError as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
         _try_audit_memory(
             kind="terminal.input",
@@ -1102,12 +657,6 @@ def create_router(
             task_public_id=str(sp.task_public_id or "") or None,
             metadata={"space_id": int(sp.id), "terminal_id": tid, "injected": True},
         )
-        try:
-            await conn.request_terminal_input(
-                terminal_id=tid, data=raw, timeout_seconds=10.0
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"terminal inject failed: {e}")
         return {"ok": True}
 
     @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/auto_prompts")
@@ -1140,58 +689,46 @@ def create_router(
     ) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
         enabled = bool((payload or {}).get("enabled"))
         try:
-            res = await conn.request_terminal_mouse_mode(
-                terminal_id=tid, enabled=enabled, timeout_seconds=10.0
+            actual = await terminal_ops.set_mouse_mode(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=terminal_id,
+                enabled=enabled,
+                conn=conn,
+                timeout_seconds=10.0,
             )
-        except Exception as e:
-            raise HTTPException(
-                status_code=502, detail=f"terminal mouse mode failed: {e}"
-            )
-        return {"ok": True, "enabled": bool(getattr(res, "enabled", enabled))}
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalMouseModeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True, "enabled": actual}
 
     @router.post("/api/agent_spaces/{space_id}/terminals/{terminal_id}/close")
     async def terminals_close(space_id: int, terminal_id: str) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
 
         tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
 
         # best-effort stop on Companion (offline 也允许 close：只保证 OpenFocus 侧不再展示)
         cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
         conn = grpc_server.registry.get(cid) if cid else None
-        if conn is not None:
-            try:
-                await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
-            except Exception:
-                pass
-
-        with session_scope() as s:
-            # 关闭即删除记录（避免刷新后重新出现 tab）
-            terminal_service.delete_terminal_record(
-                s,
+        try:
+            await terminal_ops.close_terminal(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
-                terminal_id=tid,
+                terminal_id=terminal_id,
+                conn=conn,
+                clear_auto_prompt=lambda terminal_id: ttyd_auto_prompts.pop(
+                    terminal_id, None
+                ),
+                timeout_seconds=10.0,
             )
-        ttyd_auto_prompts.pop(tid, None)
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
 
         _try_audit_memory(
             kind="terminal.closed",
@@ -1206,33 +743,21 @@ def create_router(
 
     def _load_ttyd_terminal(space_id: int, terminal_id: str) -> tuple[object, str]:
         sp, _ = _load_space_and_optional_companion(space_id)
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                t = terminal_service.get_terminal_for_owner(
-                    s, owner=owner, terminal_id=tid
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            backend = str(getattr(t, "backend", "") or "ttyd").strip()
-            connect_url = str(getattr(t, "connect_url", "") or "").strip()
-        if backend != "ttyd" or not connect_url:
+        try:
+            connect_url = terminal_ops.load_ttyd_connect_url(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=terminal_id,
+            )
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable:
             raise HTTPException(status_code=404, detail="ttyd terminal not found")
         return sp, connect_url.rstrip("/")
 
     def _ttyd_target_url(base_url: str, tail: str, query: str) -> str:
-        base = str(base_url or "").rstrip("/") + "/"
-        tail = str(tail or "")
-        if tail:
-            # ttyd 启动时配置了 --base-path，因此这里必须把同样的 path 透传给 ttyd，
-            # 不能剥掉 OpenFocus 的代理前缀，否则 ttyd 前端会用错误的 WebSocket path。
-            base = urllib.parse.urljoin(base, tail.lstrip("/"))
-        if query:
-            base = base + "?" + query
-        return base
+        return terminal_gateway.ttyd_target_url(base_url, tail, query)
 
     @router.api_route(
         "/api/agent_spaces/{space_id}/terminals/{terminal_id}/ttyd/{path:path}",

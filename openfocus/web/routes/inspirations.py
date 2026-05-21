@@ -8,9 +8,7 @@ import datetime as dt
 import json
 import shutil
 import urllib.error
-import urllib.parse
 import urllib.request
-import uuid
 from pathlib import Path
 
 from fastapi import (
@@ -26,13 +24,13 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from ...companion.grpc import CompanionGrpcError
 from ...db import session_scope
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.inspirations import publishing as inspiration_publishing
 from ...domains.inspirations import resources as inspiration_resources
 from ...domains.inspirations import service as inspiration_service
 from ...domains.memory import service as memory_service
+from ...domains.terminals import gateway as terminal_gateway
 from ...models import (
     Goal,
     InspirationDraft,
@@ -45,66 +43,26 @@ from ...models import (
 
 
 def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
-    tid = urllib.parse.quote(str(terminal_id or ""), safe="")
-    return f"/api/inspirations/{int(space_id)}/terminals/{tid}/ttyd/"
+    return terminal_gateway.ttyd_embed_path(
+        "/api/inspirations", int(space_id), terminal_id
+    )
 
 
 def _ttyd_target_url(base_url: str, tail: str, query: str) -> str:
-    base = str(base_url or "").rstrip("/") + "/"
-    tail = str(tail or "")
-    if tail:
-        base = urllib.parse.urljoin(base, tail.lstrip("/"))
-    if query:
-        base = base + "?" + query
-    return base
+    return terminal_gateway.ttyd_target_url(base_url, tail, query)
 
 
 def _ttyd_bridge_script() -> str:
-    return r"""
-<script>
-(function(){
-  if(window.__openfocusTtydBridgeInstalled) return;
-  window.__openfocusTtydBridgeInstalled = true;
-  function disableBeforeUnload(){
-    try{ window.onbeforeunload = null; }catch(_){ }
-  }
-  try{
-    const rawAdd = window.addEventListener.bind(window);
-    window.addEventListener = function(type, listener, options){
-      if(String(type || '').toLowerCase() === 'beforeunload') return;
-      return rawAdd(type, listener, options);
-    };
-  }catch(_){ }
-  disableBeforeUnload();
-  try{ setInterval(disableBeforeUnload, 1000); }catch(_){ }
-})();
-</script>
-"""
+    return terminal_gateway.ttyd_bridge_script()
 
 
 def _maybe_inject_ttyd_bridge(data: bytes, media_type: str) -> bytes:
-    mt = str(media_type or "").lower()
-    if "text/html" not in mt:
-        return data
-    try:
-        html = bytes(data or b"").decode("utf-8")
-    except Exception:
-        return data
-    if "__openfocusTtydBridgeInstalled" in html:
-        return data
-    script = _ttyd_bridge_script()
-    lower = html.lower()
-    i = lower.find("<head>")
-    if i >= 0:
-        j = i + len("<head>")
-        html = html[:j] + script + html[j:]
-    else:
-        html = script + html
-    return html.encode("utf-8")
+    return terminal_gateway.maybe_inject_ttyd_bridge(data, media_type)
 
 
 def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     router = APIRouter()
+    terminal_ops = terminal_gateway.RemoteTerminalGateway()
 
     def _space_or_404(s, space_id: int) -> InspirationSpace:
         try:
@@ -161,21 +119,18 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     def _load_inspiration_ttyd_terminal(
         space_id: int, terminal_id: str
     ) -> tuple[InspirationSpace, str]:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
         with session_scope() as s:
             space = _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                t = terminal_service.get_terminal_for_owner(
-                    s, owner=owner, terminal_id=tid
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            backend = str(getattr(t, "backend", "") or "ttyd").strip()
-            connect_url = str(getattr(t, "connect_url", "") or "").strip()
-        if backend != "ttyd" or not connect_url:
+        try:
+            connect_url = terminal_ops.load_ttyd_connect_url(
+                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                terminal_id=terminal_id,
+            )
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable:
             raise HTTPException(status_code=404, detail="ttyd terminal not found")
         return space, connect_url.rstrip("/")
 
@@ -1082,7 +1037,10 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             "ok": True,
             "companion": {"online": deps.has_online_companion()},
             "terminals": [
-                deps.inspiration_terminal_payload(int(space_id), t) for t in terms
+                terminal_gateway.terminal_payload(
+                    int(space_id), t, route_prefix="/api/inspirations"
+                )
+                for t in terms
             ],
         }
 
@@ -1120,51 +1078,36 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         except (TypeError, ValueError):
             comp, conn = deps.select_online_companion(None)
 
-        terminal_id = str(uuid.uuid4())
-        ttyd_base_path = _inspiration_ttyd_embed_path(int(space_id), terminal_id)
         try:
-            res = await conn.request_terminal_start(
-                terminal_id=terminal_id,
-                root_path=workspace_path,
-                base_path=ttyd_base_path,
-                timeout_seconds=10.0,
-            )
-        except CompanionGrpcError as e:
-            raise HTTPException(
-                status_code=502, detail=f"Companion terminal failed to start: {e}"
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=502, detail=f"Companion terminal failed to start: {e}"
-            )
-        real_tid = (res.terminal_id or "").strip() or terminal_id
-        backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
-        connect_url = str(getattr(res, "connect_url", "") or "").strip()
-        if backend == "ttyd" and not connect_url:
-            raise HTTPException(
-                status_code=502,
-                detail="Companion terminal failed to start: missing connect_url",
-            )
-        with session_scope() as s:
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            t = terminal_service.create_terminal_record(
-                s,
-                owner=owner,
-                task_public_id="",
+            result = await terminal_ops.start_terminal(
+                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                conn=conn,
                 companion_id=int(comp.id),
                 root_path=workspace_path,
-                terminal_id=real_tid,
-                backend=backend,
-                connect_url=connect_url,
+                base_path=f"/api/inspirations/{int(space_id)}/terminals/{{terminal_id}}/ttyd/",
+                timeout_seconds=10.0,
             )
-            name = str(t.name or "")
-            terminal_payload = deps.inspiration_terminal_payload(int(space_id), t)
+        except terminal_gateway.TerminalStartError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        with session_scope() as s:
+            t = terminal_service.get_terminal_for_owner(
+                s,
+                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                terminal_id=result.terminal_id,
+            )
+            terminal_payload = terminal_gateway.terminal_payload(
+                int(space_id), t, route_prefix="/api/inspirations"
+            )
         deps.try_audit_memory(
             kind="inspiration.terminal_created",
             source="web",
-            summary=f"Created inspiration terminal `{name}`.",
-            detail=f"InspirationSpace {int(space_id)} created terminal {real_tid} at {workspace_path}.",
-            metadata={"space_id": int(space_id), "terminal_id": real_tid, "name": name},
+            summary=f"Created inspiration terminal `{result.name}`.",
+            detail=f"InspirationSpace {int(space_id)} created terminal {result.terminal_id} at {workspace_path}.",
+            metadata={
+                "space_id": int(space_id),
+                "terminal_id": result.terminal_id,
+                "name": result.name,
+            },
         )
         return {"ok": True, "terminal": terminal_payload}
 
@@ -1172,35 +1115,32 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_inject(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
         with session_scope() as s:
             _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                t = terminal_service.get_terminal_for_owner(
-                    s, owner=owner, terminal_id=tid
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            comp_id = int(t.companion_id or 0)
-        conn = _terminal_conn(comp_id)
-        raw = b""
-        data_b64 = str((payload or {}).get("data_b64") or "")
-        if data_b64:
-            with contextlib.suppress(Exception):
-                raw = base64.b64decode(data_b64)
-        if not raw:
-            raw = str((payload or {}).get("text") or "").encode("utf-8")
-        if not raw:
-            raise HTTPException(status_code=400, detail="data is required")
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
         try:
-            await conn.request_terminal_input(
-                terminal_id=tid, data=raw, timeout_seconds=10.0
+            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        tid = info.terminal_id
+        comp_id = int(info.companion_id or 0)
+        conn = _terminal_conn(comp_id)
+        try:
+            raw = await terminal_ops.inject_input(
+                owner=owner,
+                terminal_id=tid,
+                payload=payload,
+                conn=conn,
+                timeout_seconds=10.0,
             )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"terminal inject failed: {e}")
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalInputError as e:
+            raise HTTPException(status_code=502, detail=str(e))
         deps.try_audit_memory(
             kind="inspiration.terminal_input",
             source="web",
@@ -1214,55 +1154,50 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_rename(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-        raw_name = str((payload or {}).get("name") or "").strip()
-        if not raw_name:
-            raise HTTPException(status_code=400, detail="name is required")
-        if len(raw_name) > 128:
-            raise HTTPException(status_code=400, detail="name is too long (<=128)")
         with session_scope() as s:
             _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                terminal_service.rename_terminal(
-                    s, owner=owner, terminal_id=tid, name=raw_name
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            except terminal_service.TerminalNameConflict:
-                raise HTTPException(status_code=400, detail="name already exists")
+        try:
+            raw_name = terminal_ops.rename_terminal(
+                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                terminal_id=terminal_id,
+                name=str((payload or {}).get("name") or ""),
+            )
+            tid = str(terminal_id or "").strip()
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_service.TerminalNameConflict:
+            raise HTTPException(status_code=400, detail="name already exists")
         return {"ok": True, "terminal": {"terminal_id": tid, "name": raw_name}}
 
     @router.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/mouse_mode")
     async def inspiration_terminals_mouse_mode(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
         with session_scope() as s:
             _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                t = terminal_service.get_terminal_for_owner(
-                    s, owner=owner, terminal_id=tid
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            comp_id = int(t.companion_id or 0)
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        comp_id = int(info.companion_id or 0)
         conn = _terminal_conn(comp_id)
         enabled = bool((payload or {}).get("enabled"))
         try:
-            res = await conn.request_terminal_mouse_mode(
-                terminal_id=tid, enabled=enabled, timeout_seconds=10.0
+            actual = await terminal_ops.set_mouse_mode(
+                owner=owner,
+                terminal_id=info.terminal_id,
+                enabled=enabled,
+                conn=conn,
+                timeout_seconds=10.0,
             )
-        except Exception as e:
-            raise HTTPException(
-                status_code=502, detail=f"terminal mouse mode failed: {e}"
-            )
-        return {"ok": True, "enabled": bool(getattr(res, "enabled", enabled))}
+        except terminal_gateway.TerminalMouseModeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return {"ok": True, "enabled": actual}
 
     @router.post(
         "/api/inspirations/{space_id:int}/terminals/{terminal_id}/prepare_draft_summary"
@@ -1281,30 +1216,25 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/close")
     async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-        comp_id = 0
         with session_scope() as s:
             _space_or_404(s, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            try:
-                t = terminal_service.get_terminal_for_owner(
-                    s, owner=owner, terminal_id=tid
-                )
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-            comp_id = int(t.companion_id or 0)
+        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        conn = None
         with contextlib.suppress(Exception):
-            conn = _terminal_conn(comp_id)
-            await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=10.0)
-        with session_scope() as s:
-            terminal_service.delete_terminal_record(
-                s,
-                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
-                terminal_id=tid,
-            )
-        deps.ttyd_auto_prompts.pop(tid, None)
+            conn = _terminal_conn(int(info.companion_id or 0))
+        await terminal_ops.close_terminal(
+            owner=owner,
+            terminal_id=info.terminal_id,
+            conn=conn,
+            clear_auto_prompt=lambda tid: deps.ttyd_auto_prompts.pop(tid, None),
+            timeout_seconds=10.0,
+        )
         return {"ok": True}
 
     @router.api_route(

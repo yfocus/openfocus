@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ...models import InspirationSpace, RemoteTerminalSession
-from ..agent_spaces import terminals as terminal_service
+from ..terminals import gateway as terminal_gateway
 
 
 def terminal_payload(
@@ -13,11 +13,11 @@ def terminal_payload(
     *,
     embed_path: Callable[[int, str], str],
 ) -> dict:
-    out = terminal_service.terminal_payload(terminal)
-    backend = str(getattr(terminal, "backend", "") or "ttyd").strip() or "ttyd"
-    connect_url = str(getattr(terminal, "connect_url", "") or "").strip()
+    out = terminal_gateway.terminal_payload(
+        int(space_id), terminal, route_prefix="/api/inspirations"
+    )
     terminal_id = str(terminal.terminal_id or "")
-    if backend == "ttyd" and connect_url:
+    if "embed_url" in out:
         out["embed_url"] = embed_path(int(space_id), terminal_id)
     return out
 
