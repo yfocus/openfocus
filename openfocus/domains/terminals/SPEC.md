@@ -8,8 +8,11 @@ AgentSpace and InspirationSpace:
 
 - owner-scoped terminal validation
 - terminal start, rename, input injection, mouse mode, close, and record cleanup
+- owner release cleanup for all terminals under one AgentSpace or InspirationSpace
+- terminal history replay with bounded output and screen-safe sync slicing
 - terminal payload shaping with ttyd embed URLs
-- ttyd proxy URL construction and HTML bridge injection helpers
+- ttyd proxy URL construction, protocol-neutral HTTP proxy forwarding, WebSocket
+  target shaping, and HTML bridge injection helpers
 
 ## Boundaries
 
@@ -27,6 +30,11 @@ AgentSpace and InspirationSpace:
   checks use `owner_type` and `owner_id`.
 - Closing a terminal deletes its output rows and session row locally even when
   Companion stop is best-effort.
+- Releasing an owner stops every terminal best-effort, deletes terminal output
+  rows and session rows locally, and clears per-terminal auto prompt state when a
+  caller provides that adapter.
+- Terminal history must first validate owner membership, then replay at most the
+  public byte limit and prefer a screen-safe sync point for TUI output.
 - Input injection accepts either `data_b64` or UTF-8 `text`; empty input is
   rejected before calling Companion.
 - ttyd proxying requires a non-empty `connect_url`; tests and non-iframe backends

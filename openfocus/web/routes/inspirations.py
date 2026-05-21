@@ -7,8 +7,6 @@ import contextlib
 import datetime as dt
 import json
 import shutil
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from fastapi import (
@@ -40,24 +38,6 @@ from ...models import (
     InspirationSpace,
     RemoteTerminalSession,
 )
-
-
-def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
-    return terminal_gateway.ttyd_embed_path(
-        "/api/inspirations", int(space_id), terminal_id
-    )
-
-
-def _ttyd_target_url(base_url: str, tail: str, query: str) -> str:
-    return terminal_gateway.ttyd_target_url(base_url, tail, query)
-
-
-def _ttyd_bridge_script() -> str:
-    return terminal_gateway.ttyd_bridge_script()
-
-
-def _maybe_inject_ttyd_bridge(data: bytes, media_type: str) -> bytes:
-    return terminal_gateway.maybe_inject_ttyd_bridge(data, media_type)
 
 
 def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
@@ -1245,49 +1225,29 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         request: Request, space_id: int, terminal_id: str, path: str = ""
     ) -> Response:
         _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
-        proxy_prefix = _inspiration_ttyd_embed_path(space_id, terminal_id)
-        target_tail = proxy_prefix.lstrip("/") + str(path or "")
-        target = _ttyd_target_url(connect_url, target_tail, request.url.query)
-        body = await request.body()
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower()
-            not in {"host", "connection", "content-length", "accept-encoding"}
-        }
+        target = terminal_gateway.ttyd_proxy_target(
+            connect_url=connect_url,
+            route_prefix="/api/inspirations",
+            owner_id=int(space_id),
+            terminal_id=terminal_id,
+            path=path,
+            query=request.url.query,
+        )
         try:
-            req = urllib.request.Request(
-                target,
-                data=body if body else None,
-                headers=headers,
+            proxied = await terminal_gateway.proxy_ttyd_http_request(
+                target_url=target.target_url,
                 method=request.method,
+                headers=dict(request.headers.items()),
+                body=await request.body(),
+                timeout_seconds=30.0,
             )
-            resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=30)
-            data = await asyncio.to_thread(resp.read)
-        except urllib.error.HTTPError as e:
-            data = await asyncio.to_thread(e.read)
-            media_type = e.headers.get("content-type") or "application/octet-stream"
-            return Response(
-                content=data, status_code=int(e.code), media_type=media_type
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"ttyd proxy failed: {e}")
-        excluded = {
-            "content-encoding",
-            "transfer-encoding",
-            "connection",
-            "content-length",
-        }
-        out_headers = {
-            k: v for k, v in resp.headers.items() if str(k).lower() not in excluded
-        }
-        media_type = resp.headers.get("content-type") or "application/octet-stream"
-        data = _maybe_inject_ttyd_bridge(data, media_type)
+        except terminal_gateway.TtydProxyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
         return Response(
-            content=data,
-            status_code=int(getattr(resp, "status", 200) or 200),
-            headers=out_headers,
-            media_type=media_type,
+            content=proxied.body,
+            status_code=proxied.status_code,
+            headers=proxied.headers,
+            media_type=proxied.media_type,
         )
 
     @router.websocket(
@@ -1304,13 +1264,15 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
         try:
             _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
-            proxy_prefix = _inspiration_ttyd_embed_path(space_id, terminal_id)
-            target_tail = proxy_prefix.lstrip("/") + str(path or "")
-            target = _ttyd_target_url(connect_url, target_tail, websocket.url.query)
-            if target.startswith("http://"):
-                target = "ws://" + target[len("http://") :]
-            elif target.startswith("https://"):
-                target = "wss://" + target[len("https://") :]
+            target_info = terminal_gateway.ttyd_proxy_target(
+                connect_url=connect_url,
+                route_prefix="/api/inspirations",
+                owner_id=int(space_id),
+                terminal_id=terminal_id,
+                path=path,
+                query=websocket.url.query,
+            )
+            target = terminal_gateway.ttyd_websocket_target_url(target_info.target_url)
             try:
                 import websockets
             except Exception as e:

@@ -5,6 +5,8 @@ import asyncio
 import base64
 import datetime as dt
 import os
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 from httpx import ASGITransport, AsyncClient
 
@@ -250,5 +252,71 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
             stop.set()
             await asyncio.wait_for(comp_task, timeout=5.0)
             await COMPANION_GRPC.stop()
+
+    asyncio.run(_run())
+
+
+def test_agent_space_release_keeps_terminal_records_if_local_delete_fails(
+    tmp_path, monkeypatch
+):
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.models import AgentSpace, Goal, RemoteTerminalSession, Task
+        from openfocus.web.routes import agent_spaces as agent_spaces_routes
+
+        with session_scope() as s:
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_pid = str(task.public_id)
+            space = AgentSpace(task_public_id=task_pid, root_path=str(tmp_path))
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            terminal_service.create_terminal_record(
+                s,
+                owner=terminal_service.owner_for_agent_space(space_id),
+                task_public_id=task_pid,
+                companion_id=None,
+                root_path=str(tmp_path),
+                terminal_id="survives-local-failure",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+
+        real_session_scope = agent_spaces_routes.session_scope
+        calls = {"count": 0}
+
+        @contextmanager
+        def flaky_session_scope():
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise RuntimeError("simulated local delete failure")
+            with real_session_scope() as s:
+                yield s
+
+        monkeypatch.setattr(agent_spaces_routes, "session_scope", flaky_session_scope)
+
+        try:
+            await agent_spaces_routes.delete_agent_space_for_task(
+                SimpleNamespace(registry={}), task_pid
+            )
+        except RuntimeError as exc:
+            assert "simulated local delete failure" in str(exc)
+        else:
+            raise AssertionError("expected simulated local delete failure")
+
+        with session_scope() as s:
+            assert s.get(AgentSpace, space_id) is not None
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "survives-local-failure")
+                .one_or_none()
+                is not None
+            )
 
     asyncio.run(_run())

@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
+import urllib.error
+import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urljoin
 
 from ...db import session_scope
-from ...models import RemoteTerminalSession
+from ...models import RemoteTerminalOutput, RemoteTerminalSession
 from ..agent_spaces import terminals as terminal_records
+
+TERMINAL_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
 
 class TerminalGatewayError(Exception):
@@ -38,6 +43,10 @@ class TerminalUnavailable(TerminalGatewayError, LookupError):
     """Raised when an existing terminal cannot satisfy the requested operation."""
 
 
+class TtydProxyError(TerminalGatewayError):
+    """Raised when ttyd proxy forwarding fails."""
+
+
 @dataclass(frozen=True)
 class TerminalStartResult:
     terminal_id: str
@@ -52,6 +61,20 @@ class TerminalInfo:
     companion_id: int
     backend: str
     connect_url: str
+
+
+@dataclass(frozen=True)
+class TtydProxyTarget:
+    proxy_prefix: str
+    target_url: str
+
+
+@dataclass(frozen=True)
+class TtydHttpProxyResponse:
+    body: bytes
+    status_code: int
+    headers: dict[str, str]
+    media_type: str
 
 
 def ttyd_embed_path(route_prefix: str, owner_id: int, terminal_id: str) -> str:
@@ -69,6 +92,109 @@ def ttyd_target_url(base_url: str, tail: str, query: str) -> str:
     if query:
         base = base + "?" + str(query)
     return base
+
+
+def ttyd_proxy_target(
+    *,
+    connect_url: str,
+    route_prefix: str,
+    owner_id: int,
+    terminal_id: str,
+    path: str = "",
+    query: str = "",
+) -> TtydProxyTarget:
+    proxy_prefix = ttyd_embed_path(route_prefix, int(owner_id), terminal_id)
+    target_tail = proxy_prefix.lstrip("/") + str(path or "")
+    return TtydProxyTarget(
+        proxy_prefix=proxy_prefix,
+        target_url=ttyd_target_url(connect_url, target_tail, query),
+    )
+
+
+def ttyd_websocket_target_url(target_url: str) -> str:
+    target = str(target_url or "")
+    if target.startswith("http://"):
+        return "ws://" + target[len("http://") :]
+    if target.startswith("https://"):
+        return "wss://" + target[len("https://") :]
+    return target
+
+
+def _filter_headers(headers: Mapping[str, str], excluded: set[str]) -> dict[str, str]:
+    return {
+        str(k): str(v)
+        for k, v in dict(headers or {}).items()
+        if str(k).lower() not in excluded
+    }
+
+
+def _header_get(headers: Mapping[str, str], name: str) -> str | None:
+    wanted = str(name).lower()
+    for key, value in dict(headers or {}).items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+async def proxy_ttyd_http_request(
+    *,
+    target_url: str,
+    method: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    opener: Callable | None = None,
+    timeout_seconds: float = 30.0,
+) -> TtydHttpProxyResponse:
+    request_headers = _filter_headers(
+        headers,
+        {"host", "connection", "content-length", "accept-encoding"},
+    )
+    open_url = opener or urllib.request.urlopen
+    try:
+        req = urllib.request.Request(
+            str(target_url or ""),
+            data=body if body else None,
+            headers=request_headers,
+            method=str(method or "GET"),
+        )
+        resp = await asyncio.to_thread(open_url, req, timeout=timeout_seconds)
+        data = await asyncio.to_thread(resp.read)
+        response_headers = _filter_headers(
+            getattr(resp, "headers", {}) or {},
+            {"content-encoding", "transfer-encoding", "connection", "content-length"},
+        )
+        media_type = (
+            _header_get(getattr(resp, "headers", {}) or {}, "content-type")
+            or "application/octet-stream"
+        )
+        data = maybe_inject_ttyd_bridge(data, media_type)
+        return TtydHttpProxyResponse(
+            body=data,
+            status_code=int(getattr(resp, "status", 200) or 200),
+            headers=response_headers,
+            media_type=media_type,
+        )
+    except urllib.error.HTTPError as e:
+        data = await asyncio.to_thread(e.read)
+        media_type = (
+            _header_get(e.headers or {}, "content-type") or "application/octet-stream"
+        )
+        return TtydHttpProxyResponse(
+            body=data,
+            status_code=int(e.code),
+            headers=_filter_headers(
+                e.headers or {},
+                {
+                    "content-encoding",
+                    "transfer-encoding",
+                    "connection",
+                    "content-length",
+                },
+            ),
+            media_type=media_type,
+        )
+    except Exception as e:
+        raise TtydProxyError(f"ttyd proxy failed: {e}") from e
 
 
 def terminal_payload(
@@ -540,6 +666,48 @@ def _payload_bytes(payload: dict[str, Any] | None) -> bytes:
     return raw
 
 
+def _slice_from_last_sync_point(data: bytes) -> tuple[bytes, bool, str]:
+    """Replay terminal history from a screen-safe point when possible."""
+
+    b = bytes(data or b"")
+    if not b:
+        return b, False, ""
+
+    alt_enter_markers = [
+        b"\x1b[?1049h",
+        b"\x1b[?1047h",
+        b"\x1b[?47h",
+    ]
+    alt_exit_markers = [
+        b"\x1b[?1049l",
+        b"\x1b[?1047l",
+        b"\x1b[?47l",
+    ]
+
+    last_alt_enter = max((b.rfind(pat) for pat in alt_enter_markers), default=-1)
+    last_alt_exit = max((b.rfind(pat) for pat in alt_exit_markers), default=-1)
+    if last_alt_enter > max(last_alt_exit, -1):
+        return b[last_alt_enter:], True, "alt_screen_active"
+
+    markers: list[tuple[bytes, str]] = [
+        (b"\x1b[?1049h", "alt_screen"),
+        (b"\x1b[?1047h", "alt_screen"),
+        (b"\x1b[?47h", "alt_screen"),
+        (b"\x1bc", "reset"),
+        (b"\x1b[2J", "clear"),
+    ]
+    best = -1
+    why = ""
+    for pat, tag in markers:
+        i = b.rfind(pat)
+        if i > best:
+            best = i
+            why = tag
+    if best <= 0:
+        return b, False, ""
+    return b[best:], True, why
+
+
 class RemoteTerminalGateway:
     def __init__(
         self,
@@ -637,6 +805,58 @@ class RemoteTerminalGateway:
     def parse_input_payload(self, payload: dict[str, Any] | None) -> bytes:
         return _payload_bytes(payload)
 
+    def load_history(
+        self,
+        *,
+        owner: terminal_records.TerminalOwner,
+        terminal_id: str,
+        max_bytes: int = TERMINAL_HISTORY_PUBLIC_MAX_BYTES,
+    ) -> dict[str, Any]:
+        tid = _clean_terminal_id(terminal_id)
+        max_bytes = max(
+            1024, min(int(max_bytes or 0), TERMINAL_HISTORY_PUBLIC_MAX_BYTES)
+        )
+        with self._session_factory() as s:
+            terminal_records.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
+            rows = (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == tid)
+                .order_by(RemoteTerminalOutput.id.desc())
+                .all()
+            )
+
+        buf: list[bytes] = []
+        total = 0
+        truncated = False
+        for row in rows:
+            try:
+                b = base64.b64decode(str(row.data_b64 or ""))
+            except Exception:
+                b = b""
+            if not b:
+                continue
+            if total + len(b) > max_bytes:
+                truncated = True
+                break
+            buf.append(b)
+            total += len(b)
+        buf.reverse()
+        raw = b"".join(buf) if buf else b""
+
+        sliced, sliced_ok, sliced_reason = _slice_from_last_sync_point(raw)
+        if sliced_ok:
+            raw = sliced
+
+        out_b64 = base64.b64encode(raw).decode("ascii") if raw else ""
+        return {
+            "ok": True,
+            "terminal_id": tid,
+            "data_b64": out_b64,
+            "truncated": truncated,
+            "sync_sliced": bool(sliced_ok),
+            "sync_reason": str(sliced_reason or ""),
+        }
+
     async def inject_input(
         self,
         *,
@@ -698,6 +918,57 @@ class RemoteTerminalGateway:
             terminal_records.delete_terminal_record(s, owner=owner, terminal_id=tid)
         if clear_auto_prompt is not None:
             clear_auto_prompt(tid)
+
+    async def release_owner_terminals(
+        self,
+        *,
+        owner: terminal_records.TerminalOwner,
+        conn=None,
+        conn_resolver: Callable[[int], Any] | None = None,
+        clear_auto_prompt: Callable[[str], None] | None = None,
+        timeout_seconds: float = 5.0,
+        delete_local_records: bool = True,
+    ) -> list[str]:
+        with self._session_factory() as s:
+            terminals = terminal_records.list_terminals(s, owner)
+            terminal_infos = [
+                (str(t.terminal_id or "").strip(), int(t.companion_id or 0))
+                for t in terminals
+                if str(t.terminal_id or "").strip()
+            ]
+            terminal_ids = [tid for tid, _ in terminal_infos]
+
+        if (conn is not None or conn_resolver is not None) and terminal_ids:
+
+            async def _stop_one(tid: str, companion_id: int) -> None:
+                stop_conn = conn
+                if conn_resolver is not None:
+                    if not companion_id:
+                        return
+                    try:
+                        stop_conn = conn_resolver(int(companion_id or 0))
+                    except Exception:
+                        return
+                if stop_conn is None:
+                    return
+                with contextlib.suppress(Exception):
+                    await stop_conn.request_terminal_stop(
+                        terminal_id=tid, timeout_seconds=timeout_seconds
+                    )
+
+            await asyncio.gather(
+                *[_stop_one(tid, companion_id) for tid, companion_id in terminal_infos],
+                return_exceptions=True,
+            )
+
+        if delete_local_records:
+            with self._session_factory() as s:
+                terminal_records.delete_owner_terminal_records(s, owner=owner)
+
+        if clear_auto_prompt is not None:
+            for tid in terminal_ids:
+                clear_auto_prompt(tid)
+        return terminal_ids
 
     def load_ttyd_connect_url(
         self, *, owner: terminal_records.TerminalOwner, terminal_id: str

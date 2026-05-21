@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import json
-import urllib.error
-import urllib.request
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -27,12 +24,9 @@ from ...models import (
     AgentSpacePrompt,
     Companion,
     Goal,
-    RemoteTerminalOutput,
     Task,
 )
 from ...schemas import AgentSpaceCreateIn, AgentSpacePromptIn
-
-_TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _ttyd_embed_path(space_id: int, terminal_id: str) -> str:
@@ -116,6 +110,7 @@ def _companion_display_status(grpc_server: CompanionGrpcServer, c: Companion | N
 async def delete_agent_space_for_task(
     grpc_server: CompanionGrpcServer, task_public_id: str
 ) -> dict:
+    terminal_ops = terminal_gateway.RemoteTerminalGateway()
     with session_scope() as s:
         space = (
             s.query(AgentSpace)
@@ -131,27 +126,16 @@ async def delete_agent_space_for_task(
 
         sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
         sess_ids = [ss.session_id for ss in sessions]
-
-        terms = terminal_service.list_terminals(
-            s, terminal_service.owner_for_agent_space(int(space.id))
-        )
-        term_ids = [t.terminal_id for t in terms]
+        owner = terminal_service.owner_for_agent_space(int(space.id))
 
     cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
     conn = grpc_server.registry.get(cid) if cid else None
-    if conn is not None and term_ids:
-
-        async def _stop_one(tid: str) -> None:
-            try:
-                await conn.request_terminal_stop(
-                    terminal_id=str(tid), timeout_seconds=5.0
-                )
-            except Exception:
-                pass
-
-        await asyncio.gather(
-            *[_stop_one(tid) for tid in term_ids], return_exceptions=True
-        )
+    await terminal_ops.release_owner_terminals(
+        owner=owner,
+        conn=conn,
+        timeout_seconds=5.0,
+        delete_local_records=False,
+    )
 
     with session_scope() as s:
         space = (
@@ -170,9 +154,7 @@ async def delete_agent_space_for_task(
                 synchronize_session=False
             )
 
-        terminal_service.delete_owner_terminal_records(
-            s, owner=terminal_service.owner_for_agent_space(int(space.id))
-        )
+        terminal_service.delete_owner_terminal_records(s, owner=owner)
         s.delete(space)
 
     return {"ok": True}
@@ -456,71 +438,7 @@ def create_router(
 
     @router.delete("/api/tasks/{task_public_id}/agent_space")
     async def delete_agent_space(task_public_id: str) -> dict:
-        # 释放 AgentSpace 时：尽力清理所有远端资源（Remote Terminal），并删除 OpenFocus 侧记录。
-        with session_scope() as s:
-            space = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id == task_public_id)
-                .one_or_none()
-            )
-            if space is None:
-                return {"ok": True}
-
-            comp = None
-            if getattr(space, "companion_id", None):
-                comp = s.get(Companion, int(space.companion_id))
-
-            sessions = (
-                s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
-            )
-            sess_ids = [ss.session_id for ss in sessions]
-
-            terms = terminal_service.list_terminals(
-                s, terminal_service.owner_for_agent_space(int(space.id))
-            )
-            term_ids = [t.terminal_id for t in terms]
-
-        # best-effort stop on Companion
-        cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
-        conn = grpc_server.registry.get(cid) if cid else None
-        if conn is not None and term_ids:
-
-            async def _stop_one(tid: str) -> None:
-                try:
-                    await conn.request_terminal_stop(
-                        terminal_id=str(tid), timeout_seconds=5.0
-                    )
-                except Exception:
-                    # Companion 离线/失败时允许终端丢失；OpenFocus 侧仍清理记录。
-                    pass
-
-            await asyncio.gather(
-                *[_stop_one(tid) for tid in term_ids], return_exceptions=True
-            )
-
-        with session_scope() as s:
-            space = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id == task_public_id)
-                .one_or_none()
-            )
-            if space is None:
-                return {"ok": True}
-
-            if sess_ids:
-                s.query(AgentMessage).filter(
-                    AgentMessage.session_id.in_(sess_ids)
-                ).delete(synchronize_session=False)
-                s.query(AgentSession).filter(
-                    AgentSession.session_id.in_(sess_ids)
-                ).delete(synchronize_session=False)
-
-            terminal_service.delete_owner_terminal_records(
-                s, owner=terminal_service.owner_for_agent_space(int(space.id))
-            )
-            s.delete(space)
-
-        return {"ok": True}
+        return await delete_agent_space_for_task(grpc_server, task_public_id)
 
     @router.get("/api/agent_spaces/{space_id}/files/list")
     async def agent_space_files_list(space_id: int, path: str = "") -> dict:
@@ -667,12 +585,15 @@ def create_router(
         tid = str(terminal_id or "").strip()
         if not tid:
             raise HTTPException(status_code=400, detail="terminal_id is required")
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
+        try:
+            terminal_ops.terminal_info(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=tid,
+            )
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
         enabled = bool((payload or {}).get("enabled"))
         prompt = str((payload or {}).get("prompt") or "").strip()
         if len(prompt) > 40000:
@@ -756,9 +677,6 @@ def create_router(
             raise HTTPException(status_code=404, detail="ttyd terminal not found")
         return sp, connect_url.rstrip("/")
 
-    def _ttyd_target_url(base_url: str, tail: str, query: str) -> str:
-        return terminal_gateway.ttyd_target_url(base_url, tail, query)
-
     @router.api_route(
         "/api/agent_spaces/{space_id}/terminals/{terminal_id}/ttyd/{path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
@@ -767,50 +685,29 @@ def create_router(
         request: Request, space_id: int, terminal_id: str, path: str = ""
     ) -> Response:
         _, connect_url = _load_ttyd_terminal(space_id, terminal_id)
-        proxy_prefix = _ttyd_embed_path(space_id, terminal_id)
-        target_tail = proxy_prefix.lstrip("/") + str(path or "")
-        target = _ttyd_target_url(connect_url, target_tail, request.url.query)
-        body = await request.body()
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower()
-            not in {"host", "connection", "content-length", "accept-encoding"}
-        }
+        target = terminal_gateway.ttyd_proxy_target(
+            connect_url=connect_url,
+            route_prefix="/api/agent_spaces",
+            owner_id=int(space_id),
+            terminal_id=terminal_id,
+            path=path,
+            query=request.url.query,
+        )
         try:
-            req = urllib.request.Request(
-                target,
-                data=body if body else None,
-                headers=headers,
+            proxied = await terminal_gateway.proxy_ttyd_http_request(
+                target_url=target.target_url,
                 method=request.method,
+                headers=dict(request.headers.items()),
+                body=await request.body(),
+                timeout_seconds=30.0,
             )
-            resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=30)
-            data = await asyncio.to_thread(resp.read)
-        except urllib.error.HTTPError as e:
-            data = await asyncio.to_thread(e.read)
-            media_type = e.headers.get("content-type") or "application/octet-stream"
-            return Response(
-                content=data, status_code=int(e.code), media_type=media_type
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"ttyd proxy failed: {e}")
-
-        excluded = {
-            "content-encoding",
-            "transfer-encoding",
-            "connection",
-            "content-length",
-        }
-        out_headers = {
-            k: v for k, v in resp.headers.items() if str(k).lower() not in excluded
-        }
-        media_type = resp.headers.get("content-type") or "application/octet-stream"
-        data = _maybe_inject_ttyd_bridge(data, media_type)
+        except terminal_gateway.TtydProxyError as e:
+            raise HTTPException(status_code=502, detail=str(e))
         return Response(
-            content=data,
-            status_code=int(getattr(resp, "status", 200) or 200),
-            headers=out_headers,
-            media_type=media_type,
+            content=proxied.body,
+            status_code=proxied.status_code,
+            headers=proxied.headers,
+            media_type=proxied.media_type,
         )
 
     @router.websocket(
@@ -827,13 +724,15 @@ def create_router(
         await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
         try:
             _, connect_url = _load_ttyd_terminal(space_id, terminal_id)
-            proxy_prefix = _ttyd_embed_path(space_id, terminal_id)
-            target_tail = proxy_prefix.lstrip("/") + str(path or "")
-            target = _ttyd_target_url(connect_url, target_tail, websocket.url.query)
-            if target.startswith("http://"):
-                target = "ws://" + target[len("http://") :]
-            elif target.startswith("https://"):
-                target = "wss://" + target[len("https://") :]
+            target_info = terminal_gateway.ttyd_proxy_target(
+                connect_url=connect_url,
+                route_prefix="/api/agent_spaces",
+                owner_id=int(space_id),
+                terminal_id=terminal_id,
+                path=path,
+                query=websocket.url.query,
+            )
+            target = terminal_gateway.ttyd_websocket_target_url(target_info.target_url)
             try:
                 import websockets
             except Exception as e:
@@ -889,113 +788,21 @@ def create_router(
 
     @router.get("/api/agent_spaces/{space_id}/terminals/{terminal_id}/history")
     def terminals_history(
-        space_id: int, terminal_id: str, max_bytes: int = _TERM_HISTORY_PUBLIC_MAX_BYTES
+        space_id: int,
+        terminal_id: str,
+        max_bytes: int = terminal_gateway.TERMINAL_HISTORY_PUBLIC_MAX_BYTES,
     ) -> dict:
         sp, _ = _load_space_and_optional_companion(space_id)
-
-        tid = str(terminal_id or "").strip()
-        if not tid:
-            raise HTTPException(status_code=400, detail="terminal_id is required")
-
-        # 对外回放要限流：最多允许回放 _TERM_HISTORY_PUBLIC_MAX_BYTES。
-        max_bytes = max(1024, min(int(max_bytes or 0), _TERM_HISTORY_PUBLIC_MAX_BYTES))
-
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            try:
-                terminal_service.get_terminal_for_owner(s, owner=owner, terminal_id=tid)
-            except terminal_service.TerminalNotFound:
-                raise HTTPException(status_code=404, detail="Terminal not found")
-
-            rows = (
-                s.query(RemoteTerminalOutput)
-                .filter(RemoteTerminalOutput.terminal_id == tid)
-                .order_by(RemoteTerminalOutput.id.desc())
-                .all()
+        try:
+            return terminal_ops.load_history(
+                owner=terminal_service.owner_for_agent_space(int(sp.id)),
+                terminal_id=terminal_id,
+                max_bytes=max_bytes,
             )
-
-        def _slice_from_last_sync_point(data: bytes) -> tuple[bytes, bool, str]:
-            """尽量从“可重建屏幕”的同步点开始回放。
-
-            主要面向 TUI（例如 coco）：如果回放从半截控制序列/半截屏幕状态开始，xterm 很容易出现光标错位/残留字符。
-            这里在最后一段历史里，找最后一次进入 alternate screen/清屏/重置的位置，从那里开始截取。
-            """
-
-            b = bytes(data or b"")
-            if not b:
-                return b, False, ""
-
-            alt_enter_markers = [
-                b"\x1b[?1049h",
-                b"\x1b[?1047h",
-                b"\x1b[?47h",
-            ]
-            alt_exit_markers = [
-                b"\x1b[?1049l",
-                b"\x1b[?1047l",
-                b"\x1b[?47l",
-            ]
-
-            # 如果历史末尾仍处于 alternate screen（例如刷新页面时 vim 还开着），
-            # 必须从“进入 alternate screen”的位置开始回放。否则若从 vim 内部的清屏
-            # 序列开始回放，xterm 会把 vim 内容画到 normal buffer；之后 vim 退出时
-            # 发送 ?1049l 就无法恢复/清掉这些内容，表现为“退出后 vim 画面残留”。
-            last_alt_enter = max(
-                (b.rfind(pat) for pat in alt_enter_markers), default=-1
-            )
-            last_alt_exit = max((b.rfind(pat) for pat in alt_exit_markers), default=-1)
-            if last_alt_enter > max(last_alt_exit, -1):
-                return b[last_alt_enter:], True, "alt_screen_active"
-
-            markers: list[tuple[bytes, str]] = [
-                (b"\x1b[?1049h", "alt_screen"),
-                (b"\x1b[?1047h", "alt_screen"),
-                (b"\x1b[?47h", "alt_screen"),
-                (b"\x1bc", "reset"),
-                (b"\x1b[2J", "clear"),
-            ]
-            best = -1
-            why = ""
-            for pat, tag in markers:
-                i = b.rfind(pat)
-                if i > best:
-                    best = i
-                    why = tag
-            if best <= 0:
-                return b, False, ""
-            return b[best:], True, why
-
-        buf: list[bytes] = []
-        total = 0
-        truncated = False
-        for r in rows:
-            try:
-                b = base64.b64decode(str(r.data_b64 or ""))
-            except Exception:
-                b = b""
-            if not b:
-                continue
-            if total + len(b) > max_bytes:
-                truncated = True
-                break
-            buf.append(b)
-            total += len(b)
-        buf.reverse()
-        raw = b"".join(buf) if buf else b""
-
-        sliced, sliced_ok, sliced_reason = _slice_from_last_sync_point(raw)
-        if sliced_ok:
-            raw = sliced
-
-        out_b64 = base64.b64encode(raw).decode("ascii") if raw else ""
-        return {
-            "ok": True,
-            "terminal_id": tid,
-            "data_b64": out_b64,
-            "truncated": truncated,
-            "sync_sliced": bool(sliced_ok),
-            "sync_reason": str(sliced_reason or ""),
-        }
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
 
     @router.get("/api/agent_spaces/{space_id}/agent/sessions")
     def agent_sessions_list(space_id: int) -> dict:

@@ -12,6 +12,7 @@ from ...db import session_scope
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
+from ...domains.terminals import gateway as terminal_gateway
 from ...models import (
     InspirationDraft,
     InspirationMessage,
@@ -556,30 +557,16 @@ async def release_terminals(
     clear_ttyd_auto_prompts: ReleaseTerminalMode,
 ) -> int:
     owner = terminal_service.owner_for_inspiration_space(int(space_id))
-    with session_scope() as s:
-        terms = terminal_service.list_terminals(s, owner)
-        term_infos = [
-            {
-                "terminal_id": str(t.terminal_id or ""),
-                "companion_id": int(t.companion_id or 0),
-            }
-            for t in terms
-        ]
-    for info in term_infos:
-        tid = str(info.get("terminal_id") or "").strip()
-        comp_id = int(info.get("companion_id") or 0)
-        if not tid or not comp_id:
-            continue
-        try:
-            conn = terminal_conn(comp_id, select_online=select_online)
-            await conn.request_terminal_stop(terminal_id=tid, timeout_seconds=5.0)
-        except Exception:
-            pass
-    with session_scope() as s:
-        terminal_service.delete_owner_terminal_records(s, owner=owner)
-    for info in term_infos:
-        clear_ttyd_auto_prompts(str(info.get("terminal_id") or ""))
-    return len(term_infos)
+    terminal_ops = terminal_gateway.RemoteTerminalGateway()
+    released = await terminal_ops.release_owner_terminals(
+        owner=owner,
+        conn_resolver=lambda companion_id: terminal_conn(
+            companion_id, select_online=select_online
+        ),
+        clear_auto_prompt=clear_ttyd_auto_prompts,
+        timeout_seconds=5.0,
+    )
+    return len(released)
 
 
 def select_online_companion(grpc_server, companion_id: int | None = None):

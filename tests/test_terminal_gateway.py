@@ -174,3 +174,201 @@ def test_terminal_gateway_payload_and_ttyd_helpers_work_for_inspiration_owner():
         assert row.owner_type == "inspiration_space"
         assert row.owner_id == 5
         assert row.space_id == -5
+
+
+def test_terminal_gateway_loads_owner_scoped_history_with_sync_slicing():
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import terminals as terminal_records
+    from openfocus.domains.terminals import gateway as terminal_gateway
+    from openfocus.models import RemoteTerminalOutput
+
+    gateway = terminal_gateway.RemoteTerminalGateway()
+    owner = terminal_records.owner_for_agent_space(22)
+    other_owner = terminal_records.owner_for_inspiration_space(22)
+    with session_scope() as s:
+        terminal_records.create_terminal_record(
+            s,
+            owner=owner,
+            task_public_id="TASK-22",
+            companion_id=3,
+            root_path="/tmp/ws",
+            terminal_id="history-term",
+            backend="ttyd",
+            connect_url="http://127.0.0.1:7681",
+        )
+        for chunk in (
+            b"before",
+            b"\x1b[?1049hvim screen",
+            b" still active",
+        ):
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="history-term",
+                    data_b64=base64.b64encode(chunk).decode("ascii"),
+                    nbytes=len(chunk),
+                )
+            )
+
+    result = gateway.load_history(
+        owner=owner, terminal_id="history-term", max_bytes=1024
+    )
+
+    assert result["ok"] is True
+    assert result["terminal_id"] == "history-term"
+    assert base64.b64decode(result["data_b64"]) == b"\x1b[?1049hvim screen still active"
+    assert result["truncated"] is False
+    assert result["sync_sliced"] is True
+    assert result["sync_reason"] == "alt_screen_active"
+
+    try:
+        gateway.load_history(owner=other_owner, terminal_id="history-term")
+    except terminal_records.TerminalNotFound:
+        pass
+    else:
+        raise AssertionError("terminal history lookup must stay owner scoped")
+
+
+def test_terminal_gateway_releases_all_owner_terminals_best_effort():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(44)
+        untouched_owner = terminal_records.owner_for_inspiration_space(44)
+        with session_scope() as s:
+            for tid in ("rel-a", "rel-b"):
+                terminal_records.create_terminal_record(
+                    s,
+                    owner=owner,
+                    task_public_id="TASK-44",
+                    companion_id=3,
+                    root_path="/tmp/ws",
+                    terminal_id=tid,
+                    backend="ttyd",
+                    connect_url="http://127.0.0.1:7681",
+                )
+                s.add(
+                    RemoteTerminalOutput(
+                        space_id=owner.db_space_id,
+                        terminal_id=tid,
+                        data_b64=base64.b64encode(b"out").decode("ascii"),
+                        nbytes=3,
+                    )
+                )
+            terminal_records.create_terminal_record(
+                s,
+                owner=untouched_owner,
+                task_public_id="",
+                companion_id=3,
+                root_path="/tmp/insp",
+                terminal_id="keep-me",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+
+        conn = FakeTerminalConn()
+        cleared: list[str] = []
+        released = await gateway.release_owner_terminals(
+            owner=owner,
+            conn=conn,
+            clear_auto_prompt=cleared.append,
+            timeout_seconds=5.0,
+        )
+
+        assert released == ["rel-a", "rel-b"]
+        assert [item["terminal_id"] for item in conn.stops] == ["rel-a", "rel-b"]
+        assert cleared == ["rel-a", "rel-b"]
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.owner_type == "agent_space")
+                .filter(RemoteTerminalSession.owner_id == 44)
+                .count()
+                == 0
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id.in_(["rel-a", "rel-b"]))
+                .count()
+                == 0
+            )
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "keep-me")
+                .one_or_none()
+                is not None
+            )
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_ttyd_proxy_helpers_are_protocol_neutral():
+    async def _run() -> None:
+        from openfocus.domains.terminals import gateway as terminal_gateway
+
+        calls: list[object] = []
+
+        class FakeResponse:
+            status = 203
+            headers = {
+                "content-type": "text/html; charset=utf-8",
+                "content-length": "999",
+                "connection": "close",
+                "x-openfocus": "ok",
+            }
+
+            def read(self) -> bytes:
+                return b"<html><head></head><body>terminal</body></html>"
+
+        def fake_opener(req, *, timeout):
+            calls.append(req)
+            assert timeout == 12.0
+            return FakeResponse()
+
+        target = terminal_gateway.ttyd_proxy_target(
+            connect_url="http://127.0.0.1:7681",
+            route_prefix="/api/agent_spaces",
+            owner_id=7,
+            terminal_id="term/one",
+            path="ws",
+            query="q=1",
+        )
+        assert target.proxy_prefix == "/api/agent_spaces/7/terminals/term%2Fone/ttyd/"
+        assert (
+            target.target_url
+            == "http://127.0.0.1:7681/api/agent_spaces/7/terminals/term%2Fone/ttyd/ws?q=1"
+        )
+        assert (
+            terminal_gateway.ttyd_websocket_target_url(target.target_url)
+            == "ws://127.0.0.1:7681/api/agent_spaces/7/terminals/term%2Fone/ttyd/ws?q=1"
+        )
+
+        proxied = await terminal_gateway.proxy_ttyd_http_request(
+            target_url=target.target_url,
+            method="POST",
+            headers={
+                "host": "localhost",
+                "connection": "keep-alive",
+                "content-length": "5",
+                "accept-encoding": "gzip",
+                "x-user": "yes",
+            },
+            body=b"hello",
+            opener=fake_opener,
+            timeout_seconds=12.0,
+        )
+
+        assert calls
+        assert proxied.status_code == 203
+        assert proxied.media_type == "text/html; charset=utf-8"
+        assert proxied.headers == {
+            "content-type": "text/html; charset=utf-8",
+            "x-openfocus": "ok",
+        }
+        assert b"__openfocusTtydBridgeInstalled" in proxied.body
+
+    asyncio.run(_run())
