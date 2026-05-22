@@ -11,7 +11,6 @@ from fastapi.templating import Jinja2Templates
 
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...db import session_scope
-from ...domains.agent_activity import service as agent_activity_service
 from ...domains.agent_spaces import agent_sessions as agent_session_service
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.agent_spaces import workspace as agent_space_workspace
@@ -939,23 +938,7 @@ def create_router(
         sid = send_result.session_id
         rid = send_result.request_id
 
-        with session_scope() as s:
-            asst_msg = AgentMessage(
-                session_id=sid, role="assistant", content="", request_id=rid, done=False
-            )
-            s.add(asst_msg)
-            agent_activity_service.handle_runtime_signal(
-                s,
-                kind="runtime.turn.started",
-                agent_runtime=send_result.agent_type,
-                session_id=sid,
-                turn_id=rid,
-                task_public_id=send_result.task_public_id,
-                companion_id=send_result.companion_id,
-                source="openfocus.agent_session.send",
-                payload={"message": "Prompt submitted from OpenFocus AgentSpace."},
-            )
-            s.flush()
+        agent_session_service.begin_agent_session_assistant_turn(send_result)
 
         injected = _inject_openfocus_prompt(
             base_url=_openfocus_base_url(request),
@@ -978,31 +961,7 @@ def create_router(
                 request_id=rid, session_id=sid, prompt=injected, timeout_seconds=10.0
             )
         except CompanionGrpcError as e:
-            # 标记 assistant 消息失败并通过 SSE 通知
-            with session_scope() as s:
-                m = (
-                    s.query(AgentMessage)
-                    .filter(AgentMessage.session_id == sid)
-                    .filter(AgentMessage.request_id == rid)
-                    .filter(AgentMessage.role == "assistant")
-                    .order_by(AgentMessage.id.desc())
-                    .first()
-                )
-                if m is not None:
-                    m.done = True
-                    m.error = str(e)
-                    s.add(m)
-                agent_activity_service.handle_runtime_signal(
-                    s,
-                    kind="runtime.turn.failed",
-                    agent_runtime=send_result.agent_type,
-                    session_id=sid,
-                    turn_id=rid,
-                    task_public_id=send_result.task_public_id,
-                    companion_id=send_result.companion_id,
-                    source="openfocus.agent_session.send",
-                    payload={"error": str(e)},
-                )
+            agent_session_service.fail_agent_session_assistant_turn(send_result, e)
             _agent_sse_publish(
                 sid,
                 {

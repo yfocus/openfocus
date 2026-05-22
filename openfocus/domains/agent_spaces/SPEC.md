@@ -7,7 +7,9 @@ The Agent Spaces domain owns AgentSpace workspace lifecycle and terminal
 ownership state:
 
 - AgentSpace release use cases keyed by `Task.public_id`
-- AgentSession start, send preflight/user-message persistence, and terminate use cases keyed by `AgentSpace.id`
+- AgentSession start, send preflight/user-message persistence, assistant
+  turn placeholder/failure persistence, runtime turn started/failed projection,
+  and terminate use cases keyed by `AgentSpace.id`
 - explicit `TerminalOwner` values for AgentSpace and InspirationSpace terminals
 - terminal listing, naming, lookup, rename, create, and local deletion
 - deletion of terminal output rows tied to closed/released terminals
@@ -24,14 +26,19 @@ ownership state:
   `request_agent_start(...)` and `request_agent_terminate(...)`. The domain does
   not know `COMPANION_GRPC`, Companion registry lookup, HTTP status codes,
   request parsing, audit memory, SSE publish, or templates.
-- AgentSession `/send` preflight belongs to this domain: validate a non-empty
-  `session_id`, verify the session belongs to the requested `AgentSpace.id`, read
-  the session context needed by runtime send, persist the user `AgentMessage`,
-  and generate the request id returned to the web adapter.
+- AgentSession `/send` local state belongs to this domain: validate a
+  non-empty `session_id`, verify the session belongs to the requested
+  `AgentSpace.id`, read the session context needed by runtime send, persist the
+  user `AgentMessage`, generate the request id returned to the web adapter,
+  create the assistant placeholder, and project `runtime.turn.started`.
+- Runtime send failure local state belongs to this domain: mark the assistant
+  `AgentMessage` done/error and project `runtime.turn.failed`. The web adapter
+  still maps the runtime failure to HTTP/SSE responses.
 - AgentSession runtime send, web/request prompt assembly, SSE publishing, audit
-  memory, HTTP error mapping, assistant placeholder/chunk persistence, and
-  streaming projectors remain in the web/infrastructure adapter until those
-  lifecycles are explicitly moved.
+  memory, and HTTP error mapping remain in the web/infrastructure adapter.
+  Streaming chunk transport and async assistant chunk append/finalize handling
+  still live in infrastructure until that lifecycle gets a dedicated domain use
+  case.
 - AgentSpace prompt `enabled` controls prompt zone visibility.
 - AgentSpace prompt `auto_enabled` controls automatic prompt concatenation on AgentSpace terminal input submit; it must not create runtime activity by itself.
 - Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
@@ -61,6 +68,13 @@ ownership state:
   non-empty and belongs to the requested AgentSpace, then persists the user
   message and returns a generated request id plus runtime-send context. It does
   not call Companion runtime or publish SSE.
+- Beginning an AgentSession assistant turn persists an empty assistant
+  `AgentMessage` with `role=assistant`, the generated request id, and
+  `done=False`, then projects `runtime.turn.started` through an injected or
+  default runtime-turn projector.
+- Failing an AgentSession assistant turn after runtime send failure marks the
+  assistant message `done=True`, stores the error text, and projects
+  `runtime.turn.failed`.
 - Releasing an AgentSpace best-effort stops all remote terminals through the
   shared Terminals gateway and best-effort terminates managed AgentSessions on
   Companion, then deletes OpenFocus-side AgentSession, AgentMessage, terminal

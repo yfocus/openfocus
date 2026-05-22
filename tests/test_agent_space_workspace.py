@@ -50,6 +50,65 @@ class FakeAgentSessionRuntime:
             raise RuntimeError("agent terminate failed")
 
 
+class FakeRuntimeTurnProjector:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, db_session, **kwargs):
+        assert db_session is not None
+        call = dict(kwargs)
+        self.calls.append(call)
+        return {"kind": call["kind"], "turn_id": call["turn_id"]}
+
+
+def _seed_agent_session_for_send(
+    tmp_path,
+    *,
+    session_id: str = "session-to-send",
+    companion_id: int = 23,
+    agent_type: str = "codex-cli",
+):
+    from openfocus.db import session_scope
+    from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+        s.add(task)
+        s.flush()
+        task_public_id = str(task.public_id)
+        space = AgentSpace(
+            task_public_id=task_public_id,
+            companion_id=companion_id,
+            root_path=str(tmp_path),
+            agent_type=agent_type,
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        s.add(
+            AgentSession(
+                session_id=session_id,
+                space_id=space_id,
+                task_public_id=task_public_id,
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+                agent_type=agent_type,
+                status="active",
+            )
+        )
+
+    return SimpleNamespace(
+        space_id=space_id,
+        task_public_id=task_public_id,
+        session_id=session_id,
+        companion_id=companion_id,
+        agent_type=agent_type,
+    )
+
+
 def test_start_agent_session_persists_after_runtime_start(tmp_path):
     async def _run() -> None:
         from openfocus.db import session_scope
@@ -323,6 +382,117 @@ def test_send_agent_session_message_persists_user_message_and_returns_context(
         assert messages[0].content == "hello agent"
         assert messages[0].request_id == ""
         assert messages[0].done is True
+
+
+def test_begin_agent_session_assistant_turn_persists_placeholder_and_projects_started(
+    tmp_path,
+):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage
+
+    seeded = _seed_agent_session_for_send(tmp_path)
+    send_result = agent_sessions.send_agent_session_message(
+        seeded.space_id,
+        seeded.session_id,
+        "hello agent",
+        request_id_factory=lambda: "request-fixed",
+    )
+    projector = FakeRuntimeTurnProjector()
+
+    result = agent_sessions.begin_agent_session_assistant_turn(
+        send_result,
+        projector=projector,
+    )
+
+    assert result.session_id == seeded.session_id
+    assert result.space_id == seeded.space_id
+    assert result.request_id == "request-fixed"
+    assert result.task_public_id == seeded.task_public_id
+    assert result.agent_type == seeded.agent_type
+    assert result.companion_id == seeded.companion_id
+    assert result.projection == {
+        "kind": "runtime.turn.started",
+        "turn_id": "request-fixed",
+    }
+    assert projector.calls == [
+        {
+            "kind": "runtime.turn.started",
+            "agent_runtime": "codex-cli",
+            "session_id": seeded.session_id,
+            "turn_id": "request-fixed",
+            "task_public_id": seeded.task_public_id,
+            "companion_id": 23,
+            "source": "openfocus.agent_session.send",
+            "payload": {"message": "Prompt submitted from OpenFocus AgentSpace."},
+        }
+    ]
+
+    with session_scope() as s:
+        messages = s.query(AgentMessage).order_by(AgentMessage.id.asc()).all()
+        assert [message.role for message in messages] == ["user", "assistant"]
+        assistant = messages[1]
+        assert assistant.session_id == seeded.session_id
+        assert assistant.request_id == "request-fixed"
+        assert assistant.content == ""
+        assert assistant.done is False
+        assert assistant.error == ""
+
+
+def test_fail_agent_session_assistant_turn_marks_error_and_projects_failed(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage
+
+    seeded = _seed_agent_session_for_send(tmp_path)
+    send_result = agent_sessions.send_agent_session_message(
+        seeded.space_id,
+        seeded.session_id,
+        "hello agent",
+        request_id_factory=lambda: "request-fixed",
+    )
+    projector = FakeRuntimeTurnProjector()
+    agent_sessions.begin_agent_session_assistant_turn(
+        send_result,
+        projector=projector,
+    )
+
+    result = agent_sessions.fail_agent_session_assistant_turn(
+        send_result,
+        RuntimeError("runtime unavailable"),
+        projector=projector,
+    )
+
+    assert result.session_id == seeded.session_id
+    assert result.request_id == "request-fixed"
+    assert result.error == "runtime unavailable"
+    assert result.projection == {
+        "kind": "runtime.turn.failed",
+        "turn_id": "request-fixed",
+    }
+    assert len(projector.calls) == 2
+    assert projector.calls[-1] == {
+        "kind": "runtime.turn.failed",
+        "agent_runtime": "codex-cli",
+        "session_id": seeded.session_id,
+        "turn_id": "request-fixed",
+        "task_public_id": seeded.task_public_id,
+        "companion_id": 23,
+        "source": "openfocus.agent_session.send",
+        "payload": {"error": "runtime unavailable"},
+    }
+
+    with session_scope() as s:
+        assistant = (
+            s.query(AgentMessage)
+            .filter(AgentMessage.session_id == seeded.session_id)
+            .filter(AgentMessage.request_id == "request-fixed")
+            .filter(AgentMessage.role == "assistant")
+            .one()
+        )
+        assert assistant.done is True
+        assert assistant.error == "runtime unavailable"
+        assert assistant.content == ""
 
 
 def test_send_agent_session_message_rejects_empty_session_id():

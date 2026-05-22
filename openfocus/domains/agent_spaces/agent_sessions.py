@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ...db import session_scope
+from ...domains.agent_activity import service as agent_activity_service
 from ...models import AgentMessage, AgentSession, AgentSpace
 
 
@@ -14,6 +15,22 @@ class AgentSessionRuntimePort(Protocol):
     async def request_agent_start(self, **kwargs: Any) -> Any: ...
 
     async def request_agent_terminate(self, **kwargs: Any) -> Any: ...
+
+
+class RuntimeTurnProjector(Protocol):
+    def __call__(
+        self,
+        db_session: Any,
+        *,
+        kind: str,
+        agent_runtime: str,
+        session_id: str,
+        turn_id: str,
+        task_public_id: str,
+        companion_id: int | None,
+        source: str,
+        payload: dict[str, Any],
+    ) -> Any: ...
 
 
 class AgentSessionUseCaseError(RuntimeError):
@@ -56,6 +73,25 @@ class AgentSessionSendResult:
     companion_id: int | None
 
 
+@dataclass(frozen=True)
+class AgentSessionAssistantTurnResult:
+    session_id: str
+    space_id: int
+    request_id: str
+    task_public_id: str
+    agent_type: str
+    companion_id: int | None
+    projection: Any = None
+
+
+@dataclass(frozen=True)
+class AgentSessionAssistantTurnFailureResult:
+    session_id: str
+    request_id: str
+    error: str
+    projection: Any = None
+
+
 def _new_session_id(session_id_factory: Callable[[], object] | None) -> str:
     raw = session_id_factory() if session_id_factory is not None else uuid.uuid4()
     session_id = str(raw or "").strip()
@@ -70,6 +106,53 @@ def _new_request_id(request_id_factory: Callable[[], object] | None) -> str:
     if not request_id:
         raise AgentSessionValidationError("generated request_id is empty")
     return request_id
+
+
+def _default_runtime_turn_projector(
+    db_session: Any,
+    *,
+    kind: str,
+    agent_runtime: str,
+    session_id: str,
+    turn_id: str,
+    task_public_id: str,
+    companion_id: int | None,
+    source: str,
+    payload: dict[str, Any],
+) -> Any:
+    return agent_activity_service.handle_runtime_signal(
+        db_session,
+        kind=kind,
+        agent_runtime=agent_runtime,
+        session_id=session_id,
+        turn_id=turn_id,
+        task_public_id=task_public_id,
+        companion_id=companion_id,
+        source=source,
+        payload=payload,
+    )
+
+
+def _project_runtime_turn(
+    db_session: Any,
+    *,
+    projector: RuntimeTurnProjector | None,
+    kind: str,
+    send_context: AgentSessionSendResult,
+    payload: dict[str, Any],
+) -> Any:
+    selected_projector = projector or _default_runtime_turn_projector
+    return selected_projector(
+        db_session,
+        kind=kind,
+        agent_runtime=send_context.agent_type,
+        session_id=send_context.session_id,
+        turn_id=send_context.request_id,
+        task_public_id=send_context.task_public_id,
+        companion_id=send_context.companion_id,
+        source="openfocus.agent_session.send",
+        payload=payload,
+    )
 
 
 async def start_agent_session(
@@ -229,4 +312,76 @@ def send_agent_session_message(
         task_public_id=task_public_id,
         agent_type=agent_type,
         companion_id=companion_id,
+    )
+
+
+def begin_agent_session_assistant_turn(
+    send_context: AgentSessionSendResult,
+    *,
+    projector: RuntimeTurnProjector | None = None,
+) -> AgentSessionAssistantTurnResult:
+    with session_scope() as s:
+        s.add(
+            AgentMessage(
+                session_id=send_context.session_id,
+                role="assistant",
+                content="",
+                request_id=send_context.request_id,
+                done=False,
+            )
+        )
+        projection = _project_runtime_turn(
+            s,
+            projector=projector,
+            kind="runtime.turn.started",
+            send_context=send_context,
+            payload={"message": "Prompt submitted from OpenFocus AgentSpace."},
+        )
+        s.flush()
+
+    return AgentSessionAssistantTurnResult(
+        session_id=send_context.session_id,
+        space_id=send_context.space_id,
+        request_id=send_context.request_id,
+        task_public_id=send_context.task_public_id,
+        agent_type=send_context.agent_type,
+        companion_id=send_context.companion_id,
+        projection=projection,
+    )
+
+
+def fail_agent_session_assistant_turn(
+    send_context: AgentSessionSendResult,
+    error: object,
+    *,
+    projector: RuntimeTurnProjector | None = None,
+) -> AgentSessionAssistantTurnFailureResult:
+    error_text = str(error or "")
+    with session_scope() as s:
+        message = (
+            s.query(AgentMessage)
+            .filter(AgentMessage.session_id == send_context.session_id)
+            .filter(AgentMessage.request_id == send_context.request_id)
+            .filter(AgentMessage.role == "assistant")
+            .order_by(AgentMessage.id.desc())
+            .first()
+        )
+        if message is not None:
+            message.done = True
+            message.error = error_text
+            s.add(message)
+
+        projection = _project_runtime_turn(
+            s,
+            projector=projector,
+            kind="runtime.turn.failed",
+            send_context=send_context,
+            payload={"error": error_text},
+        )
+
+    return AgentSessionAssistantTurnFailureResult(
+        session_id=send_context.session_id,
+        request_id=send_context.request_id,
+        error=error_text,
+        projection=projection,
     )
