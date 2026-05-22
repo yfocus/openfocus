@@ -10,7 +10,6 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
-from ...db import session_scope
 from ...domains.agent_spaces import agent_sessions as agent_session_service
 from ...domains.agent_spaces import prompts as agent_space_prompts
 from ...domains.agent_spaces import terminals as terminal_service
@@ -18,12 +17,7 @@ from ...domains.agent_spaces import workspace as agent_space_workspace
 from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
 from ...domains.terminals import gateway as terminal_gateway
-from ...models import (
-    AgentSpace,
-    Companion,
-    Goal,
-    Task,
-)
+from ...models import AgentSpace, Companion
 from ...schemas import AgentSpaceCreateIn
 
 
@@ -255,35 +249,26 @@ def create_router(
 
     @router.get("/tasks/{task_public_id}/agent_space", response_class=HTMLResponse)
     def agent_space_view(request: Request, task_public_id: str) -> HTMLResponse:
-        with session_scope() as s:
-            task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
-            if task is None:
-                raise HTTPException(status_code=404, detail="Task not found")
-            goal = s.query(Goal).filter(Goal.id == task.goal_id).one_or_none()
-            space = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id == task_public_id)
-                .one_or_none()
-            )
-            companion = None
-            if space is not None and getattr(space, "companion_id", None):
-                companion = s.get(Companion, int(space.companion_id))
+        try:
+            page = agent_space_workspace.get_agent_space_page(task_public_id)
+        except agent_space_workspace.AgentSpaceTaskNotFound as exc:
+            raise HTTPException(status_code=404, detail="Task not found") from exc
 
         return templates.TemplateResponse(
             request,
             "agent_space.html",
             {
-                "task": task,
-                "goal": goal,
-                "space": space,
-                "companion": companion,
+                "task": page.task,
+                "goal": page.goal,
+                "space": page.space,
+                "companion": page.companion,
                 "auto_start_agent_command": str(
                     request.query_params.get("autostart") or ""
                 ).strip()
                 == "1",
                 "agent_prefix": _build_openfocus_ttyd_agent_prefix(
                     base_url=_openfocus_base_url(request),
-                    task_public_id=str(task.public_id or ""),
+                    task_public_id=page.task.public_id,
                 ),
             },
         )

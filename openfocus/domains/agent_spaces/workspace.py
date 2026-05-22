@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ...db import session_scope
-from ...models import AgentMessage, AgentSession, AgentSpace, Companion, Task
+from ...models import AgentMessage, AgentSession, AgentSpace, Companion, Goal, Task
 from ..terminals import gateway as terminal_gateway
 from . import terminals as terminal_records
 
@@ -114,6 +115,48 @@ class StartAgentCommandResult:
 
 
 @dataclass(frozen=True)
+class AgentSpacePageTask:
+    public_id: str
+    title: str
+    content: str
+
+
+@dataclass(frozen=True)
+class AgentSpacePageGoal:
+    id: int
+    title: str
+    content: str
+    due_date: dt.date | None
+
+
+@dataclass(frozen=True)
+class AgentSpacePageSpace:
+    id: int
+    task_public_id: str
+    companion_id: int | None
+    root_path: str
+    agent_type: str
+    start_agent_command: str
+    created_at: dt.datetime | None
+    updated_at: dt.datetime | None
+
+
+@dataclass(frozen=True)
+class AgentSpacePageCompanion:
+    id: int
+    name: str
+    device_id: str
+
+
+@dataclass(frozen=True)
+class AgentSpacePageResult:
+    task: AgentSpacePageTask
+    goal: AgentSpacePageGoal | None
+    space: AgentSpacePageSpace | None
+    companion: AgentSpacePageCompanion | None
+
+
+@dataclass(frozen=True)
 class ReleaseAgentSpaceResult:
     ok: bool
     released: bool
@@ -196,6 +239,86 @@ def _agent_space_payload(space: AgentSpace) -> AgentSpacePayload:
         prompts_enabled=_optional_bool_attr(space, "prompts_enabled"),
         prompt_autosend_enabled=_optional_bool_attr(space, "prompt_autosend_enabled"),
     )
+
+
+def _agent_space_page_task(task: Task) -> AgentSpacePageTask:
+    return AgentSpacePageTask(
+        public_id=str(task.public_id or ""),
+        title=str(task.title or ""),
+        content=str(task.content or ""),
+    )
+
+
+def _agent_space_page_goal(goal: Goal | None) -> AgentSpacePageGoal | None:
+    if goal is None:
+        return None
+    return AgentSpacePageGoal(
+        id=int(goal.id),
+        title=str(goal.title or ""),
+        content=str(goal.content or ""),
+        due_date=goal.due_date,
+    )
+
+
+def _agent_space_page_space(space: AgentSpace | None) -> AgentSpacePageSpace | None:
+    if space is None:
+        return None
+    companion_id = (
+        int(getattr(space, "companion_id", 0) or 0)
+        if getattr(space, "companion_id", None)
+        else None
+    )
+    return AgentSpacePageSpace(
+        id=int(space.id),
+        task_public_id=str(space.task_public_id or ""),
+        companion_id=companion_id,
+        root_path=str(space.root_path or ""),
+        agent_type=str(space.agent_type or DEFAULT_AGENT_TYPE),
+        start_agent_command=str(getattr(space, "start_agent_command", "") or ""),
+        created_at=getattr(space, "created_at", None),
+        updated_at=getattr(space, "updated_at", None),
+    )
+
+
+def _agent_space_page_companion(
+    companion: Companion | None,
+) -> AgentSpacePageCompanion | None:
+    if companion is None:
+        return None
+    return AgentSpacePageCompanion(
+        id=int(companion.id),
+        name=str(companion.name or ""),
+        device_id=str(companion.device_id or ""),
+    )
+
+
+def get_agent_space_page(task_public_id: str) -> AgentSpacePageResult:
+    clean_task_public_id = _clean_task_public_id(task_public_id)
+    with session_scope() as s:
+        task = (
+            s.query(Task).filter(Task.public_id == clean_task_public_id).one_or_none()
+        )
+        if task is None:
+            raise AgentSpaceTaskNotFound("Task not found")
+
+        goal = s.query(Goal).filter(Goal.id == task.goal_id).one_or_none()
+        space = (
+            s.query(AgentSpace)
+            .filter(AgentSpace.task_public_id == clean_task_public_id)
+            .one_or_none()
+        )
+        companion = None
+        if space is not None and getattr(space, "companion_id", None):
+            companion = s.get(Companion, int(space.companion_id))
+
+        result = AgentSpacePageResult(
+            task=_agent_space_page_task(task),
+            goal=_agent_space_page_goal(goal),
+            space=_agent_space_page_space(space),
+            companion=_agent_space_page_companion(companion),
+        )
+
+    return result
 
 
 def get_agent_space_for_task(task_public_id: str) -> AgentSpaceLookupResult:

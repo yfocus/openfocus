@@ -7,6 +7,8 @@ The Agent Spaces domain owns AgentSpace workspace lifecycle and terminal
 ownership state:
 
 - AgentSpace create/update/get use cases keyed by `Task.public_id`
+- AgentSpace page read model composition for Task/Goal/AgentSpace/Companion
+  data keyed by `Task.public_id`
 - AgentSpace release use cases keyed by `Task.public_id`
 - Start Agent command load/update use cases keyed by `AgentSpace.id`
 - AgentSession start, send preflight/user-message persistence, assistant
@@ -30,8 +32,11 @@ ownership state:
   length, verifies local Task/Companion/AgentSpace state, and returns stable
   results for web adapters.
 - Web routes still own request parsing, HTTP error mapping, templates, and
-  Companion live/online registry checks. AgentSpace creation only validates
-  local paired Companion state in this domain.
+  Companion live/online registry checks. The AgentSpace page route also owns
+  request-specific base URL/query-derived values such as `agent_prefix` and
+  `auto_start_agent_command`; Task/Goal/AgentSpace/Companion page data comes
+  from this domain read model. AgentSpace creation only validates local paired
+  Companion state in this domain.
 - Companion gRPC calls remain infrastructure glue. Routes pass a runtime resolver
   into the workspace release use case; the domain does not know the global
   Companion registry.
@@ -83,6 +88,10 @@ ownership state:
   after trimming.
 - Looking up a missing AgentSpace by `Task.public_id` returns an explicit
   missing-space result for adapters to map without treating it as an error.
+- Loading the AgentSpace page read model trims `Task.public_id`, raises
+  `AgentSpaceTaskNotFound` with `Task not found` when the Task is missing, and
+  returns `space=None`/`companion=None` when the Task exists without an
+  AgentSpace.
 - Releasing a missing AgentSpace is idempotent success.
 - Starting an AgentSession calls the runtime before writing the local
   `AgentSession` row. If runtime start fails, OpenFocus must not leave a local

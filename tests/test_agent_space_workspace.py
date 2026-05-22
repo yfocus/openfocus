@@ -227,6 +227,69 @@ def test_get_agent_space_for_task_represents_missing_space_consistently():
     assert result.to_dict() == {"ok": True, "space": None}
 
 
+def test_get_agent_space_page_missing_task_raises_not_found():
+    from openfocus.domains.agent_spaces import workspace
+
+    with pytest.raises(workspace.AgentSpaceTaskNotFound, match="Task not found"):
+        workspace.get_agent_space_page(" missing-task ")
+
+
+def test_get_agent_space_page_returns_task_and_goal_without_space():
+    from openfocus.domains.agent_spaces import workspace
+
+    task_public_id = _seed_workspace_task()
+
+    result = workspace.get_agent_space_page(f" {task_public_id} ")
+
+    assert result.task.public_id == task_public_id
+    assert result.task.title == "t"
+    assert result.task.content == "d"
+    assert result.goal is not None
+    assert result.goal.title == "g"
+    assert result.goal.due_date == dt.date.today()
+    assert result.space is None
+    assert result.companion is None
+
+
+def test_get_agent_space_page_returns_space_and_bound_companion(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import workspace
+    from openfocus.models import AgentSpace
+
+    task_public_id = _seed_workspace_task()
+    companion_id = _seed_workspace_companion(
+        device_id="companion-display",
+        status="active",
+        auth_token="token",
+    )
+    with session_scope() as s:
+        space = AgentSpace(
+            task_public_id=task_public_id,
+            companion_id=companion_id,
+            root_path=str(tmp_path / "workspace"),
+            start_agent_command="coco -y",
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+
+    result = workspace.get_agent_space_page(task_public_id)
+
+    assert result.task.public_id == task_public_id
+    assert result.goal is not None
+    assert result.space is not None
+    assert result.space.id == space_id
+    assert result.space.root_path == str(tmp_path / "workspace")
+    assert result.space.start_agent_command == "coco -y"
+    assert result.space.companion_id == companion_id
+    assert result.space.created_at is not None
+    assert result.space.updated_at is not None
+    assert result.companion is not None
+    assert result.companion.id == companion_id
+    assert result.companion.name == "companion-display"
+    assert result.companion.device_id == "companion-display"
+
+
 def test_start_agent_command_get_update_and_length_validation(tmp_path):
     from openfocus.domains.agent_spaces import workspace
 
