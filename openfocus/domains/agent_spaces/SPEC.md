@@ -3,18 +3,22 @@
 
 ## Responsibility
 
-The Agent Spaces domain owns terminal ownership and local terminal lifecycle state:
+The Agent Spaces domain owns AgentSpace workspace lifecycle and terminal
+ownership state:
 
+- AgentSpace release use cases keyed by `Task.public_id`
 - explicit `TerminalOwner` values for AgentSpace and InspirationSpace terminals
 - terminal listing, naming, lookup, rename, create, and local deletion
 - deletion of terminal output rows tied to closed/released terminals
+- Agent Session and Agent Message cleanup when an AgentSpace is released
 - AgentSpace prompt catalog fields used by prompt zone display and auto injection
 
 ## Boundaries
 
 - Domain code must not depend on FastAPI request/response objects or Jinja templates.
-- Companion gRPC calls remain infrastructure glue and are invoked by routes for now.
-- Routes pass owner information and Companion results into the domain service.
+- Companion gRPC calls remain infrastructure glue. Routes pass a runtime resolver
+  into the workspace release use case; the domain does not know the global
+  Companion registry.
 - AgentSpace prompt `enabled` controls prompt zone visibility.
 - AgentSpace prompt `auto_enabled` controls automatic prompt concatenation on AgentSpace terminal input submit; it must not create runtime activity by itself.
 - Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
@@ -32,3 +36,12 @@ The Agent Spaces domain owns terminal ownership and local terminal lifecycle sta
 - Auto prompts are applied only to active AgentSpace terminal input. They do not apply to Agent Session `/send` or Inspiration terminal `Summary` / `Create Goal` flows.
 - Hiding an AgentSpace pane is layout-only and must not close terminals, release the AgentSpace, or mutate workspace files.
 - The settings column cannot be hidden. When the terminal pane is hidden, prompt-zone controls are hidden but settings controls remain available.
+- Releasing a missing AgentSpace is idempotent success.
+- Releasing an AgentSpace best-effort stops all remote terminals through the
+  shared Terminals gateway and best-effort terminates managed AgentSessions on
+  Companion, then deletes OpenFocus-side AgentSession, AgentMessage, terminal
+  metadata/output, and AgentSpace records.
+- If Companion is offline, terminal stop fails, or AgentSession terminate fails,
+  release still completes local OpenFocus cleanup.
+- Remote terminal stop happens before local terminal record deletion. If local
+  cleanup fails, terminal records remain available for retry/reconciliation.

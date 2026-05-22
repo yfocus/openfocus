@@ -474,6 +474,7 @@ def test_agent_space_release_keeps_terminal_records_if_local_delete_fails(
     async def _run() -> None:
         from openfocus.db import session_scope
         from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.domains.agent_spaces import workspace as agent_space_workspace
         from openfocus.models import AgentSpace, Goal, RemoteTerminalSession, Task
         from openfocus.web.routes import agent_spaces as agent_spaces_routes
 
@@ -500,7 +501,7 @@ def test_agent_space_release_keeps_terminal_records_if_local_delete_fails(
                 connect_url="http://127.0.0.1:7681",
             )
 
-        real_session_scope = agent_spaces_routes.session_scope
+        real_session_scope = agent_space_workspace.session_scope
         calls = {"count": 0}
 
         @contextmanager
@@ -511,7 +512,7 @@ def test_agent_space_release_keeps_terminal_records_if_local_delete_fails(
             with real_session_scope() as s:
                 yield s
 
-        monkeypatch.setattr(agent_spaces_routes, "session_scope", flaky_session_scope)
+        monkeypatch.setattr(agent_space_workspace, "session_scope", flaky_session_scope)
 
         try:
             await agent_spaces_routes.delete_agent_space_for_task(

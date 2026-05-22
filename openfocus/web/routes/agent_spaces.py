@@ -14,6 +14,7 @@ from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...db import session_scope
 from ...domains.agent_activity import service as agent_activity_service
 from ...domains.agent_spaces import terminals as terminal_service
+from ...domains.agent_spaces import workspace as agent_space_workspace
 from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
 from ...domains.terminals import gateway as terminal_gateway
@@ -110,54 +111,14 @@ def _companion_display_status(grpc_server: CompanionGrpcServer, c: Companion | N
 async def delete_agent_space_for_task(
     grpc_server: CompanionGrpcServer, task_public_id: str
 ) -> dict:
-    terminal_ops = terminal_gateway.RemoteTerminalGateway()
-    with session_scope() as s:
-        space = (
-            s.query(AgentSpace)
-            .filter(AgentSpace.task_public_id == task_public_id)
-            .one_or_none()
-        )
-        if space is None:
-            return {"ok": True}
+    def _runtime_resolver(companion_id: int):
+        return grpc_server.registry.get(int(companion_id or 0))
 
-        comp = None
-        if getattr(space, "companion_id", None):
-            comp = s.get(Companion, int(space.companion_id))
-
-        sessions = s.query(AgentSession).filter(AgentSession.space_id == space.id).all()
-        sess_ids = [ss.session_id for ss in sessions]
-        owner = terminal_service.owner_for_agent_space(int(space.id))
-
-    cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
-    conn = grpc_server.registry.get(cid) if cid else None
-    await terminal_ops.release_owner_terminals(
-        owner=owner,
-        runtime=conn,
-        timeout_seconds=5.0,
-        delete_local_records=False,
+    result = await agent_space_workspace.release_agent_space_for_task(
+        task_public_id,
+        runtime_resolver=_runtime_resolver,
     )
-
-    with session_scope() as s:
-        space = (
-            s.query(AgentSpace)
-            .filter(AgentSpace.task_public_id == task_public_id)
-            .one_or_none()
-        )
-        if space is None:
-            return {"ok": True}
-
-        if sess_ids:
-            s.query(AgentMessage).filter(AgentMessage.session_id.in_(sess_ids)).delete(
-                synchronize_session=False
-            )
-            s.query(AgentSession).filter(AgentSession.session_id.in_(sess_ids)).delete(
-                synchronize_session=False
-            )
-
-        terminal_service.delete_owner_terminal_records(s, owner=owner)
-        s.delete(space)
-
-    return {"ok": True}
+    return result.to_dict()
 
 
 def _ttyd_bridge_script() -> str:
