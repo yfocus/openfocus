@@ -17,6 +17,8 @@ The Companion domain owns OpenFocus-side companion device state and pairing rule
 - The Companion domain owns persisted server-side state and product rules around trust, status, capabilities, and pairing.
 - Companion must not expose a browser-facing HTTP server; browser actions go through OpenFocus Web/API routes.
 - Companion domain use cases expose domain-shaped errors, not FastAPI `HTTPException`; Web/API routes own HTTP status mapping and response adaptation.
+- AgentSpace file helpers return domain payloads and domain errors: JSON-shaped list/read payloads for metadata and text, `CompanionRawFileResult` for raw bytes plus MIME type, and `CompanionFile*Error`/`CompanionRuntimeError` for file failures. Web/API routes adapt those payloads to HTTP responses, including raw `Response` construction.
+- AgentSpace online selection helpers expose domain errors for missing spaces, unbound spaces, unpaired Companions, and missing gRPC registry entries; Web/API routes map those errors to HTTP 404/400/502.
 - Terminal lifecycle ownership belongs to `openfocus/domains/agent_spaces/`.
 - Runtime activity projection belongs to `openfocus/domains/agent_activity/`.
 

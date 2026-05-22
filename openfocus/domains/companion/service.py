@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Any
-
-from fastapi import HTTPException, Response
+from typing import Any, NoReturn
 
 from ...companion.grpc import CompanionGrpcError
 from ...db import session_scope
@@ -39,6 +37,10 @@ class CompanionNotFoundError(CompanionUseCaseError):
     pass
 
 
+class CompanionAgentSpaceNotFoundError(CompanionNotFoundError):
+    pass
+
+
 class CompanionUnavailableOrUnpairedError(CompanionUseCaseError):
     pass
 
@@ -55,11 +57,29 @@ class CompanionRateLimitError(CompanionUseCaseError):
     pass
 
 
+class CompanionFileNotFoundError(CompanionUseCaseError):
+    pass
+
+
+class CompanionFileTooLargeError(CompanionUseCaseError):
+    pass
+
+
+class CompanionFileValidationError(CompanionUseCaseError):
+    pass
+
+
 @dataclass(frozen=True)
 class SelectedCompanion:
     """Session-independent companion identity returned with a live connection."""
 
     id: int
+
+
+@dataclass(frozen=True)
+class CompanionRawFileResult:
+    data: bytes
+    mime: str
 
 
 def utcnow() -> dt.datetime:
@@ -346,7 +366,7 @@ def load_space_and_optional_companion(
     with session_scope() as session:
         space = session.get(AgentSpace, int(space_id))
         if space is None:
-            raise HTTPException(status_code=404, detail="AgentSpace not found")
+            raise CompanionAgentSpaceNotFoundError("AgentSpace not found")
         companion = None
         if getattr(space, "companion_id", None):
             companion = session.get(Companion, int(space.companion_id))
@@ -355,22 +375,18 @@ def load_space_and_optional_companion(
 
 def require_online(grpc_server: Any, *, companion: Companion | None):
     if companion is None:
-        raise HTTPException(
-            status_code=400, detail="AgentSpace is not bound to a Companion"
-        )
+        raise CompanionValidationError("AgentSpace is not bound to a Companion")
     if (
         companion.status or ""
     ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
         companion.auth_token or ""
     ).strip():
-        raise HTTPException(
-            status_code=400, detail="Companion is not paired or unavailable"
+        raise CompanionUnavailableOrUnpairedError(
+            "Companion is not paired or unavailable"
         )
     conn = grpc_server.registry.get(int(companion.id))
     if conn is None:
-        raise HTTPException(
-            status_code=502, detail="Companion is not online (no gRPC connection)"
-        )
+        raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
     return conn
 
 
@@ -398,7 +414,7 @@ def select_online(
             # boundary. Terminal routes only need the identity plus the live
             # gRPC connection, so return a tiny DTO that cannot become detached.
             return SelectedCompanion(id=int(companion.id)), conn
-    raise HTTPException(status_code=502, detail="No online Companion is available")
+    raise CompanionRuntimeError("No online Companion is available")
 
 
 def has_online(grpc_server: Any) -> bool:
@@ -416,13 +432,13 @@ def has_online(grpc_server: Any) -> bool:
     return False
 
 
-def map_files_error(exc: CompanionGrpcError) -> HTTPException:
+def raise_file_error(exc: CompanionGrpcError) -> NoReturn:
     msg = str(exc or "").strip()
     low = msg.lower()
     if ("not found" in low) or ("no such file" in low):
-        return HTTPException(status_code=404, detail=msg or "not found")
+        raise CompanionFileNotFoundError(msg or "not found") from exc
     if ("too large" in low) or ("file too large" in low):
-        return HTTPException(status_code=413, detail=msg or "file too large")
+        raise CompanionFileTooLargeError(msg or "file too large") from exc
     if (
         ("traversal" in low)
         or ("invalid path" in low)
@@ -430,8 +446,8 @@ def map_files_error(exc: CompanionGrpcError) -> HTTPException:
         or ("not a directory" in low)
         or ("root_path" in low)
     ):
-        return HTTPException(status_code=400, detail=msg or "bad request")
-    return HTTPException(status_code=502, detail=f"Companion file service error: {msg}")
+        raise CompanionFileValidationError(msg or "bad request") from exc
+    raise CompanionRuntimeError(f"Companion file service error: {msg}") from exc
 
 
 async def list_space_files(grpc_server: Any, *, space_id: int, path: str = "") -> dict:
@@ -444,7 +460,7 @@ async def list_space_files(grpc_server: Any, *, space_id: int, path: str = "") -
             timeout_seconds=10.0,
         )
     except CompanionGrpcError as exc:
-        raise map_files_error(exc)
+        raise_file_error(exc)
 
     entries = [
         {
@@ -469,7 +485,7 @@ async def read_space_file(grpc_server: Any, *, space_id: int, path: str) -> dict
             max_bytes=256 * 1024,
         )
     except CompanionGrpcError as exc:
-        raise map_files_error(exc)
+        raise_file_error(exc)
 
     return {
         "ok": True,
@@ -480,7 +496,9 @@ async def read_space_file(grpc_server: Any, *, space_id: int, path: str) -> dict
     }
 
 
-async def raw_space_file(grpc_server: Any, *, space_id: int, path: str) -> Response:
+async def raw_space_file(
+    grpc_server: Any, *, space_id: int, path: str
+) -> CompanionRawFileResult:
     space, companion = load_space_and_optional_companion(space_id)
     conn = require_online(grpc_server, companion=companion)
     try:
@@ -490,8 +508,8 @@ async def raw_space_file(grpc_server: Any, *, space_id: int, path: str) -> Respo
             max_bytes=2 * 1024 * 1024,
         )
     except CompanionGrpcError as exc:
-        raise map_files_error(exc)
+        raise_file_error(exc)
 
-    return Response(
-        content=bytes(res.data), media_type=(res.mime or "application/octet-stream")
+    return CompanionRawFileResult(
+        data=bytes(res.data), mime=(res.mime or "application/octet-stream")
     )

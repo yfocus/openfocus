@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from ...db import session_scope
 from ...domains.agent_spaces import terminals as terminal_service
+from ...domains.companion import service as companion_service
 from ...domains.inspirations import publishing as inspiration_publishing
 from ...domains.inspirations import resources as inspiration_resources
 from ...domains.inspirations import service as inspiration_service
@@ -49,6 +50,24 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             return deps.inspiration_space_or_404(s, int(space_id))
         except inspiration_service.InspirationNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
+
+    def _companion_http_error(
+        exc: companion_service.CompanionUseCaseError,
+    ) -> HTTPException:
+        if isinstance(exc, companion_service.CompanionNotFoundError):
+            return HTTPException(status_code=404, detail=exc.detail)
+        if isinstance(
+            exc,
+            (
+                companion_service.CompanionValidationError,
+                companion_service.CompanionUnavailableOrUnpairedError,
+                companion_service.CompanionOfflineError,
+            ),
+        ):
+            return HTTPException(status_code=400, detail=exc.detail)
+        if isinstance(exc, companion_service.CompanionRuntimeError):
+            return HTTPException(status_code=502, detail=exc.detail)
+        return HTTPException(status_code=500, detail=exc.detail)
 
     async def _enqueue_turn(space_id: int, content: str) -> dict:
         try:
@@ -93,6 +112,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     def _terminal_conn(companion_id: int | None):
         try:
             return deps.inspiration_terminal_conn(companion_id)
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
         except inspiration_service.InspirationTerminalError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -1055,11 +1076,14 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             payload.get("companion_id") if isinstance(payload, dict) else None
         )
         try:
-            comp, conn = deps.select_online_companion(
-                int(companion_id) if companion_id else None
-            )
-        except (TypeError, ValueError):
-            comp, conn = deps.select_online_companion(None)
+            try:
+                comp, conn = deps.select_online_companion(
+                    int(companion_id) if companion_id else None
+                )
+            except (TypeError, ValueError):
+                comp, conn = deps.select_online_companion(None)
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
 
         try:
             result = await terminal_ops.start_terminal(
@@ -1118,6 +1142,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalInputError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
         deps.try_audit_memory(
             kind="inspiration.terminal_input",
             source="web",
@@ -1172,6 +1198,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalMouseModeError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
         return {"ok": True, "enabled": actual}
 
     @router.post(

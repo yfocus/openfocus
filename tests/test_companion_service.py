@@ -69,6 +69,22 @@ def test_delete_companion_missing_raises_domain_not_found_error() -> None:
     assert not isinstance(exc_info.value, HTTPException)
 
 
+def test_load_missing_agent_space_raises_domain_error_not_http_exception() -> None:
+    with pytest.raises(companion_service.CompanionAgentSpaceNotFoundError) as exc_info:
+        companion_service.load_space_and_optional_companion(999)
+
+    assert exc_info.value.detail == "AgentSpace not found"
+    assert not isinstance(exc_info.value, HTTPException)
+
+
+def test_select_online_without_online_companion_raises_domain_runtime_error() -> None:
+    with pytest.raises(companion_service.CompanionRuntimeError) as exc_info:
+        companion_service.select_online(_GrpcServer())
+
+    assert exc_info.value.detail == "No online Companion is available"
+    assert not isinstance(exc_info.value, HTTPException)
+
+
 def test_delete_companion_route_maps_missing_to_http_404() -> None:
     async def _run() -> None:
         transport = ASGITransport(app=_app())

@@ -76,11 +76,17 @@ def _inject_openfocus_prompt(
 
 
 def _load_space_and_optional_companion(space_id: int):
-    return companion_service.load_space_and_optional_companion(space_id)
+    try:
+        return companion_service.load_space_and_optional_companion(space_id)
+    except companion_service.CompanionUseCaseError as exc:
+        raise _companion_http_error(exc) from exc
 
 
 def _require_companion_online(*, grpc_server: CompanionGrpcServer, comp):
-    return companion_service.require_online(grpc_server, companion=comp)
+    try:
+        return companion_service.require_online(grpc_server, companion=comp)
+    except companion_service.CompanionUseCaseError as exc:
+        raise _companion_http_error(exc) from exc
 
 
 def _companion_display_status(grpc_server: CompanionGrpcServer, c: Companion | None):
@@ -135,6 +141,36 @@ def _agent_space_prompt_http_error(
     if isinstance(exc, agent_space_prompts.AgentSpacePromptValidationError):
         return HTTPException(status_code=400, detail=detail)
     return HTTPException(status_code=400, detail=detail)
+
+
+def _companion_http_error(
+    exc: companion_service.CompanionUseCaseError,
+) -> HTTPException:
+    detail = exc.detail
+    if isinstance(
+        exc,
+        (
+            companion_service.CompanionAgentSpaceNotFoundError,
+            companion_service.CompanionNotFoundError,
+            companion_service.CompanionFileNotFoundError,
+        ),
+    ):
+        return HTTPException(status_code=404, detail=detail)
+    if isinstance(exc, companion_service.CompanionFileTooLargeError):
+        return HTTPException(status_code=413, detail=detail)
+    if isinstance(
+        exc,
+        (
+            companion_service.CompanionValidationError,
+            companion_service.CompanionUnavailableOrUnpairedError,
+            companion_service.CompanionOfflineError,
+            companion_service.CompanionFileValidationError,
+        ),
+    ):
+        return HTTPException(status_code=400, detail=detail)
+    if isinstance(exc, companion_service.CompanionRuntimeError):
+        return HTTPException(status_code=502, detail=detail)
+    return HTTPException(status_code=500, detail=detail)
 
 
 def _ttyd_bridge_script() -> str:
@@ -232,7 +268,10 @@ def create_router(
         return result.to_dict()
 
     def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
-        return companion_service.require_online(grpc_server, companion=comp)
+        try:
+            return companion_service.require_online(grpc_server, companion=comp)
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
 
     def _companion_display_status(c: Companion | None):
         if c is None:
@@ -318,21 +357,31 @@ def create_router(
 
     @router.get("/api/agent_spaces/{space_id}/files/list")
     async def agent_space_files_list(space_id: int, path: str = "") -> dict:
-        return await companion_service.list_space_files(
-            grpc_server, space_id=space_id, path=path
-        )
+        try:
+            return await companion_service.list_space_files(
+                grpc_server, space_id=space_id, path=path
+            )
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
 
     @router.get("/api/agent_spaces/{space_id}/files/read")
     async def agent_space_files_read(space_id: int, path: str) -> dict:
-        return await companion_service.read_space_file(
-            grpc_server, space_id=space_id, path=path
-        )
+        try:
+            return await companion_service.read_space_file(
+                grpc_server, space_id=space_id, path=path
+            )
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
 
     @router.get("/api/agent_spaces/{space_id}/files/raw")
     async def agent_space_files_raw(space_id: int, path: str) -> Response:
-        return await companion_service.raw_space_file(
-            grpc_server, space_id=space_id, path=path
-        )
+        try:
+            result = await companion_service.raw_space_file(
+                grpc_server, space_id=space_id, path=path
+            )
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
+        return Response(content=result.data, media_type=result.mime)
 
     @router.get("/api/agent_spaces/{space_id}/terminals")
     async def terminals_list(space_id: int) -> dict:

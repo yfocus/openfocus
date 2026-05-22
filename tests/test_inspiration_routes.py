@@ -625,6 +625,61 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
 
 
 @pytest.mark.anyio
+async def test_inspiration_terminal_inject_maps_companion_runtime_error(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    import openfocus.app as app_mod
+    from openfocus.domains.companion import service as companion_service
+
+    class FakeConn:
+        async def request_terminal_start(self, **kwargs):
+            return SimpleNamespace(
+                terminal_id=kwargs["terminal_id"],
+                backend="ttyd",
+                connect_url="http://127.0.0.1:43210",
+            )
+
+        async def request_terminal_input(self, **_kwargs):
+            raise AssertionError("runtime should not be reached")
+
+    fake_conn = FakeConn()
+    select_online = {"fail": False}
+
+    def fake_select_online_companion(companion_id=None):
+        if select_online["fail"]:
+            raise companion_service.CompanionRuntimeError(
+                "No online Companion is available"
+            )
+        return SimpleNamespace(id=89), fake_conn
+
+    monkeypatch.setattr(
+        app_mod, "_select_online_companion", fake_select_online_companion
+    )
+    monkeypatch.setattr(app_mod, "_has_online_companion", lambda: True)
+
+    app = app_mod.app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "Offline terminal", "mode": "terminal"}
+        )
+        assert create_resp.status_code == 200
+        space_id = int(create_resp.json()["item"]["id"])
+
+        term_resp = await client.post(f"/api/inspirations/{space_id}/terminals/new")
+        assert term_resp.status_code == 200
+        tid = term_resp.json()["terminal"]["terminal_id"]
+
+        select_online["fail"] = True
+        inject = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/inject",
+            json={"text": "pwd\n"},
+        )
+        assert inject.status_code == 502
+        assert inject.json()["detail"] == "No online Companion is available"
+
+
+@pytest.mark.anyio
 async def test_inspiration_terminal_inject_cleans_stale_runtime_record(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
