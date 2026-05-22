@@ -264,6 +264,151 @@ def test_terminate_agent_session_runtime_failure_leaves_status_unchanged(tmp_pat
     asyncio.run(_run())
 
 
+def test_send_agent_session_message_persists_user_message_and_returns_context(
+    tmp_path,
+):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage, AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+        s.add(task)
+        s.flush()
+        task_public_id = str(task.public_id)
+        space = AgentSpace(
+            task_public_id=task_public_id,
+            companion_id=23,
+            root_path=str(tmp_path),
+            agent_type="codex-cli",
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        s.add(
+            AgentSession(
+                session_id="session-to-send",
+                space_id=space_id,
+                task_public_id=task_public_id,
+                companion_id=23,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+                status="active",
+            )
+        )
+
+    result = agent_sessions.send_agent_session_message(
+        space_id,
+        " session-to-send ",
+        "hello agent",
+        request_id_factory=lambda: "request-fixed",
+    )
+
+    assert result.session_id == "session-to-send"
+    assert result.space_id == space_id
+    assert result.request_id == "request-fixed"
+    assert result.user_text == "hello agent"
+    assert result.task_public_id == task_public_id
+    assert result.agent_type == "codex-cli"
+    assert result.companion_id == 23
+
+    with session_scope() as s:
+        messages = s.query(AgentMessage).order_by(AgentMessage.id.asc()).all()
+        assert len(messages) == 1
+        assert messages[0].session_id == "session-to-send"
+        assert messages[0].role == "user"
+        assert messages[0].content == "hello agent"
+        assert messages[0].request_id == ""
+        assert messages[0].done is True
+
+
+def test_send_agent_session_message_rejects_empty_session_id():
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage
+
+    with pytest.raises(
+        agent_sessions.AgentSessionValidationError, match="session_id is required"
+    ):
+        agent_sessions.send_agent_session_message(
+            1,
+            "  ",
+            "hello agent",
+            request_id_factory=lambda: "request-fixed",
+        )
+
+    with session_scope() as s:
+        assert s.query(AgentMessage).count() == 0
+
+
+def test_send_agent_session_message_rejects_missing_or_wrong_space_session(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage, AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task_one = Task(goal_id=goal.id, title="t1", content="d", status="todo")
+        task_two = Task(goal_id=goal.id, title="t2", content="d", status="todo")
+        s.add_all([task_one, task_two])
+        s.flush()
+        space_one = AgentSpace(
+            task_public_id=str(task_one.public_id),
+            companion_id=31,
+            root_path=str(tmp_path / "one"),
+            agent_type="codex-cli",
+        )
+        space_two = AgentSpace(
+            task_public_id=str(task_two.public_id),
+            companion_id=32,
+            root_path=str(tmp_path / "two"),
+            agent_type="codex-cli",
+        )
+        s.add_all([space_one, space_two])
+        s.flush()
+        space_one_id = int(space_one.id)
+        space_two_id = int(space_two.id)
+        s.add(
+            AgentSession(
+                session_id="session-in-space-one",
+                space_id=space_one_id,
+                task_public_id=str(task_one.public_id),
+                companion_id=31,
+                root_path=str(tmp_path / "one"),
+                agent_type="codex-cli",
+                status="active",
+            )
+        )
+
+    with pytest.raises(
+        agent_sessions.AgentSessionNotFound, match="Agent session not found"
+    ):
+        agent_sessions.send_agent_session_message(
+            space_one_id,
+            "missing-session",
+            "hello agent",
+            request_id_factory=lambda: "request-missing",
+        )
+
+    with pytest.raises(
+        agent_sessions.AgentSessionNotFound, match="Agent session not found"
+    ):
+        agent_sessions.send_agent_session_message(
+            space_two_id,
+            "session-in-space-one",
+            "hello agent",
+            request_id_factory=lambda: "request-wrong-space",
+        )
+
+    with session_scope() as s:
+        assert s.query(AgentMessage).count() == 0
+
+
 def test_release_agent_space_for_task_is_idempotent_without_space():
     async def _run() -> None:
         from openfocus.db import session_scope

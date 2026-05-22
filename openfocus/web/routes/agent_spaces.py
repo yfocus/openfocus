@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import uuid
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
@@ -914,9 +913,6 @@ def create_router(
     ) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
-        sid = str(session_id or "").strip()
-        if not sid:
-            raise HTTPException(status_code=400, detail="session_id is required")
 
         payload = await request.json()
         text_in = ""
@@ -929,25 +925,21 @@ def create_router(
         if not user_text:
             raise HTTPException(status_code=400, detail="text is required")
 
-        # 校验 session 归属
+        try:
+            send_result = agent_session_service.send_agent_session_message(
+                int(sp.id),
+                session_id,
+                user_text,
+            )
+        except agent_session_service.AgentSessionValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except agent_session_service.AgentSessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        sid = send_result.session_id
+        rid = send_result.request_id
+
         with session_scope() as s:
-            sess = (
-                s.query(AgentSession)
-                .filter(AgentSession.session_id == sid)
-                .one_or_none()
-            )
-            if sess is None or int(sess.space_id) != int(sp.id):
-                raise HTTPException(status_code=404, detail="Agent session not found")
-            sess_agent_type = str(sess.agent_type or "agent")
-            sess_task_public_id = str(sess.task_public_id or "")
-            sess_companion_id = int(sess.companion_id) if sess.companion_id else None
-
-            user_msg = AgentMessage(
-                session_id=sid, role="user", content=user_text, request_id="", done=True
-            )
-            s.add(user_msg)
-
-            rid = str(uuid.uuid4())
             asst_msg = AgentMessage(
                 session_id=sid, role="assistant", content="", request_id=rid, done=False
             )
@@ -955,11 +947,11 @@ def create_router(
             agent_activity_service.handle_runtime_signal(
                 s,
                 kind="runtime.turn.started",
-                agent_runtime=sess_agent_type,
+                agent_runtime=send_result.agent_type,
                 session_id=sid,
                 turn_id=rid,
-                task_public_id=sess_task_public_id,
-                companion_id=sess_companion_id,
+                task_public_id=send_result.task_public_id,
+                companion_id=send_result.companion_id,
                 source="openfocus.agent_session.send",
                 payload={"message": "Prompt submitted from OpenFocus AgentSpace."},
             )
@@ -967,17 +959,17 @@ def create_router(
 
         injected = _inject_openfocus_prompt(
             base_url=_openfocus_base_url(request),
-            task_public_id=str(sp.task_public_id or ""),
+            task_public_id=send_result.task_public_id,
             session_id=sid,
-            user_prompt=user_text,
+            user_prompt=send_result.user_text,
         )
 
         _try_audit_memory(
             kind="agent.session.user_message",
             source="web",
             summary=f"Sent message to agent session `{sid}`.",
-            detail=user_text,
-            task_public_id=str(sp.task_public_id or "") or None,
+            detail=send_result.user_text,
+            task_public_id=send_result.task_public_id or None,
             metadata={"space_id": int(sp.id), "session_id": sid},
         )
 
@@ -1003,11 +995,11 @@ def create_router(
                 agent_activity_service.handle_runtime_signal(
                     s,
                     kind="runtime.turn.failed",
-                    agent_runtime=sess_agent_type,
+                    agent_runtime=send_result.agent_type,
                     session_id=sid,
                     turn_id=rid,
-                    task_public_id=sess_task_public_id,
-                    companion_id=sess_companion_id,
+                    task_public_id=send_result.task_public_id,
+                    companion_id=send_result.companion_id,
                     source="openfocus.agent_session.send",
                     payload={"error": str(e)},
                 )

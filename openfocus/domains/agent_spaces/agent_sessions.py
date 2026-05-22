@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ...db import session_scope
-from ...models import AgentSession, AgentSpace
+from ...models import AgentMessage, AgentSession, AgentSpace
 
 
 class AgentSessionRuntimePort(Protocol):
@@ -45,12 +45,31 @@ class AgentSessionTerminateResult:
     status: str
 
 
+@dataclass(frozen=True)
+class AgentSessionSendResult:
+    session_id: str
+    space_id: int
+    request_id: str
+    user_text: str
+    task_public_id: str
+    agent_type: str
+    companion_id: int | None
+
+
 def _new_session_id(session_id_factory: Callable[[], object] | None) -> str:
     raw = session_id_factory() if session_id_factory is not None else uuid.uuid4()
     session_id = str(raw or "").strip()
     if not session_id:
         raise AgentSessionValidationError("generated session_id is empty")
     return session_id
+
+
+def _new_request_id(request_id_factory: Callable[[], object] | None) -> str:
+    raw = request_id_factory() if request_id_factory is not None else uuid.uuid4()
+    request_id = str(raw or "").strip()
+    if not request_id:
+        raise AgentSessionValidationError("generated request_id is empty")
+    return request_id
 
 
 async def start_agent_session(
@@ -157,4 +176,57 @@ async def terminate_agent_session(
         session_id=clean_session_id,
         space_id=int(space_id),
         status=final_status,
+    )
+
+
+def send_agent_session_message(
+    space_id: int,
+    session_id: str,
+    user_text: str,
+    *,
+    request_id_factory: Callable[[], object] | None = None,
+) -> AgentSessionSendResult:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        raise AgentSessionValidationError("session_id is required")
+
+    clean_user_text = str(user_text or "")
+    if not clean_user_text.strip():
+        raise AgentSessionValidationError("text is required")
+
+    resolved_space_id = int(space_id)
+
+    with session_scope() as s:
+        session = (
+            s.query(AgentSession)
+            .filter(AgentSession.session_id == clean_session_id)
+            .one_or_none()
+        )
+        if session is None or int(session.space_id) != resolved_space_id:
+            raise AgentSessionNotFound("Agent session not found")
+
+        task_public_id = str(session.task_public_id or "")
+        agent_type = str(session.agent_type or "agent")
+        companion_id = int(session.companion_id) if session.companion_id else None
+        request_id = _new_request_id(request_id_factory)
+
+        s.add(
+            AgentMessage(
+                session_id=clean_session_id,
+                role="user",
+                content=clean_user_text,
+                request_id="",
+                done=True,
+            )
+        )
+        s.flush()
+
+    return AgentSessionSendResult(
+        session_id=clean_session_id,
+        space_id=resolved_space_id,
+        request_id=request_id,
+        user_text=clean_user_text,
+        task_public_id=task_public_id,
+        agent_type=agent_type,
+        companion_id=companion_id,
     )
