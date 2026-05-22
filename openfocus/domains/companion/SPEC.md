@@ -16,6 +16,7 @@ The Companion domain owns OpenFocus-side companion device state and pairing rule
 - `openfocus.companion` owns the local Companion runtime process and gRPC client implementation.
 - The Companion domain owns persisted server-side state and product rules around trust, status, capabilities, and pairing.
 - Companion must not expose a browser-facing HTTP server; browser actions go through OpenFocus Web/API routes.
+- Companion domain use cases expose domain-shaped errors, not FastAPI `HTTPException`; Web/API routes own HTTP status mapping and response adaptation.
 - Terminal lifecycle ownership belongs to `openfocus/domains/agent_spaces/`.
 - Runtime activity projection belongs to `openfocus/domains/agent_activity/`.
 
