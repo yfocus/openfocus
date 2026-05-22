@@ -7,6 +7,7 @@ The Agent Spaces domain owns AgentSpace workspace lifecycle and terminal
 ownership state:
 
 - AgentSpace release use cases keyed by `Task.public_id`
+- AgentSession start and terminate use cases keyed by `AgentSpace.id`
 - explicit `TerminalOwner` values for AgentSpace and InspirationSpace terminals
 - terminal listing, naming, lookup, rename, create, and local deletion
 - deletion of terminal output rows tied to closed/released terminals
@@ -19,6 +20,13 @@ ownership state:
 - Companion gRPC calls remain infrastructure glue. Routes pass a runtime resolver
   into the workspace release use case; the domain does not know the global
   Companion registry.
+- AgentSession start/terminate use cases receive a small runtime port with
+  `request_agent_start(...)` and `request_agent_terminate(...)`. The domain does
+  not know `COMPANION_GRPC`, Companion registry lookup, HTTP status codes,
+  request parsing, audit memory, SSE publish, or templates.
+- AgentSession `/send`, message chunk persistence, prompt injection, and SSE
+  streaming remain outside this domain boundary until that lifecycle is
+  explicitly moved.
 - AgentSpace prompt `enabled` controls prompt zone visibility.
 - AgentSpace prompt `auto_enabled` controls automatic prompt concatenation on AgentSpace terminal input submit; it must not create runtime activity by itself.
 - Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
@@ -37,6 +45,13 @@ ownership state:
 - Hiding an AgentSpace pane is layout-only and must not close terminals, release the AgentSpace, or mutate workspace files.
 - The settings column cannot be hidden. When the terminal pane is hidden, prompt-zone controls are hidden but settings controls remain available.
 - Releasing a missing AgentSpace is idempotent success.
+- Starting an AgentSession calls the runtime before writing the local
+  `AgentSession` row. If runtime start fails, OpenFocus must not leave a local
+  dirty session row.
+- Terminating an AgentSession first validates that the session belongs to the
+  requested AgentSpace. Runtime terminate failure leaves the local
+  `AgentSession.status` unchanged; web routes map Companion terminate failure to
+  HTTP 502.
 - Releasing an AgentSpace best-effort stops all remote terminals through the
   shared Terminals gateway and best-effort terminates managed AgentSessions on
   Companion, then deletes OpenFocus-side AgentSession, AgentMessage, terminal

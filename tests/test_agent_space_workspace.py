@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+from types import SimpleNamespace
+
+import pytest
 
 
 class FakeWorkspaceRuntime:
@@ -19,6 +22,246 @@ class FakeWorkspaceRuntime:
         self.agent_terminates.append(dict(kwargs))
         if self.fail_agent_terminate:
             raise RuntimeError("agent terminate failed")
+
+
+class FakeAgentSessionRuntime:
+    def __init__(
+        self,
+        *,
+        real_session_id: str = "",
+        fail_start: bool = False,
+        fail_terminate: bool = False,
+    ) -> None:
+        self.real_session_id = real_session_id
+        self.fail_start = fail_start
+        self.fail_terminate = fail_terminate
+        self.starts: list[dict] = []
+        self.terminates: list[dict] = []
+
+    async def request_agent_start(self, **kwargs):
+        self.starts.append(dict(kwargs))
+        if self.fail_start:
+            raise RuntimeError("agent start failed")
+        return SimpleNamespace(session_id=self.real_session_id)
+
+    async def request_agent_terminate(self, **kwargs):
+        self.terminates.append(dict(kwargs))
+        if self.fail_terminate:
+            raise RuntimeError("agent terminate failed")
+
+
+def test_start_agent_session_persists_after_runtime_start(tmp_path):
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import agent_sessions
+        from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+        with session_scope() as s:
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_public_id = str(task.public_id)
+            space = AgentSpace(
+                task_public_id=task_public_id,
+                companion_id=17,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+
+        runtime = FakeAgentSessionRuntime(real_session_id="runtime-session")
+
+        result = await agent_sessions.start_agent_session(
+            space_id,
+            runtime=runtime,
+            companion_id=17,
+            session_id_factory=lambda: "generated-session",
+        )
+
+        assert result.session_id == "runtime-session"
+        assert runtime.starts == [
+            {
+                "session_id": "generated-session",
+                "root_path": str(tmp_path),
+                "agent_type": "codex-cli",
+                "task_public_id": task_public_id,
+                "timeout_seconds": 10.0,
+            }
+        ]
+        with session_scope() as s:
+            row = (
+                s.query(AgentSession)
+                .filter(AgentSession.session_id == "runtime-session")
+                .one()
+            )
+            assert int(row.space_id) == space_id
+            assert row.task_public_id == task_public_id
+            assert row.companion_id == 17
+            assert row.root_path == str(tmp_path)
+            assert row.agent_type == "codex-cli"
+            assert row.status == "active"
+
+    asyncio.run(_run())
+
+
+def test_start_agent_session_runtime_failure_leaves_no_local_session(tmp_path):
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import agent_sessions
+        from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+        with session_scope() as s:
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            space = AgentSpace(
+                task_public_id=str(task.public_id),
+                companion_id=17,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+
+        runtime = FakeAgentSessionRuntime(fail_start=True)
+
+        with pytest.raises(RuntimeError, match="agent start failed"):
+            await agent_sessions.start_agent_session(
+                space_id,
+                runtime=runtime,
+                companion_id=17,
+                session_id_factory=lambda: "generated-session",
+            )
+
+        with session_scope() as s:
+            assert s.query(AgentSession).count() == 0
+
+    asyncio.run(_run())
+
+
+def test_terminate_agent_session_updates_status_after_runtime_success(tmp_path):
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import agent_sessions
+        from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+        with session_scope() as s:
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_public_id = str(task.public_id)
+            space = AgentSpace(
+                task_public_id=task_public_id,
+                companion_id=17,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            s.add(
+                AgentSession(
+                    session_id="session-to-stop",
+                    space_id=space_id,
+                    task_public_id=task_public_id,
+                    companion_id=17,
+                    root_path=str(tmp_path),
+                    agent_type="codex-cli",
+                    status="active",
+                )
+            )
+
+        runtime = FakeAgentSessionRuntime()
+
+        result = await agent_sessions.terminate_agent_session(
+            space_id,
+            "session-to-stop",
+            runtime=runtime,
+        )
+
+        assert result.status == "terminated"
+        assert runtime.terminates == [
+            {"session_id": "session-to-stop", "timeout_seconds": 10.0}
+        ]
+        with session_scope() as s:
+            row = (
+                s.query(AgentSession)
+                .filter(AgentSession.session_id == "session-to-stop")
+                .one()
+            )
+            assert row.status == "terminated"
+
+    asyncio.run(_run())
+
+
+def test_terminate_agent_session_runtime_failure_leaves_status_unchanged(tmp_path):
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import agent_sessions
+        from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+        with session_scope() as s:
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_public_id = str(task.public_id)
+            space = AgentSpace(
+                task_public_id=task_public_id,
+                companion_id=17,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            s.add(
+                AgentSession(
+                    session_id="session-stays-active",
+                    space_id=space_id,
+                    task_public_id=task_public_id,
+                    companion_id=17,
+                    root_path=str(tmp_path),
+                    agent_type="codex-cli",
+                    status="active",
+                )
+            )
+
+        runtime = FakeAgentSessionRuntime(fail_terminate=True)
+
+        with pytest.raises(RuntimeError, match="agent terminate failed"):
+            await agent_sessions.terminate_agent_session(
+                space_id,
+                "session-stays-active",
+                runtime=runtime,
+            )
+
+        assert runtime.terminates == [
+            {"session_id": "session-stays-active", "timeout_seconds": 10.0}
+        ]
+        with session_scope() as s:
+            row = (
+                s.query(AgentSession)
+                .filter(AgentSession.session_id == "session-stays-active")
+                .one()
+            )
+            assert row.status == "active"
+
+    asyncio.run(_run())
 
 
 def test_release_agent_space_for_task_is_idempotent_without_space():

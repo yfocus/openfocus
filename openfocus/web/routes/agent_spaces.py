@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...db import session_scope
 from ...domains.agent_activity import service as agent_activity_service
+from ...domains.agent_spaces import agent_sessions as agent_session_service
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.agent_spaces import workspace as agent_space_workspace
 from ...domains.companion import service as companion_service
@@ -809,44 +810,32 @@ def create_router(
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
 
-        session_id = str(uuid.uuid4())
         try:
-            res = await conn.request_agent_start(
-                session_id=session_id,
-                root_path=str(sp.root_path or ""),
-                agent_type=str(sp.agent_type or "trae-cli"),
-                task_public_id=str(sp.task_public_id or ""),
+            result = await agent_session_service.start_agent_session(
+                int(sp.id),
+                runtime=conn,
+                companion_id=int(getattr(comp, "id", 0) or 0)
+                if comp is not None
+                else None,
                 timeout_seconds=10.0,
             )
         except CompanionGrpcError as e:
             raise HTTPException(
                 status_code=502, detail=f"Companion agent failed to start: {e}"
             )
-
-        real_sid = (res.session_id or "").strip() or session_id
-        with session_scope() as s:
-            ss = AgentSession(
-                session_id=real_sid,
-                space_id=int(sp.id),
-                task_public_id=str(sp.task_public_id or ""),
-                companion_id=int(getattr(comp, "id", 0) or 0)
-                if comp is not None
-                else None,
-                root_path=str(sp.root_path or ""),
-                agent_type=str(sp.agent_type or "trae-cli"),
-                status="active",
-            )
-            s.add(ss)
-            s.flush()
+        except agent_session_service.AgentSessionValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except agent_session_service.AgentSessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
         _try_audit_memory(
             kind="agent.session.created",
             source="web",
-            summary=f"Created agent session `{real_sid}`.",
-            detail=f"Agent type: {str(sp.agent_type or 'trae-cli')}\nRoot path: {str(sp.root_path or '')}",
+            summary=f"Created agent session `{result.session_id}`.",
+            detail=f"Agent type: {result.agent_type}\nRoot path: {result.root_path}",
             task_public_id=str(sp.task_public_id or "") or None,
-            metadata={"space_id": int(sp.id), "session_id": real_sid},
+            metadata={"space_id": int(sp.id), "session_id": result.session_id},
         )
-        return {"ok": True, "session": {"session_id": real_sid}}
+        return {"ok": True, "session": {"session_id": result.session_id}}
 
     @router.get("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/messages")
     def agent_session_messages(space_id: int, session_id: str) -> dict:
@@ -893,42 +882,29 @@ def create_router(
     async def agent_session_terminate(space_id: int, session_id: str) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
         conn = _require_companion_online(sp=sp, comp=comp)
-        sid = str(session_id or "").strip()
-        if not sid:
-            raise HTTPException(status_code=400, detail="session_id is required")
-
-        with session_scope() as s:
-            sess = (
-                s.query(AgentSession)
-                .filter(AgentSession.session_id == sid)
-                .one_or_none()
-            )
-            if sess is None or int(sess.space_id) != int(sp.id):
-                raise HTTPException(status_code=404, detail="Agent session not found")
 
         try:
-            await conn.request_agent_terminate(session_id=sid, timeout_seconds=10.0)
+            result = await agent_session_service.terminate_agent_session(
+                int(sp.id),
+                session_id,
+                runtime=conn,
+                timeout_seconds=10.0,
+            )
         except CompanionGrpcError as e:
             raise HTTPException(
                 status_code=502, detail=f"Companion agent failed to terminate: {e}"
             )
-
-        with session_scope() as s:
-            sess = (
-                s.query(AgentSession)
-                .filter(AgentSession.session_id == sid)
-                .one_or_none()
-            )
-            if sess is not None:
-                sess.status = "terminated"
-                s.add(sess)
+        except agent_session_service.AgentSessionValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except agent_session_service.AgentSessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
         _try_audit_memory(
             kind="agent.session.terminated",
             source="web",
-            summary=f"Terminated agent session `{sid}`.",
+            summary=f"Terminated agent session `{result.session_id}`.",
             detail="User terminated the managed agent session.",
             task_public_id=str(sp.task_public_id or "") or None,
-            metadata={"space_id": int(sp.id), "session_id": sid},
+            metadata={"space_id": int(sp.id), "session_id": result.session_id},
         )
         return {"ok": True}
 
