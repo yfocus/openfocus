@@ -92,6 +92,56 @@ class AgentSessionAssistantTurnFailureResult:
     projection: Any = None
 
 
+@dataclass(frozen=True)
+class AgentSessionListResult:
+    sessions: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ok": True, "sessions": self.sessions}
+
+
+@dataclass(frozen=True)
+class AgentSessionMessagesResult:
+    session: dict[str, Any]
+    messages: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ok": True, "session": self.session, "messages": self.messages}
+
+
+@dataclass(frozen=True)
+class AgentSessionRequiredResult:
+    session_id: str
+    space_id: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ok": True, "session": {"session_id": self.session_id}}
+
+
+def _serialize_timestamp(value: Any) -> str:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _clean_session_id(session_id: str) -> str:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        raise AgentSessionValidationError("session_id is required")
+    return clean_session_id
+
+
+def _require_session_row(db_session: Any, *, space_id: int, session_id: str) -> Any:
+    session = (
+        db_session.query(AgentSession)
+        .filter(AgentSession.session_id == session_id)
+        .one_or_none()
+    )
+    if session is None or int(session.space_id) != int(space_id):
+        raise AgentSessionNotFound("Agent session not found")
+    return session
+
+
 def _new_session_id(session_id_factory: Callable[[], object] | None) -> str:
     raw = session_id_factory() if session_id_factory is not None else uuid.uuid4()
     session_id = str(raw or "").strip()
@@ -224,18 +274,10 @@ async def terminate_agent_session(
     runtime: AgentSessionRuntimePort,
     timeout_seconds: float = 10.0,
 ) -> AgentSessionTerminateResult:
-    clean_session_id = str(session_id or "").strip()
-    if not clean_session_id:
-        raise AgentSessionValidationError("session_id is required")
+    clean_session_id = _clean_session_id(session_id)
 
     with session_scope() as s:
-        session = (
-            s.query(AgentSession)
-            .filter(AgentSession.session_id == clean_session_id)
-            .one_or_none()
-        )
-        if session is None or int(session.space_id) != int(space_id):
-            raise AgentSessionNotFound("Agent session not found")
+        _require_session_row(s, space_id=int(space_id), session_id=clean_session_id)
 
     await runtime.request_agent_terminate(
         session_id=clean_session_id,
@@ -269,9 +311,7 @@ def send_agent_session_message(
     *,
     request_id_factory: Callable[[], object] | None = None,
 ) -> AgentSessionSendResult:
-    clean_session_id = str(session_id or "").strip()
-    if not clean_session_id:
-        raise AgentSessionValidationError("session_id is required")
+    clean_session_id = _clean_session_id(session_id)
 
     clean_user_text = str(user_text or "")
     if not clean_user_text.strip():
@@ -280,13 +320,9 @@ def send_agent_session_message(
     resolved_space_id = int(space_id)
 
     with session_scope() as s:
-        session = (
-            s.query(AgentSession)
-            .filter(AgentSession.session_id == clean_session_id)
-            .one_or_none()
+        session = _require_session_row(
+            s, space_id=resolved_space_id, session_id=clean_session_id
         )
-        if session is None or int(session.space_id) != resolved_space_id:
-            raise AgentSessionNotFound("Agent session not found")
 
         task_public_id = str(session.task_public_id or "")
         agent_type = str(session.agent_type or "agent")
@@ -312,6 +348,76 @@ def send_agent_session_message(
         task_public_id=task_public_id,
         agent_type=agent_type,
         companion_id=companion_id,
+    )
+
+
+def list_agent_sessions(space_id: int) -> AgentSessionListResult:
+    resolved_space_id = int(space_id)
+    with session_scope() as s:
+        sessions = (
+            s.query(AgentSession)
+            .filter(AgentSession.space_id == resolved_space_id)
+            .order_by(AgentSession.id.desc())
+            .all()
+        )
+        items = [
+            {
+                "session_id": session.session_id,
+                "status": session.status,
+                "agent_type": session.agent_type,
+                "created_at": _serialize_timestamp(session.created_at),
+                "updated_at": _serialize_timestamp(session.updated_at),
+            }
+            for session in sessions
+        ]
+
+    return AgentSessionListResult(sessions=items)
+
+
+def get_agent_session_messages(
+    space_id: int,
+    session_id: str,
+) -> AgentSessionMessagesResult:
+    clean_session_id = _clean_session_id(session_id)
+    resolved_space_id = int(space_id)
+
+    with session_scope() as s:
+        session = _require_session_row(
+            s, space_id=resolved_space_id, session_id=clean_session_id
+        )
+        messages = (
+            s.query(AgentMessage)
+            .filter(AgentMessage.session_id == clean_session_id)
+            .order_by(AgentMessage.id.asc())
+            .all()
+        )
+        payload = [
+            {
+                "id": message.id,
+                "role": message.role,
+                "request_id": message.request_id,
+                "content": message.content,
+                "done": bool(message.done),
+                "error": message.error,
+                "created_at": _serialize_timestamp(message.created_at),
+            }
+            for message in messages
+        ]
+        session_payload = {"session_id": clean_session_id, "status": session.status}
+
+    return AgentSessionMessagesResult(session=session_payload, messages=payload)
+
+
+def require_agent_session(space_id: int, session_id: str) -> AgentSessionRequiredResult:
+    clean_session_id = _clean_session_id(session_id)
+    resolved_space_id = int(space_id)
+
+    with session_scope() as s:
+        _require_session_row(s, space_id=resolved_space_id, session_id=clean_session_id)
+
+    return AgentSessionRequiredResult(
+        session_id=clean_session_id,
+        space_id=resolved_space_id,
     )
 
 

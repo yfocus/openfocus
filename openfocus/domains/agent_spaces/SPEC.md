@@ -11,7 +11,8 @@ ownership state:
 - Start Agent command load/update use cases keyed by `AgentSpace.id`
 - AgentSession start, send preflight/user-message persistence, assistant
   turn placeholder/failure persistence, runtime turn started/failed projection,
-  and terminate use cases keyed by `AgentSpace.id`
+  terminate, read model listing, message listing, and SSE ownership validation
+  use cases keyed by `AgentSpace.id`
 - explicit `TerminalOwner` values for AgentSpace and InspirationSpace terminals
 - terminal listing, naming, lookup, rename, create, and local deletion
 - deletion of terminal output rows tied to closed/released terminals
@@ -48,6 +49,9 @@ ownership state:
   still maps the runtime failure to HTTP/SSE responses.
 - AgentSession runtime send, web/request prompt assembly, SSE publishing, audit
   memory, and HTTP error mapping remain in the web/infrastructure adapter.
+  AgentSession list/messages payload shape, session id normalization, ownership
+  validation, and ordering belong to this domain. SSE transport, subscription,
+  unsubscribe, heartbeat, and event framing remain in web/infrastructure.
   Streaming chunk transport and async assistant chunk append/finalize handling
   still live in infrastructure until that lifecycle gets a dedicated domain use
   case.
@@ -91,6 +95,12 @@ ownership state:
   non-empty and belongs to the requested AgentSpace, then persists the user
   message and returns a generated request id plus runtime-send context. It does
   not call Companion runtime or publish SSE.
+- AgentSession read use cases trim `session_id`, reject empty ids as validation
+  errors, report missing or wrong-space sessions as not found, list sessions by
+  newest persisted row first, and list messages by oldest persisted row first.
+- SSE ownership validation uses the AgentSession domain read interface and
+  returns the normalized session id that web/infrastructure uses for subscribe,
+  publish, and unsubscribe operations.
 - Beginning an AgentSession assistant turn persists an empty assistant
   `AgentMessage` with `role=assistant`, the generated request id, and
   `done=False`, then projects `runtime.turn.started` through an injected or

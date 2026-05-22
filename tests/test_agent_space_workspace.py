@@ -735,6 +735,244 @@ def test_send_agent_session_message_rejects_missing_or_wrong_space_session(tmp_p
         assert s.query(AgentMessage).count() == 0
 
 
+def test_list_agent_sessions_returns_newest_first_with_route_payload_shape(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+        s.add(task)
+        s.flush()
+        space = AgentSpace(
+            task_public_id=str(task.public_id),
+            companion_id=23,
+            root_path=str(tmp_path),
+            agent_type="codex-cli",
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        older = AgentSession(
+            session_id="older-session",
+            space_id=space_id,
+            task_public_id=str(task.public_id),
+            companion_id=23,
+            root_path=str(tmp_path),
+            agent_type="codex-cli",
+            status="terminated",
+            created_at=dt.datetime(2026, 1, 1, 12, 0, 0),
+            updated_at=dt.datetime(2026, 1, 1, 12, 1, 0),
+        )
+        newer = AgentSession(
+            session_id="newer-session",
+            space_id=space_id,
+            task_public_id=str(task.public_id),
+            companion_id=23,
+            root_path=str(tmp_path),
+            agent_type="trae-cli",
+            status="active",
+            created_at=dt.datetime(2026, 1, 2, 12, 0, 0),
+            updated_at=dt.datetime(2026, 1, 2, 12, 1, 0),
+        )
+        s.add_all([older, newer])
+
+    result = agent_sessions.list_agent_sessions(space_id)
+
+    assert result.to_dict() == {
+        "ok": True,
+        "sessions": [
+            {
+                "session_id": "newer-session",
+                "status": "active",
+                "agent_type": "trae-cli",
+                "created_at": "2026-01-02T12:00:00",
+                "updated_at": "2026-01-02T12:01:00",
+            },
+            {
+                "session_id": "older-session",
+                "status": "terminated",
+                "agent_type": "codex-cli",
+                "created_at": "2026-01-01T12:00:00",
+                "updated_at": "2026-01-01T12:01:00",
+            },
+        ],
+    }
+
+
+def test_get_agent_session_messages_requires_ownership_and_preserves_message_order(
+    tmp_path,
+):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentMessage, AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task_one = Task(goal_id=goal.id, title="t1", content="d", status="todo")
+        task_two = Task(goal_id=goal.id, title="t2", content="d", status="todo")
+        s.add_all([task_one, task_two])
+        s.flush()
+        space_one = AgentSpace(
+            task_public_id=str(task_one.public_id),
+            companion_id=31,
+            root_path=str(tmp_path / "one"),
+            agent_type="codex-cli",
+        )
+        space_two = AgentSpace(
+            task_public_id=str(task_two.public_id),
+            companion_id=32,
+            root_path=str(tmp_path / "two"),
+            agent_type="codex-cli",
+        )
+        s.add_all([space_one, space_two])
+        s.flush()
+        space_one_id = int(space_one.id)
+        space_two_id = int(space_two.id)
+        s.add(
+            AgentSession(
+                session_id="owned-session",
+                space_id=space_one_id,
+                task_public_id=str(task_one.public_id),
+                companion_id=31,
+                root_path=str(tmp_path / "one"),
+                agent_type="codex-cli",
+                status="active",
+            )
+        )
+        s.add_all(
+            [
+                AgentMessage(
+                    session_id="owned-session",
+                    role="user",
+                    request_id="",
+                    content="hello",
+                    done=True,
+                    created_at=dt.datetime(2026, 1, 3, 9, 0, 0),
+                ),
+                AgentMessage(
+                    session_id="owned-session",
+                    role="assistant",
+                    request_id="request-1",
+                    content="working",
+                    done=False,
+                    error="",
+                    created_at=dt.datetime(2026, 1, 3, 9, 1, 0),
+                ),
+            ]
+        )
+
+    result = agent_sessions.get_agent_session_messages(
+        space_one_id,
+        " owned-session ",
+    ).to_dict()
+
+    assert result["ok"] is True
+    assert result["session"] == {"session_id": "owned-session", "status": "active"}
+    assert [message["role"] for message in result["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert result["messages"] == [
+        {
+            "id": result["messages"][0]["id"],
+            "role": "user",
+            "request_id": "",
+            "content": "hello",
+            "done": True,
+            "error": "",
+            "created_at": "2026-01-03T09:00:00",
+        },
+        {
+            "id": result["messages"][1]["id"],
+            "role": "assistant",
+            "request_id": "request-1",
+            "content": "working",
+            "done": False,
+            "error": "",
+            "created_at": "2026-01-03T09:01:00",
+        },
+    ]
+
+    with pytest.raises(
+        agent_sessions.AgentSessionNotFound, match="Agent session not found"
+    ):
+        agent_sessions.get_agent_session_messages(space_two_id, "owned-session")
+
+
+def test_get_agent_session_messages_rejects_empty_session_id():
+    from openfocus.domains.agent_spaces import agent_sessions
+
+    with pytest.raises(
+        agent_sessions.AgentSessionValidationError, match="session_id is required"
+    ):
+        agent_sessions.get_agent_session_messages(1, "  ")
+
+
+def test_get_agent_session_messages_reports_missing_session():
+    from openfocus.domains.agent_spaces import agent_sessions
+
+    with pytest.raises(
+        agent_sessions.AgentSessionNotFound, match="Agent session not found"
+    ):
+        agent_sessions.get_agent_session_messages(1, "missing-session")
+
+
+def test_require_agent_session_returns_normalized_session_id_for_sse(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import agent_sessions
+    from openfocus.models import AgentSession, AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+        s.add(task)
+        s.flush()
+        space = AgentSpace(
+            task_public_id=str(task.public_id),
+            companion_id=23,
+            root_path=str(tmp_path),
+            agent_type="codex-cli",
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        s.add(
+            AgentSession(
+                session_id="sse-session",
+                space_id=space_id,
+                task_public_id=str(task.public_id),
+                companion_id=23,
+                root_path=str(tmp_path),
+                agent_type="codex-cli",
+                status="active",
+            )
+        )
+
+    result = agent_sessions.require_agent_session(space_id, " sse-session ")
+
+    assert result.session_id == "sse-session"
+    assert result.space_id == space_id
+    assert result.to_dict() == {"ok": True, "session": {"session_id": "sse-session"}}
+
+    with pytest.raises(
+        agent_sessions.AgentSessionValidationError, match="session_id is required"
+    ):
+        agent_sessions.require_agent_session(space_id, " ")
+
+    with pytest.raises(
+        agent_sessions.AgentSessionNotFound, match="Agent session not found"
+    ):
+        agent_sessions.require_agent_session(space_id, "missing-session")
+
+
 def test_release_agent_space_for_task_is_idempotent_without_space():
     async def _run() -> None:
         from openfocus.db import session_scope

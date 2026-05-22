@@ -19,8 +19,6 @@ from ...domains.companion import service as companion_service
 from ...domains.memory import service as memory_service
 from ...domains.terminals import gateway as terminal_gateway
 from ...models import (
-    AgentMessage,
-    AgentSession,
     AgentSpace,
     Companion,
     Goal,
@@ -704,37 +702,15 @@ def create_router(
     @router.get("/api/agent_spaces/{space_id}/agent/sessions")
     def agent_sessions_list(space_id: int) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
-        with session_scope() as s:
-            sessions = (
-                s.query(AgentSession)
-                .filter(AgentSession.space_id == int(sp.id))
-                .order_by(AgentSession.id.desc())
-                .all()
-            )
+        result = agent_session_service.list_agent_sessions(int(sp.id)).to_dict()
         cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
         online = bool(cid and (grpc_server.registry.get(cid) is not None))
-        return {
-            "ok": True,
-            "companion": {
-                "id": cid or None,
-                "status": _companion_display_status(comp) if comp is not None else None,
-                "online": online,
-            },
-            "sessions": [
-                {
-                    "session_id": ss.session_id,
-                    "status": ss.status,
-                    "agent_type": ss.agent_type,
-                    "created_at": ss.created_at.isoformat()
-                    if hasattr(ss.created_at, "isoformat")
-                    else str(ss.created_at),
-                    "updated_at": ss.updated_at.isoformat()
-                    if hasattr(ss.updated_at, "isoformat")
-                    else str(ss.updated_at),
-                }
-                for ss in sessions
-            ],
+        result["companion"] = {
+            "id": cid or None,
+            "status": _companion_display_status(comp) if comp is not None else None,
+            "online": online,
         }
+        return result
 
     @router.post("/api/agent_spaces/{space_id}/agent/sessions/new")
     async def agent_sessions_new(space_id: int) -> dict:
@@ -771,43 +747,16 @@ def create_router(
     @router.get("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/messages")
     def agent_session_messages(space_id: int, session_id: str) -> dict:
         sp, _comp = _load_space_and_optional_companion(space_id)
-        sid = str(session_id or "").strip()
-        if not sid:
-            raise HTTPException(status_code=400, detail="session_id is required")
-
-        with session_scope() as s:
-            sess = (
-                s.query(AgentSession)
-                .filter(AgentSession.session_id == sid)
-                .one_or_none()
+        try:
+            result = agent_session_service.get_agent_session_messages(
+                int(sp.id),
+                session_id,
             )
-            if sess is None or int(sess.space_id) != int(sp.id):
-                raise HTTPException(status_code=404, detail="Agent session not found")
-            msgs = (
-                s.query(AgentMessage)
-                .filter(AgentMessage.session_id == sid)
-                .order_by(AgentMessage.id.asc())
-                .all()
-            )
-
-        return {
-            "ok": True,
-            "session": {"session_id": sid, "status": sess.status},
-            "messages": [
-                {
-                    "id": m.id,
-                    "role": m.role,
-                    "request_id": m.request_id,
-                    "content": m.content,
-                    "done": bool(m.done),
-                    "error": m.error,
-                    "created_at": m.created_at.isoformat()
-                    if hasattr(m.created_at, "isoformat")
-                    else str(m.created_at),
-                }
-                for m in msgs
-            ],
-        }
+        except agent_session_service.AgentSessionValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except agent_session_service.AgentSessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return result.to_dict()
 
     @router.post("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/terminate")
     async def agent_session_terminate(space_id: int, session_id: str) -> dict:
@@ -916,18 +865,13 @@ def create_router(
     @router.get("/api/agent_spaces/{space_id}/agent/sessions/{session_id}/sse")
     async def agent_session_sse(space_id: int, session_id: str) -> StreamingResponse:
         sp, _comp = _load_space_and_optional_companion(space_id)
-        sid = str(session_id or "").strip()
-        if not sid:
-            raise HTTPException(status_code=400, detail="session_id is required")
-
-        with session_scope() as s:
-            sess = (
-                s.query(AgentSession)
-                .filter(AgentSession.session_id == sid)
-                .one_or_none()
-            )
-            if sess is None or int(sess.space_id) != int(sp.id):
-                raise HTTPException(status_code=404, detail="Agent session not found")
+        try:
+            result = agent_session_service.require_agent_session(int(sp.id), session_id)
+        except agent_session_service.AgentSessionValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except agent_session_service.AgentSessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        sid = result.session_id
 
         async def _gen():
             q = await _agent_sse_subscribe(sid)
