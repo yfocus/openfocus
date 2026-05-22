@@ -708,6 +708,15 @@ def _slice_from_last_sync_point(data: bytes) -> tuple[bytes, bool, str]:
     return b[best:], True, why
 
 
+def _terminal_ids_from_list_response(response: Any) -> set[str]:
+    sessions = getattr(response, "sessions", []) or []
+    return {
+        str(getattr(session, "terminal_id", "") or "").strip()
+        for session in sessions
+        if str(getattr(session, "terminal_id", "") or "").strip()
+    }
+
+
 class RemoteTerminalGateway:
     def __init__(
         self,
@@ -723,6 +732,86 @@ class RemoteTerminalGateway:
     ) -> list[RemoteTerminalSession]:
         with self._session_factory() as s:
             return terminal_records.list_terminals(s, owner)
+
+    async def list_live_terminals(
+        self,
+        *,
+        owner: terminal_records.TerminalOwner,
+        conn=None,
+        conn_resolver: Callable[[int], Any] | None = None,
+        timeout_seconds: float = 3.0,
+        prune_stale: bool = True,
+    ) -> list[RemoteTerminalSession]:
+        with self._session_factory() as s:
+            terminals = terminal_records.list_terminals(s, owner)
+
+        if not terminals:
+            return []
+
+        live_ids: set[str] = set()
+        checked_ids: set[str] = set()
+
+        if conn_resolver is not None:
+            by_companion: dict[int, list[str]] = {}
+            for terminal in terminals:
+                terminal_id = str(terminal.terminal_id or "").strip()
+                companion_id = int(terminal.companion_id or 0)
+                if terminal_id and companion_id:
+                    by_companion.setdefault(companion_id, []).append(terminal_id)
+            for companion_id, terminal_ids in by_companion.items():
+                try:
+                    resolved_conn = conn_resolver(int(companion_id))
+                except Exception:
+                    continue
+                if resolved_conn is None:
+                    continue
+                try:
+                    response = await resolved_conn.request_terminal_list_sessions(
+                        timeout_seconds=timeout_seconds
+                    )
+                except Exception:
+                    continue
+                checked_ids.update(terminal_ids)
+                live_ids.update(_terminal_ids_from_list_response(response))
+        elif conn is not None:
+            try:
+                response = await conn.request_terminal_list_sessions(
+                    timeout_seconds=timeout_seconds
+                )
+            except Exception:
+                return []
+            live_ids = _terminal_ids_from_list_response(response)
+            checked_ids = {
+                str(terminal.terminal_id or "").strip()
+                for terminal in terminals
+                if str(terminal.terminal_id or "").strip()
+            }
+        else:
+            return []
+
+        live_terminals = [
+            terminal
+            for terminal in terminals
+            if str(terminal.terminal_id or "").strip() in live_ids
+        ]
+
+        if prune_stale:
+            stale_ids = [
+                str(terminal.terminal_id or "").strip()
+                for terminal in terminals
+                if str(terminal.terminal_id or "").strip()
+                and str(terminal.terminal_id or "").strip() in checked_ids
+                and str(terminal.terminal_id or "").strip() not in live_ids
+            ]
+            if stale_ids:
+                with self._session_factory() as s:
+                    for terminal_id in stale_ids:
+                        with contextlib.suppress(terminal_records.TerminalNotFound):
+                            terminal_records.delete_terminal_record(
+                                s, owner=owner, terminal_id=terminal_id
+                            )
+
+        return live_terminals
 
     async def start_terminal(
         self,
@@ -751,18 +840,33 @@ class RemoteTerminalGateway:
         real_tid = str(getattr(res, "terminal_id", "") or "").strip() or terminal_id
         backend = str(getattr(res, "backend", "") or "ttyd").strip() or "ttyd"
         connect_url = str(getattr(res, "connect_url", "") or "").strip()
-        with self._session_factory() as s:
-            terminal = terminal_records.create_terminal_record(
-                s,
-                owner=owner,
-                task_public_id=str(task_public_id or ""),
-                companion_id=int(companion_id) if companion_id else None,
-                root_path=str(root_path or ""),
-                terminal_id=real_tid,
-                backend=backend,
-                connect_url=connect_url,
+        if backend == "ttyd" and not connect_url:
+            with contextlib.suppress(Exception):
+                await conn.request_terminal_stop(
+                    terminal_id=real_tid, timeout_seconds=timeout_seconds
+                )
+            raise TerminalStartError(
+                "Companion terminal failed to start: missing connect_url"
             )
-            name = str(terminal.name or "")
+        try:
+            with self._session_factory() as s:
+                terminal = terminal_records.create_terminal_record(
+                    s,
+                    owner=owner,
+                    task_public_id=str(task_public_id or ""),
+                    companion_id=int(companion_id) if companion_id else None,
+                    root_path=str(root_path or ""),
+                    terminal_id=real_tid,
+                    backend=backend,
+                    connect_url=connect_url,
+                )
+                name = str(terminal.name or "")
+        except Exception:
+            with contextlib.suppress(Exception):
+                await conn.request_terminal_stop(
+                    terminal_id=real_tid, timeout_seconds=timeout_seconds
+                )
+            raise
 
         return TerminalStartResult(
             terminal_id=real_tid,

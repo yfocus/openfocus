@@ -459,14 +459,14 @@ def create_router(
         )
 
     @router.get("/api/agent_spaces/{space_id}/terminals")
-    def terminals_list(space_id: int) -> dict:
+    async def terminals_list(space_id: int) -> dict:
         sp, comp = _load_space_and_optional_companion(space_id)
-        with session_scope() as s:
-            owner = terminal_service.owner_for_agent_space(int(sp.id))
-            terms = terminal_service.list_terminals(s, owner)
+        owner = terminal_service.owner_for_agent_space(int(sp.id))
 
         cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
-        online = bool(cid and (grpc_server.registry.get(cid) is not None))
+        conn = grpc_server.registry.get(cid) if cid else None
+        online = bool(conn is not None)
+        terms = await terminal_ops.list_live_terminals(owner=owner, conn=conn)
 
         return {
             "ok": True,

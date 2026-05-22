@@ -8,6 +8,7 @@ AgentSpace and InspirationSpace:
 
 - owner-scoped terminal validation
 - terminal start, rename, input injection, mouse mode, close, and record cleanup
+- live terminal reconciliation against Companion runtime sessions
 - owner release cleanup for all terminals under one AgentSpace or InspirationSpace
 - terminal history replay with bounded output and screen-safe sync slicing
 - terminal payload shaping with ttyd embed URLs
@@ -22,12 +23,19 @@ AgentSpace and InspirationSpace:
   not know the global Companion registry.
 - Existing `domains.agent_spaces.terminals` remains the persistence helper for
   owner records while this module becomes the shared cross-workspace interface.
+- `RemoteTerminalSession` records are durable metadata. Companion runtime
+  sessions are the source of truth for whether a terminal is currently live.
 
 ## Invariants
 
 - All terminal lookup and mutation must be scoped by `TerminalOwner`.
 - `RemoteTerminalSession.space_id` is legacy compatibility data only; owner
   checks use `owner_type` and `owner_id`.
+- Listing terminals for UI must ask Companion for live sessions and return only
+  terminals confirmed by that runtime source. Stale local records may be
+  removed after a successful runtime reconciliation.
+- ttyd starts must not create local terminal records unless Companion returns a
+  non-empty `connect_url`.
 - Closing a terminal deletes its output rows and session row locally even when
   Companion stop is best-effort.
 - Releasing an owner stops every terminal best-effort, deletes terminal output

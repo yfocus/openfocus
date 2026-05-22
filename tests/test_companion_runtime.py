@@ -80,6 +80,36 @@ def test_run_companion_backs_off_and_rate_limits_repeated_disconnects(
     )
 
 
+def test_run_companion_rate_limits_hook_socket_logs_during_reconnects(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+    monkeypatch.setenv("OPENFOCUS_HOOK_SOCK", str(tmp_path / "hooks.sock"))
+
+    sleep_delays: list[float] = []
+
+    async def fake_sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
+        sleep_delays.append(seconds)
+        if len(sleep_delays) >= 4:
+            stop_event.set()
+
+    monkeypatch.setattr(rt, "_sleep_or_stop", fake_sleep_or_stop)
+    caplog.set_level(logging.INFO, logger="openfocus.companion")
+
+    asyncio.run(rt.run_companion(grpc_addr=_unused_local_addr()))
+
+    assert sleep_delays == [0.2, 0.4, 0.8, 1.6]
+    hook_logs = [
+        r
+        for r in caplog.records
+        if (
+            "OpenFocus hook socket listening" in r.getMessage()
+            or "OpenFocus hook socket 启动失败" in r.getMessage()
+        )
+    ]
+    assert len(hook_logs) == 1
+
+
 def test_run_companion_resets_backoff_after_stable_connection(
     monkeypatch, tmp_path
 ) -> None:

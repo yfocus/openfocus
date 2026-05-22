@@ -314,8 +314,12 @@ The OpenFocus Coco block registers these events:
 make fmt
 make lint
 make test
+make test-blackbox
 make check
 ```
+
+`make test-blackbox` runs the opt-in black-box workflow suite. It is intended
+for core refactors and exercises public HTTP routes end to end.
 
 Frontend development:
 

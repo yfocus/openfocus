@@ -296,8 +296,11 @@ OpenFocus Coco block 会注册这些事件：
 make fmt
 make lint
 make test
+make test-blackbox
 make check
 ```
+
+`make test-blackbox` 会运行需要显式开启的黑盒工作流测试，适合核心代码开发或重构后使用；它通过公开 HTTP 路由做端到端行为回归。
 
 前端开发：
 

@@ -7,18 +7,23 @@ from types import SimpleNamespace
 
 
 class FakeTerminalConn:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, connect_url: str = "http://127.0.0.1:7681", live_terminal_ids=None
+    ) -> None:
         self.starts: list[dict] = []
         self.inputs: list[dict] = []
         self.mouse_modes: list[dict] = []
         self.stops: list[dict] = []
+        self.list_sessions: list[dict] = []
+        self.connect_url = connect_url
+        self.live_terminal_ids = list(live_terminal_ids or [])
 
     async def request_terminal_start(self, **kwargs):
         self.starts.append(kwargs)
         return SimpleNamespace(
             terminal_id=kwargs["terminal_id"],
             backend="ttyd",
-            connect_url="http://127.0.0.1:7681",
+            connect_url=self.connect_url,
         )
 
     async def request_terminal_input(self, **kwargs):
@@ -32,6 +37,15 @@ class FakeTerminalConn:
     async def request_terminal_stop(self, **kwargs):
         self.stops.append(kwargs)
         return SimpleNamespace(ok=True)
+
+    async def request_terminal_list_sessions(self, **kwargs):
+        self.list_sessions.append(kwargs)
+        return SimpleNamespace(
+            sessions=[
+                SimpleNamespace(terminal_id=tid, root_path="/tmp/ws", created_at=0.0)
+                for tid in self.live_terminal_ids
+            ]
+        )
 
 
 def test_terminal_gateway_lifecycle_is_owner_scoped():
@@ -174,6 +188,98 @@ def test_terminal_gateway_payload_and_ttyd_helpers_work_for_inspiration_owner():
         assert row.owner_type == "inspiration_space"
         assert row.owner_id == 5
         assert row.space_id == -5
+
+
+def test_terminal_gateway_rejects_ttyd_start_without_connect_url():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway(
+            terminal_id_factory=lambda: "missing-url"
+        )
+        conn = FakeTerminalConn(connect_url="")
+        owner = terminal_records.owner_for_agent_space(14)
+
+        try:
+            await gateway.start_terminal(
+                owner=owner,
+                conn=conn,
+                companion_id=7,
+                root_path="/tmp/ws",
+                base_path="/api/agent_spaces/14/terminals/{terminal_id}/ttyd/",
+                task_public_id="TASK-14",
+            )
+        except terminal_gateway.TerminalStartError as exc:
+            assert "missing connect_url" in str(exc)
+        else:
+            raise AssertionError("ttyd start without connect_url must fail")
+
+        assert conn.stops[0]["terminal_id"] == "missing-url"
+        with session_scope() as s:
+            assert s.query(RemoteTerminalSession).count() == 0
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_reconciles_live_terminals_with_companion():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(18)
+        with session_scope() as s:
+            for tid in ("live-term", "stale-term"):
+                terminal_records.create_terminal_record(
+                    s,
+                    owner=owner,
+                    task_public_id="TASK-18",
+                    companion_id=3,
+                    root_path="/tmp/ws",
+                    terminal_id=tid,
+                    backend="ttyd",
+                    connect_url="http://127.0.0.1:7681",
+                )
+                s.add(
+                    RemoteTerminalOutput(
+                        space_id=owner.db_space_id,
+                        terminal_id=tid,
+                        data_b64=base64.b64encode(b"out").decode("ascii"),
+                        nbytes=3,
+                    )
+                )
+
+        conn = FakeTerminalConn(live_terminal_ids=["live-term"])
+        terminals = await gateway.list_live_terminals(owner=owner, conn=conn)
+
+        assert [t.terminal_id for t in terminals] == ["live-term"]
+        assert conn.list_sessions[0]["timeout_seconds"] == 3.0
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "live-term")
+                .one_or_none()
+                is not None
+            )
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stale-term")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "stale-term")
+                .count()
+                == 0
+            )
+
+    asyncio.run(_run())
 
 
 def test_terminal_gateway_loads_owner_scoped_history_with_sync_slicing():

@@ -121,7 +121,16 @@ Companion 不为浏览器暴露 HTTP 服务；系统悬浮球命令仍走白名�
 
 ### 终端生命周期与清理策略
 
+- 运行时权威：Companion 当前 `TerminalManager` 中的 live sessions 是终端是否可交互的
+  source of truth；OpenFocus DB 只保存 owner、展示名、root path、审计/历史等耐久元数据，
+  不得把 `RemoteTerminalSession.status=active` 当作终端存活依据。
 - 创建：用户点击 `+`（或页面首次进入且无终端时自动创建）→ OpenFocus `POST /api/agent_spaces/{space_id}/terminals/new` → gRPC `TerminalStart` → 返回 `terminal_id`。
+- 创建落库：`ttyd` backend 只有在 Companion 返回非空 `connect_url` 后才允许写入
+  OpenFocus terminal metadata；若本地落库失败，OpenFocus 必须 best-effort 停止刚创建的
+  Companion terminal。
+- 列表：OpenFocus 返回 terminal 列表前必须通过 `TerminalListSessions` 与 Companion
+  runtime reconcile；只有 Companion 确认 live 的 terminal 才能返回给浏览器。reconcile 成功后，
+  OpenFocus 可以清理 DB 中对应 owner 下已不 live 的 stale terminal metadata。
 - 交互：浏览器通过 `WS /api/agent_spaces/{space_id}/terminals/{terminal_id}/ws` 发送：
   - `{"type":"input","data_b64":"..."}`
   - `{"type":"resize","cols":..,"rows":..}`

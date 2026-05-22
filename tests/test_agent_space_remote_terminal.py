@@ -49,6 +49,114 @@ def test_agent_space_ttyd_bridge_injection_is_html_only_and_idempotent():
     assert _maybe_inject_ttyd_bridge(html, "application/json") == html
 
 
+def test_agent_space_terminals_list_reconciles_stale_records(tmp_path):
+    async def _run() -> None:
+        from openfocus.app import COMPANION_GRPC, app
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.models import (
+            AgentSpace,
+            Companion,
+            Goal,
+            RemoteTerminalOutput,
+            RemoteTerminalSession,
+            Task,
+        )
+
+        with session_scope() as s:
+            companion = Companion(
+                device_id="reconcile-device",
+                name="reconcile",
+                base_url="grpc://",
+                status="active",
+                auth_token="token",
+            )
+            s.add(companion)
+            s.flush()
+            companion_id = int(companion.id)
+
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            space = AgentSpace(
+                task_public_id=str(task.public_id),
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            owner = terminal_service.owner_for_agent_space(space_id)
+            for tid in ("live-term", "stale-term"):
+                terminal_service.create_terminal_record(
+                    s,
+                    owner=owner,
+                    task_public_id=str(task.public_id),
+                    companion_id=companion_id,
+                    root_path=str(tmp_path),
+                    terminal_id=tid,
+                    backend="ttyd",
+                    connect_url="http://127.0.0.1:7681",
+                )
+                s.add(
+                    RemoteTerminalOutput(
+                        space_id=owner.db_space_id,
+                        terminal_id=tid,
+                        data_b64=base64.b64encode(b"out").decode("ascii"),
+                        nbytes=3,
+                    )
+                )
+
+        class FakeConn:
+            async def request_terminal_list_sessions(self, **_kwargs):
+                return SimpleNamespace(
+                    sessions=[
+                        SimpleNamespace(
+                            terminal_id="live-term",
+                            root_path=str(tmp_path),
+                            created_at=0.0,
+                        )
+                    ]
+                )
+
+            def close(self):
+                pass
+
+        conn = FakeConn()
+        await COMPANION_GRPC.registry.set_connected(companion_id, conn)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                r = await client.get(f"/api/agent_spaces/{space_id}/terminals")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["companion"]["online"] is True
+                assert [t["terminal_id"] for t in data["terminals"]] == ["live-term"]
+
+            with session_scope() as s:
+                assert (
+                    s.query(RemoteTerminalSession)
+                    .filter(RemoteTerminalSession.terminal_id == "stale-term")
+                    .one_or_none()
+                    is None
+                )
+                assert (
+                    s.query(RemoteTerminalOutput)
+                    .filter(RemoteTerminalOutput.terminal_id == "stale-term")
+                    .count()
+                    == 0
+                )
+        finally:
+            await COMPANION_GRPC.registry.set_disconnected(companion_id, conn)
+
+    asyncio.run(_run())
+
+
 async def _wait_until_companion_ready(
     client: AsyncClient, *, timeout_s: float = 2.0
 ) -> dict:
@@ -184,6 +292,10 @@ def test_remote_terminal_create_input_output_and_close_via_grpc(tmp_path):
                 try:
                     conn = COMPANION_GRPC.registry.get(int(cid))
                     assert conn is not None
+                    live = await conn.request_terminal_list_sessions(
+                        timeout_seconds=5.0
+                    )
+                    assert tid in [session.terminal_id for session in live.sessions]
                     # Send >256KB but <1MB to ensure history isn't truncated at 256KB.
                     blob = (b"a" * (320 * 1024)) + b"\n"
                     await conn.request_terminal_input(

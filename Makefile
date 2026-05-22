@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-.PHONY: serve companion fmt fmt-check lint test check
+.PHONY: serve companion fmt fmt-check lint test test-blackbox check
 
 serve:
 	set -a; \
@@ -24,6 +24,9 @@ lint:
 
 test:
 	poetry run pytest
+
+test-blackbox:
+	OPENFOCUS_RUN_BLACKBOX=1 poetry run pytest tests/blackbox -m blackbox
 
 check:
 	poetry run ruff format --check .

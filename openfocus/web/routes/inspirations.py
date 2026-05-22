@@ -1007,12 +1007,15 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         )
 
     @router.get("/api/inspirations/{space_id:int}/terminals")
-    def inspiration_terminals_list(space_id: int) -> dict:
+    async def inspiration_terminals_list(space_id: int) -> dict:
         with session_scope() as s:
             space = _space_or_404(s, int(space_id))
             deps.inspiration_workspace_path(space, int(space_id))
             owner = terminal_service.owner_for_inspiration_space(int(space_id))
-            terms = terminal_service.list_terminals(s, owner)
+        terms = await terminal_ops.list_live_terminals(
+            owner=owner,
+            conn_resolver=_terminal_conn,
+        )
         return {
             "ok": True,
             "companion": {"online": deps.has_online_companion()},

@@ -64,6 +64,9 @@ class _LogRateLimiter:
         return False
 
 
+_RUNTIME_LOG_LIMITER = _LogRateLimiter(interval_seconds=_CONNECT_LOG_LIMIT_SECONDS)
+
+
 def _setup_logging() -> None:
     level_s = (
         str(os.environ.get("OPENFOCUS_COMPANION_LOG_LEVEL") or "INFO").upper().strip()
@@ -633,7 +636,8 @@ async def _start_hook_server(
     with contextlib.suppress(Exception):
         os.chmod(sock_path, 0o600)
     try:
-        LOG.info("OpenFocus hook socket listening: %s", sock_path)
+        if _RUNTIME_LOG_LIMITER.should_log(f"hook-socket-listening:{sock_path}"):
+            LOG.info("OpenFocus hook socket listening: %s", sock_path)
     except Exception:
         pass
     return server
@@ -1148,6 +1152,7 @@ class _TerminalManager:
 
         # 测试兜底：不依赖 PTY，回显输入（OpenFocus 可通过 input 接口触发 output）。
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            sess.backend = "test_echo"
             await out_q.put(
                 pb2.ClientToServer(
                     terminal_output=pb2.TerminalOutput(
@@ -1239,6 +1244,25 @@ class _TerminalManager:
                 self._sessions.pop(tid, None)
             raise
         return sess
+
+    async def list_sessions(self) -> list[_TerminalSession]:
+        echo_mode = (
+            os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or ""
+        ).strip() == "1"
+        stale_ids: list[str] = []
+        live: list[_TerminalSession] = []
+        async with self._lock:
+            for terminal_id, sess in self._sessions.items():
+                if sess.closed:
+                    stale_ids.append(terminal_id)
+                    continue
+                if echo_mode or sess.process is None or sess.process.returncode is None:
+                    live.append(sess)
+                    continue
+                stale_ids.append(terminal_id)
+            for terminal_id in stale_ids:
+                self._sessions.pop(terminal_id, None)
+        return live
 
     async def stop(
         self, *, terminal_id: str, out_q: asyncio.Queue[pb2.ClientToServer]
@@ -1953,7 +1977,8 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
         hook_server = await _start_hook_server(out_q)
     except Exception as e:
         try:
-            LOG.warning("OpenFocus hook socket 启动失败：%s", e)
+            if _RUNTIME_LOG_LIMITER.should_log(f"hook-socket-start-failed:{e}"):
+                LOG.warning("OpenFocus hook socket 启动失败：%s", e)
         except Exception:
             pass
     hook_spool_task = asyncio.create_task(
@@ -2346,6 +2371,35 @@ async def _connect_once(addr: str, stop_event: asyncio.Event) -> _ConnectOnceRes
                             request_id=req.request_id, ok=False, error=str(e)
                         )
                     await out_q.put(pb2.ClientToServer(terminal_resize_resp=resp))
+                    continue
+
+                if which == "terminal_list_sessions":
+                    req = msg.terminal_list_sessions
+                    try:
+                        sessions = await term_mgr.list_sessions()
+                        resp = pb2.TerminalListSessionsResponse(
+                            request_id=req.request_id,
+                            ok=True,
+                            sessions=[
+                                pb2.TerminalSessionInfo(
+                                    terminal_id=sess.terminal_id,
+                                    root_path=sess.root_path,
+                                    created_at=sess.created_at.timestamp(),
+                                )
+                                for sess in sessions
+                            ],
+                        )
+                    except Exception as e:
+                        try:
+                            LOG.exception("terminal_list_sessions 失败：%s", e)
+                        except Exception:
+                            pass
+                        resp = pb2.TerminalListSessionsResponse(
+                            request_id=req.request_id, ok=False, error=str(e)
+                        )
+                    await out_q.put(
+                        pb2.ClientToServer(terminal_list_sessions_resp=resp)
+                    )
                     continue
 
                 if which == "terminal_mouse_mode":

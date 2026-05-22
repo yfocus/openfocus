@@ -501,6 +501,27 @@ class CompanionConnection:
             raise CompanionGrpcError(res.error or "terminal_resize failed")
         return res
 
+    async def request_terminal_list_sessions(
+        self, *, timeout_seconds: float = 10.0
+    ) -> pb2.TerminalListSessionsResponse:
+        rid = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[rid] = _Pending(fut=fut, kind="terminal_list_sessions")
+        await self._out_q.put(
+            pb2.ServerToClient(
+                terminal_list_sessions=pb2.TerminalListSessionsRequest(request_id=rid)
+            )
+        )
+        try:
+            res: pb2.TerminalListSessionsResponse = await asyncio.wait_for(
+                fut, timeout=timeout_seconds
+            )
+        finally:
+            self._pending.pop(rid, None)
+        if not res.ok:
+            raise CompanionGrpcError(res.error or "terminal_list_sessions failed")
+        return res
+
     async def request_terminal_mouse_mode(
         self,
         *,
@@ -729,6 +750,12 @@ class CompanionConnection:
             r: pb2.TerminalResizeResponse = msg.terminal_resize_resp
             p = self._pending.get(r.request_id)
             if p and p.kind == "terminal_resize" and not p.fut.done():
+                p.fut.set_result(r)
+            return
+        if which == "terminal_list_sessions_resp":
+            r: pb2.TerminalListSessionsResponse = msg.terminal_list_sessions_resp
+            p = self._pending.get(r.request_id)
+            if p and p.kind == "terminal_list_sessions" and not p.fut.done():
                 p.fut.set_result(r)
             return
         if which == "terminal_mouse_mode_resp":

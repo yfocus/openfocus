@@ -47,6 +47,9 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "blackbox: opt-in black-box workflow regression tests",
+]
 
 
 [build-system]

@@ -11,6 +11,9 @@ bridge between OpenFocus Core and machine-local capabilities.
 - Close server-side gRPC connection state promptly when either side disconnects
   or crashes; reconnection must rely on bounded backoff rather than tight retry
   or ping loops.
+- Rate-limit reconnect-loop logs, including repeated hook socket startup
+  success/failure messages, so a disconnected OpenFocus server cannot create a
+  Companion log storm.
 - Expose only declared local capabilities to OpenFocus Core, including terminal,
   agent workspace, directory selection, runtime hooks, and system float ball.
 - Run the system `Inbox` float ball helper as a local UI process when the browser
