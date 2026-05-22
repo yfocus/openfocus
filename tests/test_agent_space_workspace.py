@@ -109,6 +109,162 @@ def _seed_agent_session_for_send(
     )
 
 
+def _seed_workspace_task() -> str:
+    from openfocus.db import session_scope
+    from openfocus.models import Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(title="g", content="d", due_date=dt.date.today())
+        s.add(goal)
+        s.flush()
+        task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+        s.add(task)
+        s.flush()
+        return str(task.public_id)
+
+
+def _seed_workspace_companion(
+    device_id: str = "companion-one",
+    *,
+    status: str = "active",
+    auth_token: str = "token",
+) -> int:
+    from openfocus.db import session_scope
+    from openfocus.models import Companion
+
+    with session_scope() as s:
+        companion = Companion(
+            device_id=device_id,
+            name=device_id,
+            base_url=f"http://{device_id}.local",
+            status=status,
+            auth_token=auth_token,
+        )
+        s.add(companion)
+        s.flush()
+        return int(companion.id)
+
+
+def test_create_or_update_agent_space_for_task_creates_new_space(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import workspace
+    from openfocus.models import AgentSpace
+
+    task_public_id = _seed_workspace_task()
+    companion_id = _seed_workspace_companion()
+
+    result = workspace.create_or_update_agent_space_for_task(
+        f" {task_public_id} ",
+        companion_id=companion_id,
+        root_path=f" {tmp_path / 'workspace'} ",
+        start_agent_command=" coco -y ",
+    )
+
+    assert result.created is True
+    assert result.space.task_public_id == task_public_id
+    assert result.space.companion_id == companion_id
+    assert result.space.root_path == str(tmp_path / "workspace")
+    assert result.space.agent_type == "trae-cli"
+    assert result.space.start_agent_command == "coco -y"
+    assert result.to_dict()["space_id"] == result.space.id
+
+    with session_scope() as s:
+        row = s.get(AgentSpace, result.space.id)
+        assert row is not None
+        assert row.task_public_id == task_public_id
+        assert row.companion_id == companion_id
+        assert row.root_path == str(tmp_path / "workspace")
+        assert row.agent_type == "trae-cli"
+        assert row.start_agent_command == "coco -y"
+
+
+def test_create_or_update_agent_space_for_task_updates_existing_space(tmp_path):
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import workspace
+    from openfocus.models import AgentSpace
+
+    task_public_id = _seed_workspace_task()
+    first_companion_id = _seed_workspace_companion("companion-one")
+    second_companion_id = _seed_workspace_companion("companion-two")
+
+    first = workspace.create_or_update_agent_space_for_task(
+        task_public_id,
+        companion_id=first_companion_id,
+        root_path=str(tmp_path / "one"),
+        start_agent_command="coco -y",
+    )
+    second = workspace.create_or_update_agent_space_for_task(
+        task_public_id,
+        companion_id=second_companion_id,
+        root_path=str(tmp_path / "two"),
+        start_agent_command="trae-cli --yes",
+    )
+
+    assert first.created is True
+    assert second.created is False
+    assert second.space.id == first.space.id
+    assert second.space.companion_id == second_companion_id
+    assert second.space.root_path == str(tmp_path / "two")
+    assert second.space.agent_type == "trae-cli"
+    assert second.space.start_agent_command == "trae-cli --yes"
+
+    with session_scope() as s:
+        rows = s.query(AgentSpace).all()
+        assert len(rows) == 1
+        assert rows[0].id == first.space.id
+        assert rows[0].companion_id == second_companion_id
+        assert rows[0].root_path == str(tmp_path / "two")
+        assert rows[0].start_agent_command == "trae-cli --yes"
+
+
+def test_get_agent_space_for_task_represents_missing_space_consistently():
+    from openfocus.domains.agent_spaces import workspace
+
+    result = workspace.get_agent_space_for_task(" missing-task ")
+
+    assert result.task_public_id == "missing-task"
+    assert result.space is None
+    assert result.to_dict() == {"ok": True, "space": None}
+
+
+def test_start_agent_command_get_update_and_length_validation(tmp_path):
+    from openfocus.domains.agent_spaces import workspace
+
+    task_public_id = _seed_workspace_task()
+    companion_id = _seed_workspace_companion()
+    created = workspace.create_or_update_agent_space_for_task(
+        task_public_id,
+        companion_id=companion_id,
+        root_path=str(tmp_path / "workspace"),
+        start_agent_command="coco -y",
+    )
+
+    initial = workspace.get_start_agent_command(created.space.id)
+    assert initial.to_dict() == {"ok": True, "start_agent_command": "coco -y"}
+
+    updated = workspace.update_start_agent_command(
+        created.space.id,
+        " trae-cli --yes ",
+    )
+    assert updated.start_agent_command == "trae-cli --yes"
+    assert (
+        workspace.get_start_agent_command(created.space.id).start_agent_command
+        == "trae-cli --yes"
+    )
+
+    with pytest.raises(
+        workspace.AgentSpaceValidationError, match="command is too long"
+    ):
+        workspace.update_start_agent_command(created.space.id, "x" * 2001)
+    assert (
+        workspace.get_start_agent_command(created.space.id).start_agent_command
+        == "trae-cli --yes"
+    )
+
+    with pytest.raises(workspace.AgentSpaceNotFound, match="AgentSpace not found"):
+        workspace.get_start_agent_command(999999)
+
+
 def test_start_agent_session_persists_after_runtime_start(tmp_path):
     async def _run() -> None:
         from openfocus.db import session_scope

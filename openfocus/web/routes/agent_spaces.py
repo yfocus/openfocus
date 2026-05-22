@@ -120,6 +120,30 @@ async def delete_agent_space_for_task(
     return result.to_dict()
 
 
+def _agent_space_workspace_http_error(
+    exc: agent_space_workspace.AgentSpaceUseCaseError,
+) -> HTTPException:
+    detail = str(exc) or "AgentSpace workspace error"
+    if isinstance(
+        exc,
+        (
+            agent_space_workspace.AgentSpaceTaskNotFound,
+            agent_space_workspace.AgentSpaceNotFound,
+        ),
+    ):
+        return HTTPException(status_code=404, detail=detail)
+    if isinstance(
+        exc,
+        (
+            agent_space_workspace.AgentSpaceValidationError,
+            agent_space_workspace.AgentSpaceCompanionNotFound,
+            agent_space_workspace.AgentSpaceCompanionUnavailable,
+        ),
+    ):
+        return HTTPException(status_code=400, detail=detail)
+    return HTTPException(status_code=400, detail=detail)
+
+
 def _ttyd_bridge_script() -> str:
     return terminal_gateway.ttyd_bridge_script()
 
@@ -302,81 +326,29 @@ def create_router(
 
     @router.get("/api/tasks/{task_public_id}/agent_space")
     def get_agent_space(task_public_id: str) -> dict:
-        with session_scope() as s:
-            space = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id == task_public_id)
-                .one_or_none()
-            )
-            if space is None:
-                return {"ok": True, "space": None}
-            return {
-                "ok": True,
-                "space": {
-                    "id": space.id,
-                    "task_public_id": space.task_public_id,
-                    "companion_id": getattr(space, "companion_id", None),
-                    "root_path": space.root_path,
-                    "start_agent_command": str(
-                        getattr(space, "start_agent_command", "") or ""
-                    ),
-                },
-            }
+        result = agent_space_workspace.get_agent_space_for_task(task_public_id)
+        return result.to_dict()
 
     @router.post("/api/tasks/{task_public_id}/agent_space")
     def create_agent_space(task_public_id: str, payload: AgentSpaceCreateIn) -> dict:
-        root_path = str((payload.root_path or "").strip())
-        if not root_path:
-            raise HTTPException(status_code=400, detail="root_path is required")
-        start_agent_command = str((payload.start_agent_command or "").strip())
-
-        with session_scope() as s:
-            task = s.query(Task).filter(Task.public_id == task_public_id).one_or_none()
-            if task is None:
-                raise HTTPException(status_code=404, detail="Task not found")
-
-            comp = s.get(Companion, int(payload.companion_id))
-            if comp is None:
-                raise HTTPException(status_code=400, detail="Companion not found")
-            if comp.status != "active" or not (comp.auth_token or "").strip():
-                raise HTTPException(
-                    status_code=400, detail="Companion is not paired or unavailable"
-                )
-
-            existing = (
-                s.query(AgentSpace)
-                .filter(AgentSpace.task_public_id == task_public_id)
-                .one_or_none()
+        try:
+            result = agent_space_workspace.create_or_update_agent_space_for_task(
+                task_public_id,
+                companion_id=payload.companion_id,
+                root_path=payload.root_path,
+                start_agent_command=payload.start_agent_command,
             )
-            if existing is not None:
-                # 简化：已存在则更新（方便快速迭代）
-                existing.companion_id = int(payload.companion_id)
-                existing.root_path = root_path
-                existing.agent_type = "trae-cli"  # 统一落库为 trae-cli
-                existing.start_agent_command = start_agent_command
-                s.add(existing)
-                s.flush()
-                space = existing
-            else:
-                space = AgentSpace(
-                    task_public_id=task_public_id,
-                    companion_id=int(payload.companion_id),
-                    root_path=root_path,
-                    agent_type="trae-cli",
-                    start_agent_command=start_agent_command,
-                )
-                s.add(space)
-                s.flush()
-
-        return {"ok": True, "space_id": space.id}
+        except agent_space_workspace.AgentSpaceUseCaseError as exc:
+            raise _agent_space_workspace_http_error(exc) from exc
+        return {"ok": True, "space_id": result.space.id}
 
     @router.get("/api/agent_spaces/{space_id}/start_agent_command")
     def get_start_agent_command(space_id: int) -> dict:
-        sp, _ = _load_space_and_optional_companion(space_id)
-        return {
-            "ok": True,
-            "start_agent_command": str(getattr(sp, "start_agent_command", "") or ""),
-        }
+        try:
+            result = agent_space_workspace.get_start_agent_command(space_id)
+        except agent_space_workspace.AgentSpaceUseCaseError as exc:
+            raise _agent_space_workspace_http_error(exc) from exc
+        return result.to_dict()
 
     @router.put("/api/agent_spaces/{space_id}/start_agent_command")
     def update_start_agent_command(space_id: int, payload: dict) -> dict:
@@ -385,16 +357,11 @@ def create_router(
             raw = str(
                 payload.get("start_agent_command") or payload.get("command") or ""
             )
-        command = raw.strip()
-        if len(command) > 2000:
-            raise HTTPException(status_code=400, detail="command is too long (<=2000)")
-        with session_scope() as s:
-            sp = s.get(AgentSpace, int(space_id))
-            if sp is None:
-                raise HTTPException(status_code=404, detail="AgentSpace not found")
-            sp.start_agent_command = command
-            s.add(sp)
-        return {"ok": True, "start_agent_command": command}
+        try:
+            result = agent_space_workspace.update_start_agent_command(space_id, raw)
+        except agent_space_workspace.AgentSpaceUseCaseError as exc:
+            raise _agent_space_workspace_http_error(exc) from exc
+        return result.to_dict()
 
     @router.delete("/api/tasks/{task_public_id}/agent_space")
     async def delete_agent_space(task_public_id: str) -> dict:

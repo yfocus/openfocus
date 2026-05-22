@@ -6,7 +6,9 @@
 The Agent Spaces domain owns AgentSpace workspace lifecycle and terminal
 ownership state:
 
+- AgentSpace create/update/get use cases keyed by `Task.public_id`
 - AgentSpace release use cases keyed by `Task.public_id`
+- Start Agent command load/update use cases keyed by `AgentSpace.id`
 - AgentSession start, send preflight/user-message persistence, assistant
   turn placeholder/failure persistence, runtime turn started/failed projection,
   and terminate use cases keyed by `AgentSpace.id`
@@ -19,6 +21,13 @@ ownership state:
 ## Boundaries
 
 - Domain code must not depend on FastAPI request/response objects or Jinja templates.
+- AgentSpace create/get and Start Agent command persistence belongs to this
+  domain. The domain normalizes task/space identifiers, validates command
+  length, verifies local Task/Companion/AgentSpace state, and returns stable
+  results for web adapters.
+- Web routes still own request parsing, HTTP error mapping, templates, and
+  Companion live/online registry checks. AgentSpace creation only validates
+  local paired Companion state in this domain.
 - Companion gRPC calls remain infrastructure glue. Routes pass a runtime resolver
   into the workspace release use case; the domain does not know the global
   Companion registry.
@@ -56,6 +65,13 @@ ownership state:
 - Auto prompts are applied only to active AgentSpace terminal input. They do not apply to Agent Session `/send` or Inspiration terminal `Summary` / `Create Goal` flows.
 - Hiding an AgentSpace pane is layout-only and must not close terminals, release the AgentSpace, or mutate workspace files.
 - The settings column cannot be hidden. When the terminal pane is hidden, prompt-zone controls are hidden but settings controls remain available.
+- AgentSpace creation is an upsert by `Task.public_id`; creating a space for a
+  task that already has one updates `companion_id`, `root_path`, `agent_type`,
+  and `start_agent_command` instead of creating a duplicate row.
+- Start Agent commands are stored trimmed and must be at most 2000 characters
+  after trimming.
+- Looking up a missing AgentSpace by `Task.public_id` returns an explicit
+  missing-space result for adapters to map without treating it as an error.
 - Releasing a missing AgentSpace is idempotent success.
 - Starting an AgentSession calls the runtime before writing the local
   `AgentSession` row. If runtime start fails, OpenFocus must not leave a local
