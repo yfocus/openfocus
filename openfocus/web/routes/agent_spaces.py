@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...db import session_scope
 from ...domains.agent_spaces import agent_sessions as agent_session_service
+from ...domains.agent_spaces import prompts as agent_space_prompts
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.agent_spaces import workspace as agent_space_workspace
 from ...domains.companion import service as companion_service
@@ -21,12 +22,11 @@ from ...models import (
     AgentMessage,
     AgentSession,
     AgentSpace,
-    AgentSpacePrompt,
     Companion,
     Goal,
     Task,
 )
-from ...schemas import AgentSpaceCreateIn, AgentSpacePromptIn
+from ...schemas import AgentSpaceCreateIn
 
 
 def _ttyd_embed_path(space_id: int, terminal_id: str) -> str:
@@ -87,16 +87,6 @@ def _load_space_and_optional_companion(space_id: int):
     return companion_service.load_space_and_optional_companion(space_id)
 
 
-def _agent_space_prompt_payload(prompt: AgentSpacePrompt) -> dict:
-    return {
-        "id": int(prompt.id),
-        "title": str(prompt.title or ""),
-        "content": str(prompt.content or ""),
-        "enabled": bool(prompt.enabled),
-        "auto_enabled": bool(getattr(prompt, "auto_enabled", False)),
-    }
-
-
 def _require_companion_online(*, grpc_server: CompanionGrpcServer, comp):
     return companion_service.require_online(grpc_server, companion=comp)
 
@@ -144,6 +134,17 @@ def _agent_space_workspace_http_error(
     return HTTPException(status_code=400, detail=detail)
 
 
+def _agent_space_prompt_http_error(
+    exc: agent_space_prompts.AgentSpacePromptUseCaseError,
+) -> HTTPException:
+    detail = str(exc) or "AgentSpace prompt error"
+    if isinstance(exc, agent_space_prompts.AgentSpacePromptNotFound):
+        return HTTPException(status_code=404, detail=detail)
+    if isinstance(exc, agent_space_prompts.AgentSpacePromptValidationError):
+        return HTTPException(status_code=400, detail=detail)
+    return HTTPException(status_code=400, detail=detail)
+
+
 def _ttyd_bridge_script() -> str:
     return terminal_gateway.ttyd_bridge_script()
 
@@ -166,112 +167,77 @@ def create_router(
 
     @router.get("/agent_space_prompts", response_class=HTMLResponse)
     def agent_space_prompts_view(request: Request) -> HTMLResponse:
-        with session_scope() as s:
-            prompts = (
-                s.query(AgentSpacePrompt)
-                .order_by(AgentSpacePrompt.enabled.desc(), AgentSpacePrompt.id.desc())
-                .all()
-            )
-            items = [_agent_space_prompt_payload(p) for p in prompts]
+        result = agent_space_prompts.list_prompts_for_management()
         return templates.TemplateResponse(
             request,
             "agent_space_prompts.html",
-            {"prompts": items},
+            {"prompts": result.to_dict()["items"]},
         )
 
     @router.get("/api/agent_space_prompts")
     def list_agent_space_prompts(enabled_only: bool = True) -> dict:
-        with session_scope() as s:
-            q = s.query(AgentSpacePrompt)
-            if enabled_only:
-                q = q.filter(AgentSpacePrompt.enabled == True)  # noqa: E712
-            prompts = q.order_by(AgentSpacePrompt.id.desc()).all()
-            items = [_agent_space_prompt_payload(p) for p in prompts]
-        return {"ok": True, "items": items}
+        return agent_space_prompts.list_prompts(enabled_only=enabled_only).to_dict()
 
     @router.post("/api/agent_space_prompts")
-    def create_agent_space_prompt(payload: AgentSpacePromptIn) -> dict:
-        title = str(payload.title or "").strip()
-        content = str(payload.content or "").strip()
-        if not title or not content:
-            raise HTTPException(
-                status_code=400, detail="title and content are required"
+    def create_agent_space_prompt(payload: dict) -> dict:
+        try:
+            result = agent_space_prompts.create_prompt(
+                title=str((payload or {}).get("title") or ""),
+                content=str((payload or {}).get("content") or ""),
+                enabled=bool((payload or {}).get("enabled", True)),
+                auto_enabled=bool((payload or {}).get("auto_enabled", False)),
             )
-        with session_scope() as s:
-            prompt = AgentSpacePrompt(
-                title=title,
-                content=content,
-                enabled=bool(payload.enabled),
-                auto_enabled=bool(payload.auto_enabled),
-            )
-            s.add(prompt)
-            s.flush()
-            item = _agent_space_prompt_payload(prompt)
-        return {"ok": True, "item": item}
+        except agent_space_prompts.AgentSpacePromptUseCaseError as exc:
+            raise _agent_space_prompt_http_error(exc) from exc
+        return result.to_dict()
 
     @router.put("/api/agent_space_prompts/{prompt_id}")
-    def update_agent_space_prompt(prompt_id: int, payload: AgentSpacePromptIn) -> dict:
-        title = str(payload.title or "").strip()
-        content = str(payload.content or "").strip()
-        if not title or not content:
-            raise HTTPException(
-                status_code=400, detail="title and content are required"
+    def update_agent_space_prompt(prompt_id: int, payload: dict) -> dict:
+        try:
+            result = agent_space_prompts.update_prompt(
+                prompt_id,
+                title=str((payload or {}).get("title") or ""),
+                content=str((payload or {}).get("content") or ""),
+                enabled=bool((payload or {}).get("enabled", True)),
+                auto_enabled=bool((payload or {}).get("auto_enabled", False)),
             )
-        with session_scope() as s:
-            prompt = s.get(AgentSpacePrompt, int(prompt_id))
-            if prompt is None:
-                raise HTTPException(
-                    status_code=404, detail="AgentSpace prompt not found"
-                )
-            prompt.title = title
-            prompt.content = content
-            prompt.enabled = bool(payload.enabled)
-            prompt.auto_enabled = bool(payload.auto_enabled)
-            s.add(prompt)
-            s.flush()
-            item = _agent_space_prompt_payload(prompt)
-        return {"ok": True, "item": item}
+        except agent_space_prompts.AgentSpacePromptUseCaseError as exc:
+            raise _agent_space_prompt_http_error(exc) from exc
+        return result.to_dict()
 
     @router.patch("/api/agent_space_prompts/{prompt_id}/enabled")
     def update_agent_space_prompt_enabled(prompt_id: int, payload: dict) -> dict:
         enabled = bool(payload.get("enabled")) if isinstance(payload, dict) else False
-        with session_scope() as s:
-            prompt = s.get(AgentSpacePrompt, int(prompt_id))
-            if prompt is None:
-                raise HTTPException(
-                    status_code=404, detail="AgentSpace prompt not found"
-                )
-            prompt.enabled = enabled
-            s.add(prompt)
-            s.flush()
-            item = _agent_space_prompt_payload(prompt)
-        return {"ok": True, "item": item}
+        try:
+            result = agent_space_prompts.set_prompt_enabled(
+                prompt_id,
+                enabled=enabled,
+            )
+        except agent_space_prompts.AgentSpacePromptUseCaseError as exc:
+            raise _agent_space_prompt_http_error(exc) from exc
+        return result.to_dict()
 
     @router.patch("/api/agent_space_prompts/{prompt_id}/auto_enabled")
     def update_agent_space_prompt_auto_enabled(prompt_id: int, payload: dict) -> dict:
         auto_enabled = (
             bool(payload.get("auto_enabled")) if isinstance(payload, dict) else False
         )
-        with session_scope() as s:
-            prompt = s.get(AgentSpacePrompt, int(prompt_id))
-            if prompt is None:
-                raise HTTPException(
-                    status_code=404, detail="AgentSpace prompt not found"
-                )
-            prompt.auto_enabled = auto_enabled
-            s.add(prompt)
-            s.flush()
-            item = _agent_space_prompt_payload(prompt)
-        return {"ok": True, "item": item}
+        try:
+            result = agent_space_prompts.set_prompt_auto_enabled(
+                prompt_id,
+                auto_enabled=auto_enabled,
+            )
+        except agent_space_prompts.AgentSpacePromptUseCaseError as exc:
+            raise _agent_space_prompt_http_error(exc) from exc
+        return result.to_dict()
 
     @router.delete("/api/agent_space_prompts/{prompt_id}")
     def delete_agent_space_prompt(prompt_id: int) -> dict:
-        with session_scope() as s:
-            prompt = s.get(AgentSpacePrompt, int(prompt_id))
-            if prompt is None:
-                return {"ok": True}
-            s.delete(prompt)
-        return {"ok": True}
+        try:
+            result = agent_space_prompts.delete_prompt(prompt_id)
+        except agent_space_prompts.AgentSpacePromptUseCaseError as exc:
+            raise _agent_space_prompt_http_error(exc) from exc
+        return result.to_dict()
 
     def _require_companion_online(*, sp: AgentSpace, comp: Companion | None):
         return companion_service.require_online(grpc_server, companion=comp)
