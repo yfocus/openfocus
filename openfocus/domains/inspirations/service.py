@@ -560,7 +560,7 @@ async def release_terminals(
     terminal_ops = terminal_gateway.RemoteTerminalGateway()
     released = await terminal_ops.release_owner_terminals(
         owner=owner,
-        conn_resolver=lambda companion_id: terminal_conn(
+        runtime_resolver=lambda companion_id: terminal_conn(
             companion_id, select_online=select_online
         ),
         clear_auto_prompt=clear_ttyd_auto_prompts,

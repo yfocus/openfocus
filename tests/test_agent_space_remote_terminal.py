@@ -157,6 +157,106 @@ def test_agent_space_terminals_list_reconciles_stale_records(tmp_path):
     asyncio.run(_run())
 
 
+def test_agent_space_terminal_inject_cleans_stale_runtime_record(tmp_path):
+    async def _run() -> None:
+        from openfocus.app import COMPANION_GRPC, app
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.models import (
+            AgentSpace,
+            Companion,
+            Goal,
+            RemoteTerminalOutput,
+            RemoteTerminalSession,
+            Task,
+        )
+
+        with session_scope() as s:
+            companion = Companion(
+                device_id="stale-inject-device",
+                name="stale-inject",
+                base_url="grpc://",
+                status="active",
+                auth_token="token",
+            )
+            s.add(companion)
+            s.flush()
+            companion_id = int(companion.id)
+
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            space = AgentSpace(
+                task_public_id=str(task.public_id),
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            owner = terminal_service.owner_for_agent_space(space_id)
+            terminal_service.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id=str(task.public_id),
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+                terminal_id="stale-inject",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stale-inject",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        class FakeConn:
+            async def request_terminal_input(self, **_kwargs):
+                raise RuntimeError("terminal not found")
+
+            def close(self):
+                pass
+
+        conn = FakeConn()
+        await COMPANION_GRPC.registry.set_connected(companion_id, conn)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                r = await client.post(
+                    f"/api/agent_spaces/{space_id}/terminals/stale-inject/inject",
+                    json={"text": "pwd\n"},
+                )
+                assert r.status_code == 410
+                assert r.json()["detail"] == "terminal runtime not found"
+
+            with session_scope() as s:
+                assert (
+                    s.query(RemoteTerminalSession)
+                    .filter(RemoteTerminalSession.terminal_id == "stale-inject")
+                    .one_or_none()
+                    is None
+                )
+                assert (
+                    s.query(RemoteTerminalOutput)
+                    .filter(RemoteTerminalOutput.terminal_id == "stale-inject")
+                    .count()
+                    == 0
+                )
+        finally:
+            await COMPANION_GRPC.registry.set_disconnected(companion_id, conn)
+
+    asyncio.run(_run())
+
+
 async def _wait_until_companion_ready(
     client: AsyncClient, *, timeout_s: float = 2.0
 ) -> dict:

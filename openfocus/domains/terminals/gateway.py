@@ -9,7 +9,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote, urljoin
 
 from ...db import session_scope
@@ -45,6 +45,18 @@ class TerminalUnavailable(TerminalGatewayError, LookupError):
 
 class TtydProxyError(TerminalGatewayError):
     """Raised when ttyd proxy forwarding fails."""
+
+
+class TerminalRuntimePort(Protocol):
+    async def request_terminal_start(self, **kwargs: Any) -> Any: ...
+
+    async def request_terminal_stop(self, **kwargs: Any) -> Any: ...
+
+    async def request_terminal_input(self, **kwargs: Any) -> Any: ...
+
+    async def request_terminal_mouse_mode(self, **kwargs: Any) -> Any: ...
+
+    async def request_terminal_list_sessions(self, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -717,6 +729,24 @@ def _terminal_ids_from_list_response(response: Any) -> set[str]:
     }
 
 
+def _terminal_runtime_missing(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return "terminal not found" in msg or "terminal runtime not found" in msg
+
+
+def _resolve_runtime(
+    *,
+    runtime: TerminalRuntimePort | None,
+    runtime_resolver: Callable[[int], TerminalRuntimePort] | None,
+    companion_id: int,
+) -> TerminalRuntimePort | None:
+    if runtime is not None:
+        return runtime
+    if runtime_resolver is None or not int(companion_id or 0):
+        return None
+    return runtime_resolver(int(companion_id or 0))
+
+
 class RemoteTerminalGateway:
     def __init__(
         self,
@@ -737,8 +767,8 @@ class RemoteTerminalGateway:
         self,
         *,
         owner: terminal_records.TerminalOwner,
-        conn=None,
-        conn_resolver: Callable[[int], Any] | None = None,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
         timeout_seconds: float = 3.0,
         prune_stale: bool = True,
     ) -> list[RemoteTerminalSession]:
@@ -751,7 +781,7 @@ class RemoteTerminalGateway:
         live_ids: set[str] = set()
         checked_ids: set[str] = set()
 
-        if conn_resolver is not None:
+        if runtime_resolver is not None:
             by_companion: dict[int, list[str]] = {}
             for terminal in terminals:
                 terminal_id = str(terminal.terminal_id or "").strip()
@@ -760,22 +790,22 @@ class RemoteTerminalGateway:
                     by_companion.setdefault(companion_id, []).append(terminal_id)
             for companion_id, terminal_ids in by_companion.items():
                 try:
-                    resolved_conn = conn_resolver(int(companion_id))
+                    resolved_runtime = runtime_resolver(int(companion_id))
                 except Exception:
                     continue
-                if resolved_conn is None:
+                if resolved_runtime is None:
                     continue
                 try:
-                    response = await resolved_conn.request_terminal_list_sessions(
+                    response = await resolved_runtime.request_terminal_list_sessions(
                         timeout_seconds=timeout_seconds
                     )
                 except Exception:
                     continue
                 checked_ids.update(terminal_ids)
                 live_ids.update(_terminal_ids_from_list_response(response))
-        elif conn is not None:
+        elif runtime is not None:
             try:
-                response = await conn.request_terminal_list_sessions(
+                response = await runtime.request_terminal_list_sessions(
                     timeout_seconds=timeout_seconds
                 )
             except Exception:
@@ -817,17 +847,19 @@ class RemoteTerminalGateway:
         self,
         *,
         owner: terminal_records.TerminalOwner,
-        conn,
+        runtime: TerminalRuntimePort | None = None,
         companion_id: int | None,
         root_path: str,
         base_path: str,
         task_public_id: str = "",
         timeout_seconds: float = 10.0,
     ) -> TerminalStartResult:
+        if runtime is None:
+            raise TerminalStartError("Companion terminal failed to start: no runtime")
         terminal_id = str(self._terminal_id_factory())
         request_base_path = str(base_path or "").replace("{terminal_id}", terminal_id)
         try:
-            res = await conn.request_terminal_start(
+            res = await runtime.request_terminal_start(
                 terminal_id=terminal_id,
                 root_path=str(root_path or ""),
                 base_path=request_base_path,
@@ -842,7 +874,7 @@ class RemoteTerminalGateway:
         connect_url = str(getattr(res, "connect_url", "") or "").strip()
         if backend == "ttyd" and not connect_url:
             with contextlib.suppress(Exception):
-                await conn.request_terminal_stop(
+                await runtime.request_terminal_stop(
                     terminal_id=real_tid, timeout_seconds=timeout_seconds
                 )
             raise TerminalStartError(
@@ -863,7 +895,7 @@ class RemoteTerminalGateway:
                 name = str(terminal.name or "")
         except Exception:
             with contextlib.suppress(Exception):
-                await conn.request_terminal_stop(
+                await runtime.request_terminal_stop(
                     terminal_id=real_tid, timeout_seconds=timeout_seconds
                 )
             raise
@@ -967,17 +999,28 @@ class RemoteTerminalGateway:
         owner: terminal_records.TerminalOwner,
         terminal_id: str,
         payload: dict[str, Any] | None,
-        conn,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
         timeout_seconds: float = 10.0,
     ) -> bytes:
         tid = _clean_terminal_id(terminal_id)
-        self.terminal_info(owner=owner, terminal_id=tid)
+        info = self.terminal_info(owner=owner, terminal_id=tid)
         raw = _payload_bytes(payload)
+        runtime = _resolve_runtime(
+            runtime=runtime,
+            runtime_resolver=runtime_resolver,
+            companion_id=info.companion_id,
+        )
+        if runtime is None:
+            raise TerminalUnavailable("terminal runtime unavailable")
         try:
-            await conn.request_terminal_input(
+            await runtime.request_terminal_input(
                 terminal_id=tid, data=raw, timeout_seconds=timeout_seconds
             )
         except Exception as e:
+            if _terminal_runtime_missing(e):
+                self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+                raise TerminalUnavailable("terminal runtime not found") from e
             raise TerminalInputError(f"terminal inject failed: {e}") from e
         return raw
 
@@ -987,18 +1030,29 @@ class RemoteTerminalGateway:
         owner: terminal_records.TerminalOwner,
         terminal_id: str,
         enabled: bool,
-        conn,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
         timeout_seconds: float = 10.0,
     ) -> bool:
         tid = _clean_terminal_id(terminal_id)
-        self.terminal_info(owner=owner, terminal_id=tid)
+        info = self.terminal_info(owner=owner, terminal_id=tid)
+        runtime = _resolve_runtime(
+            runtime=runtime,
+            runtime_resolver=runtime_resolver,
+            companion_id=info.companion_id,
+        )
+        if runtime is None:
+            raise TerminalUnavailable("terminal runtime unavailable")
         try:
-            res = await conn.request_terminal_mouse_mode(
+            res = await runtime.request_terminal_mouse_mode(
                 terminal_id=tid,
                 enabled=bool(enabled),
                 timeout_seconds=timeout_seconds,
             )
         except Exception as e:
+            if _terminal_runtime_missing(e):
+                self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+                raise TerminalUnavailable("terminal runtime not found") from e
             raise TerminalMouseModeError(f"terminal mouse mode failed: {e}") from e
         return bool(getattr(res, "enabled", enabled))
 
@@ -1007,19 +1061,25 @@ class RemoteTerminalGateway:
         *,
         owner: terminal_records.TerminalOwner,
         terminal_id: str,
-        conn=None,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
         clear_auto_prompt: Callable[[str], None] | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:
         tid = _clean_terminal_id(terminal_id)
-        self.terminal_info(owner=owner, terminal_id=tid)
-        if conn is not None:
+        info = self.terminal_info(owner=owner, terminal_id=tid)
+        with contextlib.suppress(Exception):
+            runtime = _resolve_runtime(
+                runtime=runtime,
+                runtime_resolver=runtime_resolver,
+                companion_id=info.companion_id,
+            )
+        if runtime is not None:
             with contextlib.suppress(Exception):
-                await conn.request_terminal_stop(
+                await runtime.request_terminal_stop(
                     terminal_id=tid, timeout_seconds=timeout_seconds
                 )
-        with self._session_factory() as s:
-            terminal_records.delete_terminal_record(s, owner=owner, terminal_id=tid)
+        self.delete_terminal_metadata(owner=owner, terminal_id=tid)
         if clear_auto_prompt is not None:
             clear_auto_prompt(tid)
 
@@ -1027,8 +1087,8 @@ class RemoteTerminalGateway:
         self,
         *,
         owner: terminal_records.TerminalOwner,
-        conn=None,
-        conn_resolver: Callable[[int], Any] | None = None,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
         clear_auto_prompt: Callable[[str], None] | None = None,
         timeout_seconds: float = 5.0,
         delete_local_records: bool = True,
@@ -1042,21 +1102,21 @@ class RemoteTerminalGateway:
             ]
             terminal_ids = [tid for tid, _ in terminal_infos]
 
-        if (conn is not None or conn_resolver is not None) and terminal_ids:
+        if (runtime is not None or runtime_resolver is not None) and terminal_ids:
 
             async def _stop_one(tid: str, companion_id: int) -> None:
-                stop_conn = conn
-                if conn_resolver is not None:
+                stop_runtime = runtime
+                if runtime_resolver is not None:
                     if not companion_id:
                         return
                     try:
-                        stop_conn = conn_resolver(int(companion_id or 0))
+                        stop_runtime = runtime_resolver(int(companion_id or 0))
                     except Exception:
                         return
-                if stop_conn is None:
+                if stop_runtime is None:
                     return
                 with contextlib.suppress(Exception):
-                    await stop_conn.request_terminal_stop(
+                    await stop_runtime.request_terminal_stop(
                         terminal_id=tid, timeout_seconds=timeout_seconds
                     )
 
@@ -1073,6 +1133,13 @@ class RemoteTerminalGateway:
             for tid in terminal_ids:
                 clear_auto_prompt(tid)
         return terminal_ids
+
+    def delete_terminal_metadata(
+        self, *, owner: terminal_records.TerminalOwner, terminal_id: str
+    ) -> None:
+        tid = _clean_terminal_id(terminal_id)
+        with self._session_factory() as s:
+            terminal_records.delete_terminal_record(s, owner=owner, terminal_id=tid)
 
     def load_ttyd_connect_url(
         self, *, owner: terminal_records.TerminalOwner, terminal_id: str

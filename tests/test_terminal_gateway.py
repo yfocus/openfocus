@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 class FakeTerminalConn:
     def __init__(
-        self, *, connect_url: str = "http://127.0.0.1:7681", live_terminal_ids=None
+        self,
+        *,
+        connect_url: str = "http://127.0.0.1:7681",
+        live_terminal_ids=None,
+        input_error: Exception | None = None,
+        mouse_error: Exception | None = None,
     ) -> None:
         self.starts: list[dict] = []
         self.inputs: list[dict] = []
@@ -17,6 +22,8 @@ class FakeTerminalConn:
         self.list_sessions: list[dict] = []
         self.connect_url = connect_url
         self.live_terminal_ids = list(live_terminal_ids or [])
+        self.input_error = input_error
+        self.mouse_error = mouse_error
 
     async def request_terminal_start(self, **kwargs):
         self.starts.append(kwargs)
@@ -28,10 +35,14 @@ class FakeTerminalConn:
 
     async def request_terminal_input(self, **kwargs):
         self.inputs.append(kwargs)
+        if self.input_error is not None:
+            raise self.input_error
         return SimpleNamespace(ok=True)
 
     async def request_terminal_mouse_mode(self, **kwargs):
         self.mouse_modes.append(kwargs)
+        if self.mouse_error is not None:
+            raise self.mouse_error
         return SimpleNamespace(enabled=kwargs["enabled"])
 
     async def request_terminal_stop(self, **kwargs):
@@ -64,7 +75,7 @@ def test_terminal_gateway_lifecycle_is_owner_scoped():
 
         created = await gateway.start_terminal(
             owner=owner,
-            conn=conn,
+            runtime=conn,
             companion_id=7,
             root_path="/tmp/ws",
             base_path="/api/agent_spaces/10/terminals/{terminal_id}/ttyd/",
@@ -103,13 +114,13 @@ def test_terminal_gateway_lifecycle_is_owner_scoped():
             owner=owner,
             terminal_id="term-a",
             payload={"text": "ls\n"},
-            conn=conn,
+            runtime=conn,
         )
         assert raw == b"ls\n"
         assert conn.inputs[0]["terminal_id"] == "term-a"
 
         enabled = await gateway.set_mouse_mode(
-            owner=owner, terminal_id="term-a", enabled=True, conn=conn
+            owner=owner, terminal_id="term-a", enabled=True, runtime=conn
         )
         assert enabled is True
         assert conn.mouse_modes[0]["enabled"] is True
@@ -118,7 +129,7 @@ def test_terminal_gateway_lifecycle_is_owner_scoped():
         await gateway.close_terminal(
             owner=owner,
             terminal_id="term-a",
-            conn=conn,
+            runtime=conn,
             clear_auto_prompt=cleared.append,
         )
 
@@ -206,7 +217,7 @@ def test_terminal_gateway_rejects_ttyd_start_without_connect_url():
         try:
             await gateway.start_terminal(
                 owner=owner,
-                conn=conn,
+                runtime=conn,
                 companion_id=7,
                 root_path="/tmp/ws",
                 base_path="/api/agent_spaces/14/terminals/{terminal_id}/ttyd/",
@@ -255,7 +266,7 @@ def test_terminal_gateway_reconciles_live_terminals_with_companion():
                 )
 
         conn = FakeTerminalConn(live_terminal_ids=["live-term"])
-        terminals = await gateway.list_live_terminals(owner=owner, conn=conn)
+        terminals = await gateway.list_live_terminals(owner=owner, runtime=conn)
 
         assert [t.terminal_id for t in terminals] == ["live-term"]
         assert conn.list_sessions[0]["timeout_seconds"] == 3.0
@@ -277,6 +288,110 @@ def test_terminal_gateway_reconciles_live_terminals_with_companion():
                 .filter(RemoteTerminalOutput.terminal_id == "stale-term")
                 .count()
                 == 0
+            )
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_cleans_stale_terminal_when_runtime_input_is_missing():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(19)
+        with session_scope() as s:
+            terminal_records.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="TASK-19",
+                companion_id=3,
+                root_path="/tmp/ws",
+                terminal_id="stale-input",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stale-input",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        conn = FakeTerminalConn(input_error=RuntimeError("terminal not found"))
+        try:
+            await gateway.inject_input(
+                owner=owner,
+                terminal_id="stale-input",
+                payload={"text": "ls\n"},
+                runtime=conn,
+            )
+        except terminal_gateway.TerminalUnavailable as exc:
+            assert "terminal runtime not found" in str(exc)
+        else:
+            raise AssertionError("stale runtime input must be unavailable")
+
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stale-input")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "stale-input")
+                .count()
+                == 0
+            )
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_cleans_stale_terminal_when_runtime_mouse_mode_is_missing():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(20)
+        with session_scope() as s:
+            terminal_records.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="TASK-20",
+                companion_id=3,
+                root_path="/tmp/ws",
+                terminal_id="stale-mouse",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+
+        conn = FakeTerminalConn(mouse_error=RuntimeError("terminal not found"))
+        try:
+            await gateway.set_mouse_mode(
+                owner=owner,
+                terminal_id="stale-mouse",
+                enabled=True,
+                runtime=conn,
+            )
+        except terminal_gateway.TerminalUnavailable as exc:
+            assert "terminal runtime not found" in str(exc)
+        else:
+            raise AssertionError("stale runtime mouse mode must be unavailable")
+
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stale-mouse")
+                .one_or_none()
+                is None
             )
 
     asyncio.run(_run())
@@ -380,7 +495,7 @@ def test_terminal_gateway_releases_all_owner_terminals_best_effort():
         cleared: list[str] = []
         released = await gateway.release_owner_terminals(
             owner=owner,
-            conn=conn,
+            runtime=conn,
             clear_auto_prompt=cleared.append,
             timeout_seconds=5.0,
         )

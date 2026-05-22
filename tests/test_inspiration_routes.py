@@ -624,6 +624,85 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
         assert '<div class="terminal-drafts published-view"' in published_page.text
 
 
+@pytest.mark.anyio
+async def test_inspiration_terminal_inject_cleans_stale_runtime_record(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    import openfocus.app as app_mod
+    from openfocus.db import session_scope
+    from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+    class FakeConn:
+        async def request_terminal_start(self, **kwargs):
+            return SimpleNamespace(
+                terminal_id=kwargs["terminal_id"],
+                backend="ttyd",
+                connect_url="http://127.0.0.1:43210",
+            )
+
+        async def request_terminal_input(self, **_kwargs):
+            raise RuntimeError("terminal not found")
+
+    fake_conn = FakeConn()
+
+    def fake_select_online_companion(companion_id=None):
+        return SimpleNamespace(id=88), fake_conn
+
+    monkeypatch.setattr(
+        app_mod, "_select_online_companion", fake_select_online_companion
+    )
+    monkeypatch.setattr(app_mod, "_has_online_companion", lambda: True)
+
+    app = app_mod.app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "Stale terminal", "mode": "terminal"}
+        )
+        assert create_resp.status_code == 200
+        space_id = int(create_resp.json()["item"]["id"])
+
+        term_resp = await client.post(f"/api/inspirations/{space_id}/terminals/new")
+        assert term_resp.status_code == 200
+        tid = term_resp.json()["terminal"]["terminal_id"]
+
+        with session_scope() as s:
+            row = (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == tid)
+                .one()
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=int(row.space_id),
+                    terminal_id=tid,
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        stale = await client.post(
+            f"/api/inspirations/{space_id}/terminals/{tid}/inject",
+            json={"text": "pwd\n"},
+        )
+        assert stale.status_code == 410
+        assert stale.json()["detail"] == "terminal runtime not found"
+
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == tid)
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == tid)
+                .count()
+                == 0
+            )
+
+
 async def _wait_until_not_waiting(
     client: AsyncClient, space_id: int, *, timeout: float = 3.0
 ):

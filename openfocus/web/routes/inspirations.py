@@ -1014,7 +1014,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             owner = terminal_service.owner_for_inspiration_space(int(space_id))
         terms = await terminal_ops.list_live_terminals(
             owner=owner,
-            conn_resolver=_terminal_conn,
+            runtime_resolver=_terminal_conn,
         )
         return {
             "ok": True,
@@ -1064,7 +1064,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         try:
             result = await terminal_ops.start_terminal(
                 owner=terminal_service.owner_for_inspiration_space(int(space_id)),
-                conn=conn,
+                runtime=conn,
                 companion_id=int(comp.id),
                 root_path=workspace_path,
                 base_path=f"/api/inspirations/{int(space_id)}/terminals/{{terminal_id}}/ttyd/",
@@ -1101,27 +1101,21 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         with session_scope() as s:
             _space_or_404(s, int(space_id))
         owner = terminal_service.owner_for_inspiration_space(int(space_id))
-        try:
-            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
-        except terminal_gateway.TerminalValidationError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except terminal_service.TerminalNotFound:
-            raise HTTPException(status_code=404, detail="Terminal not found")
-        tid = info.terminal_id
-        comp_id = int(info.companion_id or 0)
-        conn = _terminal_conn(comp_id)
+        tid = str(terminal_id or "").strip()
         try:
             raw = await terminal_ops.inject_input(
                 owner=owner,
                 terminal_id=tid,
                 payload=payload,
-                conn=conn,
+                runtime_resolver=_terminal_conn,
                 timeout_seconds=10.0,
             )
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable as e:
+            raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalInputError as e:
             raise HTTPException(status_code=502, detail=str(e))
         deps.try_audit_memory(
@@ -1161,23 +1155,21 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         with session_scope() as s:
             _space_or_404(s, int(space_id))
         owner = terminal_service.owner_for_inspiration_space(int(space_id))
-        try:
-            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
-        except terminal_gateway.TerminalValidationError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except terminal_service.TerminalNotFound:
-            raise HTTPException(status_code=404, detail="Terminal not found")
-        comp_id = int(info.companion_id or 0)
-        conn = _terminal_conn(comp_id)
         enabled = bool((payload or {}).get("enabled"))
         try:
             actual = await terminal_ops.set_mouse_mode(
                 owner=owner,
-                terminal_id=info.terminal_id,
+                terminal_id=terminal_id,
                 enabled=enabled,
-                conn=conn,
+                runtime_resolver=_terminal_conn,
                 timeout_seconds=10.0,
             )
+        except terminal_gateway.TerminalValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except terminal_service.TerminalNotFound:
+            raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable as e:
+            raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalMouseModeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True, "enabled": actual}
@@ -1203,21 +1195,17 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             _space_or_404(s, int(space_id))
         owner = terminal_service.owner_for_inspiration_space(int(space_id))
         try:
-            info = terminal_ops.terminal_info(owner=owner, terminal_id=terminal_id)
+            await terminal_ops.close_terminal(
+                owner=owner,
+                terminal_id=terminal_id,
+                runtime_resolver=_terminal_conn,
+                clear_auto_prompt=lambda tid: deps.ttyd_auto_prompts.pop(tid, None),
+                timeout_seconds=10.0,
+            )
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
-        conn = None
-        with contextlib.suppress(Exception):
-            conn = _terminal_conn(int(info.companion_id or 0))
-        await terminal_ops.close_terminal(
-            owner=owner,
-            terminal_id=info.terminal_id,
-            conn=conn,
-            clear_auto_prompt=lambda tid: deps.ttyd_auto_prompts.pop(tid, None),
-            timeout_seconds=10.0,
-        )
         return {"ok": True}
 
     @router.api_route(

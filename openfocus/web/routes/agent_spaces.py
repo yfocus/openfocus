@@ -132,7 +132,7 @@ async def delete_agent_space_for_task(
     conn = grpc_server.registry.get(cid) if cid else None
     await terminal_ops.release_owner_terminals(
         owner=owner,
-        conn=conn,
+        runtime=conn,
         timeout_seconds=5.0,
         delete_local_records=False,
     )
@@ -466,7 +466,7 @@ def create_router(
         cid = int(getattr(comp, "id", 0) or 0) if comp is not None else 0
         conn = grpc_server.registry.get(cid) if cid else None
         online = bool(conn is not None)
-        terms = await terminal_ops.list_live_terminals(owner=owner, conn=conn)
+        terms = await terminal_ops.list_live_terminals(owner=owner, runtime=conn)
 
         return {
             "ok": True,
@@ -491,7 +491,7 @@ def create_router(
         try:
             result = await terminal_ops.start_terminal(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
-                conn=conn,
+                runtime=conn,
                 companion_id=int(getattr(comp, "id", 0) or 0)
                 if comp is not None
                 else None,
@@ -557,13 +557,15 @@ def create_router(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
                 terminal_id=terminal_id,
                 payload=payload,
-                conn=conn,
+                runtime=conn,
                 timeout_seconds=10.0,
             )
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable as e:
+            raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalInputError as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -616,13 +618,15 @@ def create_router(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
                 terminal_id=terminal_id,
                 enabled=enabled,
-                conn=conn,
+                runtime=conn,
                 timeout_seconds=10.0,
             )
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
+        except terminal_gateway.TerminalUnavailable as e:
+            raise HTTPException(status_code=410, detail=str(e))
         except terminal_gateway.TerminalMouseModeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"ok": True, "enabled": actual}
@@ -640,7 +644,7 @@ def create_router(
             await terminal_ops.close_terminal(
                 owner=terminal_service.owner_for_agent_space(int(sp.id)),
                 terminal_id=terminal_id,
-                conn=conn,
+                runtime=conn,
                 clear_auto_prompt=lambda terminal_id: ttyd_auto_prompts.pop(
                     terminal_id, None
                 ),

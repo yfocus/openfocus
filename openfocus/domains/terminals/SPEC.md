@@ -12,6 +12,7 @@ AgentSpace and InspirationSpace:
 - owner release cleanup for all terminals under one AgentSpace or InspirationSpace
 - terminal history replay with bounded output and screen-safe sync slicing
 - terminal payload shaping with ttyd embed URLs
+- terminal runtime command dispatch through a small runtime port interface
 - ttyd proxy URL construction, protocol-neutral HTTP proxy forwarding, WebSocket
   target shaping, and HTML bridge injection helpers
 
@@ -19,8 +20,9 @@ AgentSpace and InspirationSpace:
 
 - Domain code must not import FastAPI request/response/websocket types.
 - Routes translate `TerminalGatewayError` subclasses into HTTP status codes.
-- Companion connections are passed into the gateway as adapters; the gateway does
-  not know the global Companion registry.
+- Companion runtime objects are passed into the gateway through
+  `TerminalRuntimePort` adapters; the gateway does not know the global Companion
+  registry.
 - Existing `domains.agent_spaces.terminals` remains the persistence helper for
   owner records while this module becomes the shared cross-workspace interface.
 - `RemoteTerminalSession` records are durable metadata. Companion runtime
@@ -34,6 +36,12 @@ AgentSpace and InspirationSpace:
 - Listing terminals for UI must ask Companion for live sessions and return only
   terminals confirmed by that runtime source. Stale local records may be
   removed after a successful runtime reconciliation.
+- Input injection and mouse mode updates must resolve the runtime from terminal
+  metadata inside the gateway when a caller supplies a runtime resolver.
+- If a runtime command reports that a terminal no longer exists, the gateway must
+  delete the local terminal metadata/output rows and raise `TerminalUnavailable`.
+- Routes should map stale runtime `TerminalUnavailable` failures to HTTP 410 so
+  clients stop retrying against expired local metadata.
 - ttyd starts must not create local terminal records unless Companion returns a
   non-empty `connect_url`.
 - Closing a terminal deletes its output rows and session row locally even when
