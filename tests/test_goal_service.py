@@ -4,6 +4,11 @@ from __future__ import annotations
 import datetime as dt
 
 
+def _read_audit_text(memory_root):
+    audit_files = list((memory_root / "audit").glob("**/*.md"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
+
+
 def test_goal_service_create_update_and_task_lifecycle(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
 
@@ -38,8 +43,20 @@ def test_goal_service_create_update_and_task_lifecycle(monkeypatch, tmp_path):
         assert task.task_type == "review"
         assert task.estimated_minutes == 15
         assert task.context_key.startswith(f"goal:{goal_id}:")
-        assert s.query(Event).filter(Event.kind == "goal.created").count() == 1
-        assert s.query(Event).filter(Event.kind == "task.created").count() == 1
+
+        goal_event = s.query(Event).filter(Event.kind == "goal.created").one()
+        assert goal_event.agent == "ui"
+        assert goal_event.task_id is None
+        assert goal_event.payload == {"goal_id": goal_id, "title": "service goal"}
+
+        task_event = s.query(Event).filter(Event.kind == "task.created").one()
+        assert task_event.agent == "ui"
+        assert task_event.task_id == task_public_id
+        assert task_event.payload == {
+            "goal_id": goal_id,
+            "task_public_id": task_public_id,
+            "title": "review service task",
+        }
 
     with session_scope() as s:
         service.update_task(
@@ -58,15 +75,96 @@ def test_goal_service_create_update_and_task_lifecycle(monkeypatch, tmp_path):
         assert task.status == "todo"
         assert task.completed_at is None
         assert task.task_type == "communication"
-        assert s.query(Event).filter(Event.kind == "task.confirmed_done").count() == 1
-        assert s.query(Event).filter(Event.kind == "task.reopened").count() == 1
 
-    audit_files = list((tmp_path / "memory" / "audit").glob("**/*.md"))
-    assert audit_files
-    audit_text = "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
+        done_event = s.query(Event).filter(Event.kind == "task.confirmed_done").one()
+        assert done_event.task_id == task_public_id
+        assert done_event.payload == {"from": "todo"}
+
+        reopened_event = s.query(Event).filter(Event.kind == "task.reopened").one()
+        assert reopened_event.task_id == task_public_id
+        assert reopened_event.payload == {}
+
+    audit_text = _read_audit_text(tmp_path / "memory")
+    assert audit_text
     assert "goal.created" in audit_text
     assert "task.created" in audit_text
     assert "task.confirmed_done" in audit_text
+    assert "Task moved from `todo` to `done`." in audit_text
+    assert "Task moved from `done` back to `todo`." in audit_text
+    assert '"from": "todo"' in audit_text
+    assert '"to": "done"' in audit_text
+
+
+def test_goal_service_goal_lifecycle_event_payload_and_audit(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.db import session_scope
+    from openfocus.domains.goals import service
+    from openfocus.models import Event, Goal
+
+    with session_scope() as s:
+        goal = service.create_goal(
+            s,
+            title="goal lifecycle",
+            content="goal lifecycle content",
+            due_date=dt.date.today() + dt.timedelta(days=1),
+        )
+        goal_id = int(goal.id)
+        service.mark_goal_done(s, goal_id=goal_id)
+        service.reopen_goal(s, goal_id=goal_id)
+
+    with session_scope() as s:
+        goal = s.get(Goal, goal_id)
+        assert goal is not None
+        assert goal.status == "active"
+
+        done_event = (
+            s.query(Event).filter(Event.kind == "goal.confirmed_done_by_user").one()
+        )
+        assert done_event.task_id is None
+        assert done_event.payload == {"goal_id": goal_id, "from": "active"}
+
+        reopened_event = (
+            s.query(Event).filter(Event.kind == "goal.reopened_by_user").one()
+        )
+        assert reopened_event.task_id is None
+        assert reopened_event.payload == {"goal_id": goal_id}
+
+    audit_text = _read_audit_text(tmp_path / "memory")
+    assert "Goal moved from `active` to `done`." in audit_text
+    assert "Goal moved from `done` back to `active`." in audit_text
+    assert '"from": "active"' in audit_text
+    assert '"to": "done"' in audit_text
+
+
+def test_goal_service_create_events_without_audit_memory(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.db import session_scope
+    from openfocus.domains.goals import service
+    from openfocus.models import Event
+
+    with session_scope() as s:
+        goal = service.create_goal(
+            s,
+            title="no audit goal",
+            content="no audit content",
+            due_date=dt.date.today(),
+            audit=False,
+        )
+        service.create_task(
+            s,
+            goal_id=int(goal.id),
+            title="no audit task",
+            content="no audit task content",
+            audit=False,
+        )
+
+    with session_scope() as s:
+        assert s.query(Event).filter(Event.kind == "goal.created").count() == 1
+        assert s.query(Event).filter(Event.kind == "task.created").count() == 1
+
+    assert _read_audit_text(tmp_path / "memory") == ""
 
 
 def test_goal_service_missing_goal_or_task_raises_domain_error(monkeypatch, tmp_path):

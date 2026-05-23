@@ -90,17 +90,8 @@ class TaskDecomposerAgent:
                 )
                 s.add(obj)
                 s.flush()
-                event_service.record_event(
-                    s,
-                    kind="task.created",
-                    agent=self.name,
-                    task_id=str(obj.public_id or ""),
-                    payload={
-                        "goal_id": int(obj.goal_id),
-                        "task_public_id": str(obj.public_id or ""),
-                        "title": str(obj.title or ""),
-                    },
-                    audit=False,
+                event_service.record_task_created(
+                    s, task=obj, agent=self.name, audit=False
                 )
                 created.append(
                     {

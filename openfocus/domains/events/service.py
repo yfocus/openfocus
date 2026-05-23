@@ -281,6 +281,190 @@ def record_event(
     return event
 
 
+def record_goal_created(
+    s: Session,
+    *,
+    goal: Goal,
+    agent: str = "ui",
+    source: str = "web",
+    audit: bool = True,
+) -> Event:
+    title = str(goal.title or "")
+    content = str(goal.content or "")
+    goal_id = int(goal.id)
+    due_date = goal.due_date
+    return record_event(
+        s,
+        kind="goal.created",
+        agent=agent,
+        task_id=None,
+        payload={"goal_id": goal_id, "title": title},
+        create_attention=False,
+        audit={
+            "kind": "goal.created",
+            "source": source,
+            "summary": f"Created goal: {title}",
+            "detail": f"Goal title:\n\n{title}\n\nContent:\n\n{content}",
+            "goal_id": goal_id or None,
+            "metadata": {"due_date": due_date.isoformat()},
+        }
+        if audit
+        else False,
+    )
+
+
+def record_task_created(
+    s: Session,
+    *,
+    task: Task,
+    agent: str = "ui",
+    source: str = "web",
+    audit: bool = True,
+) -> Event:
+    task_public_id = str(task.public_id or "")
+    title = str(task.title or "")
+    content = str(task.content or "")
+    return record_event(
+        s,
+        kind="task.created",
+        agent=agent,
+        task_id=task_public_id,
+        payload={
+            "goal_id": int(task.goal_id),
+            "task_public_id": task_public_id,
+            "title": title,
+        },
+        create_attention=False,
+        audit={
+            "kind": "task.created",
+            "source": source,
+            "summary": f"Created task: {title}",
+            "detail": f"Task title:\n\n{title}\n\nContent:\n\n{content}",
+            "goal_id": int(task.goal_id),
+            "task_public_id": task_public_id or None,
+            "metadata": {
+                "task_type": task.task_type,
+                "estimated_minutes": task.estimated_minutes,
+                "context_key": task.context_key,
+            },
+        }
+        if audit
+        else False,
+    )
+
+
+def record_goal_confirmed_done(
+    s: Session,
+    *,
+    goal: Goal,
+    from_status: str,
+    to_status: str = "done",
+) -> Event:
+    goal_id = int(goal.id)
+    old = str(from_status or "")
+    new = str(to_status or "")
+    return record_event(
+        s,
+        kind="goal.confirmed_done_by_user",
+        agent="ui",
+        task_id=None,
+        payload={"goal_id": goal_id, "from": old},
+        create_attention=False,
+        audit={
+            "kind": "goal.confirmed_done_by_user",
+            "source": "web",
+            "summary": f"Finished goal: {goal.title}",
+            "detail": f"Goal moved from `{old}` to `{new}`.",
+            "goal_id": goal_id,
+            "metadata": {"from": old, "to": new},
+        },
+    )
+
+
+def record_goal_reopened(
+    s: Session,
+    *,
+    goal: Goal,
+    from_status: str = "done",
+    to_status: str = "active",
+) -> Event:
+    goal_id = int(goal.id)
+    old = str(from_status or "")
+    new = str(to_status or "")
+    return record_event(
+        s,
+        kind="goal.reopened_by_user",
+        agent="ui",
+        task_id=None,
+        payload={"goal_id": goal_id},
+        create_attention=False,
+        audit={
+            "kind": "goal.reopened_by_user",
+            "source": "web",
+            "summary": f"Reopened goal: {goal.title}",
+            "detail": f"Goal moved from `{old}` back to `{new}`.",
+            "goal_id": goal_id,
+            "metadata": {"to": new},
+        },
+    )
+
+
+def record_task_confirmed_done(
+    s: Session,
+    *,
+    task: Task,
+    from_status: str,
+    to_status: str = "done",
+) -> Event:
+    old = str(from_status or "")
+    new = str(to_status or "")
+    return record_event(
+        s,
+        kind="task.confirmed_done",
+        agent="ui",
+        task_id=task.public_id,
+        payload={"from": old},
+        create_attention=False,
+        audit={
+            "kind": "task.confirmed_done",
+            "source": "web",
+            "summary": f"Finished task: {task.title}",
+            "detail": f"Task moved from `{old}` to `{new}`.",
+            "goal_id": int(task.goal_id),
+            "task_public_id": task.public_id,
+            "metadata": {"from": old, "to": new},
+        },
+    )
+
+
+def record_task_reopened(
+    s: Session,
+    *,
+    task: Task,
+    from_status: str = "done",
+    to_status: str = "todo",
+) -> Event:
+    old = str(from_status or "")
+    new = str(to_status or "")
+    return record_event(
+        s,
+        kind="task.reopened",
+        agent="ui",
+        task_id=task.public_id,
+        payload={},
+        create_attention=False,
+        audit={
+            "kind": "task.reopened",
+            "source": "web",
+            "summary": f"Reopened task: {task.title}",
+            "detail": f"Task moved from `{old}` back to `{new}`.",
+            "goal_id": int(task.goal_id),
+            "task_public_id": task.public_id,
+            "metadata": {"to": new},
+        },
+    )
+
+
 def record_agent_report(
     s: Session,
     *,
