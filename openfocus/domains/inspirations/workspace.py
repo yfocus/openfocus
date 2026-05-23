@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from ...models import (
     InspirationSpace,
     RemoteTerminalSession,
 )
-from . import presenters, publishing, resources, service
+from . import presenters, publishing, resources, terminal_bridge
 
 
 class InspirationWorkspaceError(Exception):
@@ -127,6 +128,31 @@ class WorkspacePublishPrepareResult:
     due_date: str
 
 
+@dataclass(frozen=True)
+class TerminalOperationContext:
+    space_id: int
+    owner: terminal_service.TerminalOwner
+
+
+@dataclass(frozen=True)
+class TerminalStartContext:
+    space_id: int
+    owner: terminal_service.TerminalOwner
+    root_path: Path
+    base_path: str
+    audit_kind: str
+    audit_summary: str
+    audit_detail_template: str
+    audit_metadata: dict
+
+
+@dataclass(frozen=True)
+class TerminalPromptContext:
+    space_id: int
+    owner: terminal_service.TerminalOwner
+    prompt: str
+
+
 def _space_or_error(s, space_id: int) -> InspirationSpace:
     space = s.get(InspirationSpace, int(space_id))
     if space is None:
@@ -142,6 +168,60 @@ def _space_or_error(s, space_id: int) -> InspirationSpace:
 def _ensure_open(space: InspirationSpace, message: str) -> None:
     if str(space.status or "open") != "open":
         raise InspirationWorkspaceValidationError(message)
+
+
+def _latest_pending_message(s, space_id: int) -> InspirationMessage | None:
+    return (
+        s.query(InspirationMessage)
+        .filter(InspirationMessage.space_id == int(space_id))
+        .filter(InspirationMessage.kind == "pending")
+        .order_by(InspirationMessage.id.desc())
+        .first()
+    )
+
+
+def _is_waiting(s, space_id: int) -> bool:
+    return _latest_pending_message(s, int(space_id)) is not None
+
+
+def _messages_page(
+    s, space_id: int, *, before_id: int | None = None, page_size: int = 60
+) -> tuple[list[InspirationMessage], int | None]:
+    q = s.query(InspirationMessage).filter(InspirationMessage.space_id == int(space_id))
+    if before_id:
+        q = q.filter(InspirationMessage.id < int(before_id))
+    rows = q.order_by(InspirationMessage.id.desc()).limit(int(page_size) + 1).all()
+    has_more = len(rows) > int(page_size)
+    rows = rows[: int(page_size)]
+    rows.reverse()
+    next_before = rows[0].id if rows and has_more else None
+    return rows, next_before
+
+
+def _is_publishing(space: InspirationSpace | None) -> bool:
+    return str(getattr(space, "status", "") or "") == "publishing"
+
+
+def _default_followup_title(title: str) -> str:
+    base = str(title or "Inspiration").strip() or "Inspiration"
+    return (base + " / Follow-up")[:120]
+
+
+def _inspiration_ttyd_embed_path(space_id: int, terminal_id: str) -> str:
+    tid = urllib.parse.quote(str(terminal_id or ""), safe="")
+    return f"/api/inspirations/{int(space_id)}/terminals/{tid}/ttyd/"
+
+
+def _terminal_payload(space_id: int, terminal: RemoteTerminalSession) -> dict:
+    return terminal_bridge.terminal_payload(
+        int(space_id), terminal, embed_path=_inspiration_ttyd_embed_path
+    )
+
+
+def _build_draft_summary_prompt(space: InspirationSpace) -> str:
+    return terminal_bridge.draft_summary_prompt(
+        space, base_url=str(os.environ.get("OPENFOCUS_BASE_URL") or "").strip()
+    )
 
 
 def _resource_or_error(
@@ -267,8 +347,8 @@ def get_space_detail(
     normalized_page_size = max(1, min(int(page_size or 60), 200))
     with session_scope() as s:
         space = _space_or_error(s, int(space_id))
-        waiting = service.is_waiting(s, int(space_id))
-        messages, next_before = service.messages_page(
+        waiting = _is_waiting(s, int(space_id))
+        messages, next_before = _messages_page(
             s,
             int(space_id),
             before_id=before_id,
@@ -299,7 +379,7 @@ def get_space_detail(
             "ok": True,
             "item": item,
             "is_waiting": waiting,
-            "is_publishing": service.is_publishing(space),
+            "is_publishing": _is_publishing(space),
             "messages": [presenters.message_payload(msg) for msg in messages],
             "next_before_id": next_before,
             "resources": [
@@ -351,6 +431,48 @@ def prepare_draft_from_draft_summary(space_id: int) -> DraftGenerationRequest:
     return DraftGenerationRequest(space_id=int(space_id), prompt="/plan")
 
 
+def prepare_terminal_operation(space_id: int) -> TerminalOperationContext:
+    with session_scope() as s:
+        _space_or_error(s, int(space_id))
+    return TerminalOperationContext(
+        space_id=int(space_id),
+        owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+    )
+
+
+def prepare_terminal_start(space_id: int) -> TerminalStartContext:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces can start terminals")
+        root_path = resources.workspace_path(space, int(space_id))
+        space.mode = "terminal"
+        space.workspace_path = str(root_path)
+        s.flush()
+    return TerminalStartContext(
+        space_id=int(space_id),
+        owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+        root_path=root_path,
+        base_path=f"/api/inspirations/{int(space_id)}/terminals/{{terminal_id}}/ttyd/",
+        audit_kind="inspiration.terminal_created",
+        audit_summary="Created inspiration terminal `{name}`.",
+        audit_detail_template=(
+            "InspirationSpace {space_id} created terminal {terminal_id} at {root_path}."
+        ),
+        audit_metadata={"space_id": int(space_id)},
+    )
+
+
+def prepare_terminal_prompt(space_id: int) -> TerminalPromptContext:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        prompt = _build_draft_summary_prompt(space)
+    return TerminalPromptContext(
+        space_id=int(space_id),
+        owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+        prompt=prompt,
+    )
+
+
 def prepare_publish(
     space_id: int, draft_id: int | None, due_date: dt.date
 ) -> WorkspacePublishPrepareResult:
@@ -392,7 +514,7 @@ def fork_space(
         target_title = (
             raw_title[:512]
             if raw_title
-            else service.default_followup_title(str(source_space.title or ""))
+            else _default_followup_title(str(source_space.title or ""))
         )
         now = resources.utcnow()
         forked = InspirationSpace(
@@ -496,8 +618,8 @@ def detail_page_context(
             .all()
         )
         space = _space_or_error(s, int(space_id)) if space_id is not None else None
-        waiting = service.is_waiting(s, int(space_id)) if space is not None else False
-        publishing = service.is_publishing(space)
+        waiting = _is_waiting(s, int(space_id)) if space is not None else False
+        publishing = _is_publishing(space)
         terminals: list[RemoteTerminalSession] = []
         inspiration_terminal: dict | None = None
         messages: list[InspirationMessage] = []
@@ -515,9 +637,7 @@ def detail_page_context(
                 s, terminal_service.owner_for_inspiration_space(int(space_id))
             )
             if terminals:
-                inspiration_terminal = service.terminal_payload(
-                    int(space_id), terminals[0]
-                )
+                inspiration_terminal = _terminal_payload(int(space_id), terminals[0])
             published_goal = (
                 s.get(Goal, int(space.published_goal_id))
                 if getattr(space, "published_goal_id", None)
@@ -534,9 +654,7 @@ def detail_page_context(
             "inspiration_terminal": inspiration_terminal,
             "inspiration_terminal_count": len(terminals),
             "has_online_companion": bool(has_online_companion),
-            "draft_summary_prompt": service.build_draft_summary_prompt(space)
-            if space
-            else "",
+            "draft_summary_prompt": _build_draft_summary_prompt(space) if space else "",
             "published_goal": published_goal,
             "default_due": due.isoformat(),
         }

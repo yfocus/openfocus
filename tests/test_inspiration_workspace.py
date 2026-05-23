@@ -454,6 +454,85 @@ def test_inspiration_workspace_prepares_draft_generation_from_draft_summary():
         assert active_summaries == []
 
 
+def test_inspiration_workspace_prepares_terminal_start_context():
+    from pathlib import Path
+
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import resources, workspace
+    from openfocus.models import InspirationSpace
+
+    with session_scope() as s:
+        missing_path = InspirationSpace(title="Terminal start", status="open")
+        preserved_path = InspirationSpace(
+            title="Terminal existing path",
+            status="open",
+            workspace_path=str(resources.files_root() / "custom_terminal_workspace"),
+        )
+        closed = InspirationSpace(title="Closed terminal", status="closed")
+        published = InspirationSpace(title="Published terminal", status="published")
+        s.add_all([missing_path, preserved_path, closed, published])
+        s.flush()
+        missing_id = int(missing_path.id)
+        preserved_id = int(preserved_path.id)
+        preserved_root = resources.workspace_path(preserved_path, preserved_id)
+        closed_id = int(closed.id)
+        published_id = int(published.id)
+
+    missing_prepared = workspace.prepare_terminal_start(missing_id)
+
+    assert missing_prepared.space_id == missing_id
+    assert missing_prepared.owner.owner_type == "inspiration_space"
+    assert missing_prepared.owner.owner_id == missing_id
+    assert missing_prepared.root_path == resources.workspace_path(None, missing_id)
+    assert missing_prepared.base_path == (
+        f"/api/inspirations/{missing_id}/terminals/{{terminal_id}}/ttyd/"
+    )
+    assert missing_prepared.audit_kind == "inspiration.terminal_created"
+    assert missing_prepared.audit_metadata == {"space_id": missing_id}
+    with session_scope() as s:
+        space = s.get(InspirationSpace, missing_id)
+        assert space is not None
+        assert space.mode == "terminal"
+        assert Path(space.workspace_path) == missing_prepared.root_path
+
+    preserved_prepared = workspace.prepare_terminal_start(preserved_id)
+
+    assert preserved_prepared.root_path == preserved_root
+    with session_scope() as s:
+        space = s.get(InspirationSpace, preserved_id)
+        assert space is not None
+        assert Path(space.workspace_path) == preserved_root
+        assert space.mode == "terminal"
+
+    for blocked_id in (closed_id, published_id):
+        try:
+            workspace.prepare_terminal_start(blocked_id)
+        except workspace.InspirationWorkspaceValidationError as exc:
+            assert str(exc) == "Only open spaces can start terminals"
+        else:
+            raise AssertionError("non-open spaces should not start terminals")
+
+
+def test_inspiration_workspace_prepares_terminal_prompt_without_runtime():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import workspace
+    from openfocus.models import InspirationSpace
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Prompt bridge", status="open", mode="terminal")
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+
+    prepared = workspace.prepare_terminal_prompt(space_id)
+
+    assert prepared.space_id == space_id
+    assert prepared.owner.owner_type == "inspiration_space"
+    assert prepared.owner.owner_id == space_id
+    assert "resources/draft_summary.md" in prepared.prompt
+    assert "Prompt bridge" in prepared.prompt
+
+
 def test_inspiration_workspace_close_reopen_and_delete_lifecycle():
     from openfocus.db import session_scope
     from openfocus.domains.inspirations import resources, workspace
@@ -1070,3 +1149,44 @@ def test_inspiration_workspace_replace_cleanup_skips_symlink_and_escaped_old_pat
     )
     assert replaced_escaped.item["name"] == "Escaped replaced"
     assert escaped_file.read_bytes() == b"escaped-old"
+
+
+def test_inspiration_workspace_import_does_not_load_runtime_adapters(monkeypatch):
+    import builtins
+    import importlib
+    import sys
+
+    blocked = {
+        "openfocus.domains.terminals.gateway",
+        "openfocus.domains.companion.service",
+    }
+    inspirations_pkg = importlib.import_module("openfocus.domains.inspirations")
+    for module_name in (
+        "openfocus.domains.inspirations.workspace",
+        "openfocus.domains.inspirations.terminal_bridge",
+        "openfocus.domains.inspirations.service",
+    ):
+        sys.modules.pop(module_name, None)
+    for attr in ("workspace", "terminal_bridge", "service"):
+        if hasattr(inspirations_pkg, attr):
+            delattr(inspirations_pkg, attr)
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        requested = {str(name)}
+        requested.update(f"{name}.{item}" for item in (fromlist or ()))
+        if blocked.intersection(requested):
+            blocked_name = sorted(blocked.intersection(requested))[0]
+            raise AssertionError(f"runtime adapter import blocked: {blocked_name}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    workspace_mod = importlib.import_module("openfocus.domains.inspirations.workspace")
+    terminal_bridge_mod = importlib.import_module(
+        "openfocus.domains.inspirations.terminal_bridge"
+    )
+
+    assert workspace_mod.__name__.endswith(".workspace")
+    assert terminal_bridge_mod.__name__.endswith(".terminal_bridge")

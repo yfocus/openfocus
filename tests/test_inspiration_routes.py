@@ -740,6 +740,34 @@ async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeyp
 
 
 @pytest.mark.anyio
+async def test_inspiration_terminal_start_rejects_closed_space(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    import openfocus.app as app_mod
+    from openfocus.db import session_scope
+    from openfocus.models import InspirationSpace
+
+    app = app_mod.app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "Closed terminal", "mode": "terminal"}
+        )
+        assert create_resp.status_code == 200
+        space_id = int(create_resp.json()["item"]["id"])
+        with session_scope() as s:
+            space = s.get(InspirationSpace, space_id)
+            assert space is not None
+            space.status = "closed"
+            space.closed_at = dt.datetime.now(dt.timezone.utc)
+
+        term_resp = await client.post(f"/api/inspirations/{space_id}/terminals/new")
+
+        assert term_resp.status_code == 400
+        assert term_resp.json()["detail"] == "Only open spaces can start terminals"
+
+
+@pytest.mark.anyio
 async def test_inspiration_terminal_inject_maps_companion_runtime_error(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 

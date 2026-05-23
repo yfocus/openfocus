@@ -35,12 +35,6 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     router = APIRouter()
     terminal_ops = terminal_gateway.RemoteTerminalGateway()
 
-    def _space_or_404(s, space_id: int) -> InspirationSpace:
-        try:
-            return deps.inspiration_space_or_404(s, int(space_id))
-        except inspiration_service.InspirationNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e))
-
     def _companion_http_error(
         exc: companion_service.CompanionUseCaseError,
     ) -> HTTPException:
@@ -115,21 +109,24 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     def _load_inspiration_ttyd_terminal(
         space_id: int, terminal_id: str
-    ) -> tuple[InspirationSpace, str]:
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
+    ) -> tuple[inspiration_workspace.TerminalOperationContext, str]:
         try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
             connect_url = terminal_ops.load_ttyd_connect_url(
-                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                owner=terminal_context.owner,
                 terminal_id=terminal_id,
             )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
         except terminal_gateway.TerminalUnavailable:
             raise HTTPException(status_code=404, detail="ttyd terminal not found")
-        return space, connect_url.rstrip("/")
+        return terminal_context, connect_url.rstrip("/")
 
     @router.get("/api/inspirations")
     def inspirations_list_api(limit: int = 50) -> dict:
@@ -556,12 +553,14 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.get("/api/inspirations/{space_id:int}/terminals")
     async def inspiration_terminals_list(space_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
-            deps.inspiration_workspace_path(space, int(space_id))
-            owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
         terms = await terminal_ops.list_live_terminals(
-            owner=owner,
+            owner=terminal_context.owner,
             runtime_resolver=_terminal_conn,
         )
         return {
@@ -588,17 +587,11 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                 payload = raw_payload if isinstance(raw_payload, dict) else {}
         except Exception:
             payload = {}
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
-            if str(space.status or "open") != "open":
-                raise HTTPException(
-                    status_code=400, detail="Only open spaces can start terminals"
-                )
-            workspace = deps.inspiration_workspace_path(space, int(space_id))
-            space.mode = "terminal"
-            space.workspace_path = str(workspace)
-            s.flush()
-            workspace_path = str(workspace)
+        try:
+            start_context = inspiration_workspace.prepare_terminal_start(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        workspace_path = str(start_context.root_path)
         companion_id = (
             payload.get("companion_id") if isinstance(payload, dict) else None
         )
@@ -614,11 +607,11 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
         try:
             result = await terminal_ops.start_terminal(
-                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                owner=start_context.owner,
                 runtime=conn,
                 companion_id=int(comp.id),
                 root_path=workspace_path,
-                base_path=f"/api/inspirations/{int(space_id)}/terminals/{{terminal_id}}/ttyd/",
+                base_path=start_context.base_path,
                 timeout_seconds=10.0,
             )
         except terminal_gateway.TerminalStartError as e:
@@ -626,22 +619,24 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         with session_scope() as s:
             t = terminal_service.get_terminal_for_owner(
                 s,
-                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                owner=start_context.owner,
                 terminal_id=result.terminal_id,
             )
             terminal_payload = terminal_gateway.terminal_payload(
                 int(space_id), t, route_prefix="/api/inspirations"
             )
+        audit_metadata = dict(start_context.audit_metadata)
+        audit_metadata.update({"terminal_id": result.terminal_id, "name": result.name})
         deps.try_audit_memory(
-            kind="inspiration.terminal_created",
+            kind=start_context.audit_kind,
             source="web",
-            summary=f"Created inspiration terminal `{result.name}`.",
-            detail=f"InspirationSpace {int(space_id)} created terminal {result.terminal_id} at {workspace_path}.",
-            metadata={
-                "space_id": int(space_id),
-                "terminal_id": result.terminal_id,
-                "name": result.name,
-            },
+            summary=start_context.audit_summary.format(name=result.name),
+            detail=start_context.audit_detail_template.format(
+                space_id=start_context.space_id,
+                terminal_id=result.terminal_id,
+                root_path=workspace_path,
+            ),
+            metadata=audit_metadata,
         )
         return {"ok": True, "terminal": terminal_payload}
 
@@ -649,9 +644,13 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_inject(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
-        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        owner = terminal_context.owner
         tid = str(terminal_id or "").strip()
         try:
             raw = await terminal_ops.inject_input(
@@ -684,15 +683,18 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_rename(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
         try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
             raw_name = terminal_ops.rename_terminal(
-                owner=terminal_service.owner_for_inspiration_space(int(space_id)),
+                owner=terminal_context.owner,
                 terminal_id=terminal_id,
                 name=str((payload or {}).get("name") or ""),
             )
             tid = str(terminal_id or "").strip()
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
         except terminal_gateway.TerminalValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
@@ -705,9 +707,13 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_mouse_mode(
         space_id: int, terminal_id: str, payload: dict
     ) -> dict:
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
-        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        owner = terminal_context.owner
         enabled = bool((payload or {}).get("enabled"))
         try:
             actual = await terminal_ops.set_mouse_mode(
@@ -735,9 +741,13 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminal_prepare_draft_summary(
         space_id: int, terminal_id: str
     ) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
-            prompt = deps.build_inspiration_draft_summary_prompt(space)
+        try:
+            prompt_context = inspiration_workspace.prepare_terminal_prompt(
+                int(space_id)
+            )
+            prompt = prompt_context.prompt
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
         return await inspiration_terminals_inject(
             int(space_id),
             str(terminal_id),
@@ -746,9 +756,13 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.post("/api/inspirations/{space_id:int}/terminals/{terminal_id}/close")
     async def inspiration_terminals_close(space_id: int, terminal_id: str) -> dict:
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
-        owner = terminal_service.owner_for_inspiration_space(int(space_id))
+        try:
+            terminal_context = inspiration_workspace.prepare_terminal_operation(
+                int(space_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        owner = terminal_context.owner
         try:
             await terminal_ops.close_terminal(
                 owner=owner,
