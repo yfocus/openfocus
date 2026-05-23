@@ -31,7 +31,7 @@ The Inspirations domain owns the ideation and planning workspace lifecycle:
 
 ## External Interface
 
-- `workspace.py` owns Inspiration workspace read models for list/detail/page context, lifecycle state transitions for close/reopen/delete, and resource use cases for create/update/replace/delete/raw/sync.
+- `workspace.py` owns Inspiration workspace read models for list/detail/page context, lifecycle state transitions for close/reopen/delete/fork, publish preparation, and resource use cases for create/update/replace/delete/raw/sync.
 - Web routes call the workspace interface and translate domain errors into HTTP responses; routes must not rebuild list/detail counts, latest draft aggregation, resource state-machine checks, ORM mutations, raw file existence checks, or resource file cleanup/sync ordering.
 - Lifecycle results may instruct the web adapter to perform asynchronous terminal release, but the state transition and related row/file cleanup stay in the domain.
 - Resource upload bytes may be read by the Web adapter, but domain resource use cases receive only stored file metadata and never import FastAPI upload/response types.

@@ -471,6 +471,73 @@ async def test_inspiration_draft_generation_error_compatibility(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_inspiration_publish_error_mapping_compatibility(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.models import InspirationDraft, InspirationMessage, InspirationSpace
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "Publish error mapping"}
+        )
+        assert create_resp.status_code == 200
+        space_id = int(create_resp.json()["item"]["id"])
+
+        invalid_payload = await client.post(
+            f"/api/inspirations/{space_id}/publish",
+            json=[],
+        )
+        assert invalid_payload.status_code == 400
+        assert invalid_payload.json()["detail"] == "invalid payload"
+
+        missing_space = await client.post(
+            "/api/inspirations/999999/publish",
+            json={"draft_id": 1},
+        )
+        assert missing_space.status_code == 404
+        assert missing_space.json()["detail"] == "Inspiration space not found"
+
+        no_draft = await client.post(
+            f"/api/inspirations/{space_id}/publish",
+            json={},
+        )
+        assert no_draft.status_code == 400
+        assert no_draft.json()["detail"] == "No draft is available for publishing"
+
+        with session_scope() as s:
+            waiting_space = InspirationSpace(title="Pending publish", status="open")
+            s.add(waiting_space)
+            s.flush()
+            waiting_id = int(waiting_space.id)
+            s.add(
+                InspirationMessage(
+                    space_id=waiting_id,
+                    role="assistant",
+                    kind="pending",
+                    content="thinking",
+                )
+            )
+            s.add(
+                InspirationDraft(
+                    space_id=waiting_id,
+                    version=1,
+                    goal_title="Pending goal",
+                    tasks=[{"title": "Pending task"}],
+                )
+            )
+
+        pending_conflict = await client.post(
+            f"/api/inspirations/{waiting_id}/publish",
+            json={},
+        )
+        assert pending_conflict.status_code == 409
+        assert pending_conflict.json()["detail"] == "Agent is still responding"
+
+
+@pytest.mark.anyio
 async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 

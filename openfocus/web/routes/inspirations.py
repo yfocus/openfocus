@@ -24,7 +24,6 @@ from fastapi.templating import Jinja2Templates
 from ...db import session_scope
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.companion import service as companion_service
-from ...domains.inspirations import publishing as inspiration_publishing
 from ...domains.inspirations import service as inspiration_service
 from ...domains.inspirations import workspace as inspiration_workspace
 from ...domains.memory import service as memory_service
@@ -71,6 +70,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             ),
         ):
             return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, inspiration_workspace.InspirationWorkspaceConflict):
+            return HTTPException(status_code=409, detail=str(exc))
         if isinstance(exc, inspiration_workspace.InspirationWorkspaceValidationError):
             return HTTPException(status_code=400, detail=str(exc))
         return HTTPException(status_code=500, detail=str(exc))
@@ -93,18 +94,6 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(e))
         except inspiration_service.InspirationValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
-
-    def _prepare_publish(
-        space_id: int, draft_id: int | None, due_date: dt.date
-    ) -> dict:
-        try:
-            return deps.inspiration_prepare_publish(int(space_id), draft_id, due_date)
-        except inspiration_publishing.PublishConflict as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        except inspiration_publishing.PublishUnavailable as e:
-            detail = str(e)
-            status_code = 404 if detail == "Inspiration space not found" else 400
-            raise HTTPException(status_code=status_code, detail=detail)
 
     async def _store_uploaded_resource_file(
         *, space_id: int, seq_id: int, file: UploadFile
@@ -472,33 +461,42 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise _workspace_http_error(exc) from exc
 
     @router.post("/api/inspirations/{space_id:int}/publish")
-    async def inspiration_publish_api(space_id: int, payload: dict) -> dict:
+    async def inspiration_publish_api(space_id: int, payload: Any = Body(...)) -> dict:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="invalid payload")
         due_date_raw = str(payload.get("due_date") or "").strip()
-        if due_date_raw:
-            due_date = dt.date.fromisoformat(due_date_raw)
-        else:
-            due_date = dt.date.today() + dt.timedelta(days=7)
-        draft_id = payload.get("draft_id")
-        publish_info = _prepare_publish(
-            int(space_id),
-            int(draft_id) if draft_id is not None else None,
-            due_date,
-        )
+        try:
+            due_date = (
+                dt.date.fromisoformat(due_date_raw)
+                if due_date_raw
+                else dt.date.today() + dt.timedelta(days=7)
+            )
+            draft_id_raw = payload.get("draft_id")
+            draft_id = int(draft_id_raw) if draft_id_raw is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid payload")
+
+        try:
+            publish_info = inspiration_workspace.prepare_publish(
+                int(space_id),
+                draft_id,
+                due_date,
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
         asyncio.get_running_loop().create_task(
             deps.kickoff_inspiration_publish(
                 space_id=int(space_id),
-                draft_id=int(publish_info["draft_id"]),
-                due_date_iso=str(publish_info["due_date"]),
-                previous_status=str(publish_info["previous_status"]),
+                draft_id=int(publish_info.draft_id),
+                due_date_iso=str(publish_info.due_date),
+                previous_status=str(publish_info.previous_status),
             )
         )
         return {
             "ok": True,
             "queued": True,
             "space_id": int(space_id),
-            "draft_id": int(publish_info["draft_id"]),
+            "draft_id": int(publish_info.draft_id),
             "status": "publishing",
         }
 
@@ -516,72 +514,17 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             except Exception:
                 continue
 
-        with session_scope() as s:
-            source_space = _space_or_404(s, space_id)
-            target_title = (
-                title[:512]
-                if title
-                else deps.inspiration_default_followup_title(source_space.title)
+        try:
+            result = inspiration_workspace.fork_space(
+                int(space_id),
+                title=title,
+                include_all_resources=include_all_resources,
+                resource_ids=selected_resource_ids,
             )
-            now = deps.utcnow()
-            forked = InspirationSpace(
-                title=target_title,
-                status="open",
-                mode=str(getattr(source_space, "mode", "") or "built_in"),
-                forked_from_space_id=int(source_space.id),
-                last_activity_at=now,
-            )
-            s.add(forked)
-            s.flush()
-            new_space_id = int(forked.id)
-            forked.workspace_path = str(
-                deps.inspiration_workspace_path(forked, new_space_id)
-            )
-
-            resources = deps.inspiration_non_deleted_resources(s, int(space_id))
-            seq_id = 1
-            for resource in resources:
-                if str(resource.type or "") == "summary":
-                    deps.inspiration_clone_resource(
-                        s=s,
-                        source=resource,
-                        target_space_id=new_space_id,
-                        seq_id=seq_id,
-                    )
-                    seq_id += 1
-                    continue
-                if include_all_resources or int(resource.id) in selected_resource_ids:
-                    deps.inspiration_clone_resource(
-                        s=s,
-                        source=resource,
-                        target_space_id=new_space_id,
-                        seq_id=seq_id,
-                    )
-                    seq_id += 1
-
-            s.add(
-                InspirationMessage(
-                    space_id=new_space_id,
-                    role="assistant",
-                    kind="system",
-                    content=(
-                        f"Forked from Inspiration space #{int(source_space.id)}. "
-                        "The published summary is preserved here so you can continue exploring a follow-up direction."
-                    ),
-                )
-            )
-            payload_out = deps.inspiration_space_payload(forked)
-        deps.try_audit_memory(
-            kind="inspiration.forked",
-            source="web",
-            summary=f"Forked inspiration space {int(space_id)} into {int(payload_out['id'])}.",
-            detail=payload_out["title"],
-            metadata={
-                "space_id": int(space_id),
-                "forked_space_id": int(payload_out["id"]),
-            },
-        )
-        return {"ok": True, "item": payload_out}
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        _audit_workspace_result(result)
+        return {"ok": True, "item": result.item}
 
     def _inspiration_detail_page_context(space_id: int | None) -> dict:
         return inspiration_workspace.detail_page_context(

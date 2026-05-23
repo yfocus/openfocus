@@ -21,7 +21,7 @@ from ...models import (
     InspirationSpace,
     RemoteTerminalSession,
 )
-from . import presenters, resources, service
+from . import presenters, publishing, resources, service
 
 
 class InspirationWorkspaceError(Exception):
@@ -34,6 +34,10 @@ class InspirationWorkspaceNotFound(InspirationWorkspaceError):
 
 class InspirationWorkspaceValidationError(InspirationWorkspaceError):
     """Raised when a request is invalid for the workspace state."""
+
+
+class InspirationWorkspaceConflict(InspirationWorkspaceError):
+    """Raised when a valid workspace request conflicts with in-flight work."""
 
 
 class InspirationWorkspaceResourceNotFound(InspirationWorkspaceError):
@@ -113,6 +117,14 @@ class ResourceSyncResult:
 class DraftGenerationRequest:
     space_id: int
     prompt: str
+
+
+@dataclass(frozen=True)
+class WorkspacePublishPrepareResult:
+    space_id: int
+    draft_id: int
+    previous_status: str
+    due_date: str
 
 
 def _space_or_error(s, space_id: int) -> InspirationSpace:
@@ -337,6 +349,112 @@ def prepare_draft_from_draft_summary(space_id: int) -> DraftGenerationRequest:
         if item is None:
             raise InspirationWorkspaceValidationError("Summary is missing")
     return DraftGenerationRequest(space_id=int(space_id), prompt="/plan")
+
+
+def prepare_publish(
+    space_id: int, draft_id: int | None, due_date: dt.date
+) -> WorkspacePublishPrepareResult:
+    try:
+        prepared = publishing.prepare_publish(int(space_id), draft_id, due_date)
+    except publishing.PublishConflict as exc:
+        raise InspirationWorkspaceConflict(str(exc)) from exc
+    except publishing.PublishUnavailable as exc:
+        detail = str(exc)
+        if detail == "Inspiration space not found":
+            raise InspirationWorkspaceNotFound(detail) from exc
+        raise InspirationWorkspaceValidationError(detail) from exc
+
+    return WorkspacePublishPrepareResult(
+        space_id=int(space_id),
+        draft_id=int(prepared["draft_id"]),
+        previous_status=str(prepared["previous_status"]),
+        due_date=str(prepared["due_date"]),
+    )
+
+
+def fork_space(
+    space_id: int,
+    *,
+    title: str = "",
+    include_all_resources: bool = False,
+    resource_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+) -> WorkspaceLifecycleResult:
+    selected_resource_ids: set[int] = set()
+    for item in resource_ids or set():
+        try:
+            selected_resource_ids.add(int(item))
+        except Exception:
+            continue
+
+    with session_scope() as s:
+        source_space = _space_or_error(s, int(space_id))
+        raw_title = str(title or "").strip()
+        target_title = (
+            raw_title[:512]
+            if raw_title
+            else service.default_followup_title(str(source_space.title or ""))
+        )
+        now = resources.utcnow()
+        forked = InspirationSpace(
+            title=target_title,
+            status="open",
+            mode=str(getattr(source_space, "mode", "") or "built_in"),
+            forked_from_space_id=int(source_space.id),
+            last_activity_at=now,
+        )
+        s.add(forked)
+        s.flush()
+        new_space_id = int(forked.id)
+        forked.workspace_path = str(resources.workspace_path(forked, new_space_id))
+
+        source_resources = resources.non_deleted_resources(s, int(space_id))
+        seq_id = 1
+        for resource in source_resources:
+            if str(resource.type or "") == "summary":
+                resources.clone_resource(
+                    s=s,
+                    source=resource,
+                    target_space_id=new_space_id,
+                    seq_id=seq_id,
+                )
+                seq_id += 1
+                continue
+            if include_all_resources or int(resource.id) in selected_resource_ids:
+                resources.clone_resource(
+                    s=s,
+                    source=resource,
+                    target_space_id=new_space_id,
+                    seq_id=seq_id,
+                )
+                seq_id += 1
+
+        s.add(
+            InspirationMessage(
+                space_id=new_space_id,
+                role="assistant",
+                kind="system",
+                content=(
+                    f"Forked from Inspiration space #{int(source_space.id)}. "
+                    "The published summary is preserved here so you can continue exploring a follow-up direction."
+                ),
+            )
+        )
+        item = presenters.space_payload(forked)
+
+    return WorkspaceLifecycleResult(
+        space_id=int(new_space_id),
+        item=item,
+        release_terminals=False,
+        audit_kind="inspiration.forked",
+        audit_summary=(
+            f"Forked inspiration space {int(space_id)} into {int(item['id'])}."
+        ),
+        audit_detail=str(item.get("title") or ""),
+        audit_metadata={
+            "space_id": int(space_id),
+            "forked_space_id": int(item["id"]),
+        },
+    )
 
 
 def prepare_draft_from_resource(

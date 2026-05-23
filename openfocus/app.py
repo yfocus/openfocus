@@ -294,12 +294,9 @@ app.include_router(
             inspiration_sync_resources_dir=inspiration_resources.sync_resources_dir,
             inspiration_sync_draft_summary_file=inspiration_resources.sync_draft_summary_file,
             inspiration_resource_reference=inspiration_resources.resource_reference,
-            inspiration_prepare_publish=inspiration_service.prepare_publish,
             kickoff_inspiration_publish=lambda **kwargs: _kickoff_inspiration_publish(
                 **kwargs
             ),
-            inspiration_default_followup_title=inspiration_service.default_followup_title,
-            inspiration_clone_resource=inspiration_resources.clone_resource,
             has_online_companion=lambda: _has_online_companion(),
             inspiration_terminal_payload=inspiration_service.terminal_payload,
             build_inspiration_draft_summary_prompt=inspiration_service.build_draft_summary_prompt,

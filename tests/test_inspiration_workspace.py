@@ -130,6 +130,210 @@ def test_inspiration_workspace_lists_drafts_by_latest_version_and_id():
     assert listed["items"][0]["version"] == 2
 
 
+def test_inspiration_workspace_prepare_publish_marks_publishing_without_creating_goal_rows():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import workspace
+    from openfocus.models import Goal, InspirationDraft, InspirationSpace, Task
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Publish prep", status="open")
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        draft = InspirationDraft(
+            space_id=space_id,
+            version=1,
+            goal_title="Prepared goal",
+            goal_description="Goal body",
+            tasks=[{"title": "Prepared task", "description": "Task body"}],
+        )
+        s.add(draft)
+        s.flush()
+        draft_id = int(draft.id)
+
+    due_date = dt.date(2026, 6, 1)
+    result = workspace.prepare_publish(space_id, draft_id, due_date)
+
+    assert result.space_id == space_id
+    assert result.draft_id == draft_id
+    assert result.previous_status == "open"
+    assert result.due_date == due_date.isoformat()
+    with session_scope() as s:
+        space = s.get(InspirationSpace, space_id)
+        assert space is not None
+        assert space.status == "publishing"
+        assert s.query(Goal).count() == 0
+        assert s.query(Task).count() == 0
+
+
+def test_inspiration_workspace_prepare_publish_maps_conflict_and_unavailable_errors():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import workspace
+    from openfocus.models import InspirationDraft, InspirationMessage, InspirationSpace
+
+    with session_scope() as s:
+        waiting_space = InspirationSpace(title="Waiting", status="open")
+        no_draft_space = InspirationSpace(title="No draft", status="open")
+        empty_draft_space = InspirationSpace(title="Empty draft", status="open")
+        s.add_all([waiting_space, no_draft_space, empty_draft_space])
+        s.flush()
+        waiting_id = int(waiting_space.id)
+        no_draft_id = int(no_draft_space.id)
+        empty_draft_id = int(empty_draft_space.id)
+        s.add(
+            InspirationMessage(
+                space_id=waiting_id,
+                role="assistant",
+                kind="pending",
+                content="thinking",
+            )
+        )
+        s.add_all(
+            [
+                InspirationDraft(
+                    space_id=waiting_id,
+                    version=1,
+                    goal_title="Waiting draft",
+                    tasks=[{"title": "Task"}],
+                ),
+                InspirationDraft(
+                    space_id=empty_draft_id,
+                    version=1,
+                    goal_title="Empty draft",
+                    tasks=[],
+                ),
+            ]
+        )
+
+    due_date = dt.date(2026, 6, 1)
+    try:
+        workspace.prepare_publish(waiting_id, None, due_date)
+    except workspace.InspirationWorkspaceConflict as exc:
+        assert str(exc) == "Agent is still responding"
+    else:
+        raise AssertionError("pending message should block publish with conflict")
+
+    for sid, detail in (
+        (no_draft_id, "No draft is available for publishing"),
+        (empty_draft_id, "The draft does not contain publishable tasks"),
+    ):
+        try:
+            workspace.prepare_publish(sid, None, due_date)
+        except workspace.InspirationWorkspaceValidationError as exc:
+            assert str(exc) == detail
+        else:
+            raise AssertionError(f"space {sid} should not be publishable")
+
+    try:
+        workspace.prepare_publish(999999, None, due_date)
+    except workspace.InspirationWorkspaceNotFound as exc:
+        assert str(exc) == "Inspiration space not found"
+    else:
+        raise AssertionError("missing space should map to not found")
+
+
+def test_inspiration_workspace_fork_space_clones_summary_and_selected_or_all_resources():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import resources, workspace
+    from openfocus.models import (
+        InspirationMessage,
+        InspirationResource,
+        InspirationSpace,
+    )
+
+    with session_scope() as s:
+        source = InspirationSpace(title="Published idea", status="published")
+        s.add(source)
+        s.flush()
+        source_id = int(source.id)
+        source.workspace_path = str(resources.workspace_path(source, source_id))
+        summary = InspirationResource(
+            space_id=source_id,
+            resource_seq_id=1,
+            type="summary",
+            name="Published Summary",
+            text_content="Published summary body",
+            source="system",
+            is_system_generated=True,
+        )
+        selected = InspirationResource(
+            space_id=source_id,
+            resource_seq_id=2,
+            type="text",
+            name="Selected note",
+            text_content="selected body",
+        )
+        omitted = InspirationResource(
+            space_id=source_id,
+            resource_seq_id=3,
+            type="url",
+            name="Omitted link",
+            url_content="https://example.com/omitted",
+        )
+        s.add_all([summary, selected, omitted])
+        s.flush()
+        resources.write_resource_file(summary, source)
+        resources.write_resource_file(selected, source)
+        resources.write_resource_file(omitted, source)
+        selected_id = int(selected.id)
+
+    selected_fork = workspace.fork_space(
+        source_id,
+        title="",
+        include_all_resources=False,
+        resource_ids={selected_id},
+    )
+
+    assert selected_fork.item["title"] == "Published idea / Follow-up"
+    assert selected_fork.item["forked_from_space_id"] == source_id
+    assert selected_fork.audit_kind == "inspiration.forked"
+    assert selected_fork.audit_metadata == {
+        "space_id": source_id,
+        "forked_space_id": int(selected_fork.item["id"]),
+    }
+
+    with session_scope() as s:
+        forked_id = int(selected_fork.item["id"])
+        forked = s.get(InspirationSpace, forked_id)
+        assert forked is not None
+        assert forked.status == "open"
+        assert forked.forked_from_space_id == source_id
+        cloned = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.space_id == forked_id)
+            .order_by(InspirationResource.resource_seq_id.asc())
+            .all()
+        )
+        assert {(res.type, res.name) for res in cloned} == {
+            ("summary", "Published Summary"),
+            ("text", "Selected note"),
+        }
+        assert sorted(res.resource_seq_id for res in cloned) == [1, 2]
+        assert all(str(res.file_path or "").strip() for res in cloned)
+        messages = s.query(InspirationMessage).filter_by(space_id=forked_id).all()
+        assert len(messages) == 1
+        assert messages[0].kind == "system"
+        assert f"Forked from Inspiration space #{source_id}" in messages[0].content
+
+    all_fork = workspace.fork_space(
+        source_id,
+        title="Custom fork",
+        include_all_resources=True,
+        resource_ids=set(),
+    )
+
+    with session_scope() as s:
+        all_fork_id = int(all_fork.item["id"])
+        cloned_names = {
+            res.name
+            for res in s.query(InspirationResource)
+            .filter(InspirationResource.space_id == all_fork_id)
+            .all()
+        }
+        assert cloned_names == {"Published Summary", "Selected note", "Omitted link"}
+        assert all_fork.item["title"] == "Custom fork"
+
+
 def test_inspiration_workspace_prepares_draft_generation_from_resource():
     from openfocus.db import session_scope
     from openfocus.domains.inspirations import resources, workspace
