@@ -27,3 +27,5 @@ openfocus/static/dist/
 
 .coverage
 htmlcov/
+
+.tmp/

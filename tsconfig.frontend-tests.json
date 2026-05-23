@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".tmp/frontend-tests",
+    "rootDir": "frontend",
+    "isolatedModules": false
+  },
+  "include": ["frontend/src/lib/**/*.ts", "frontend/tests/**/*.ts"]
+}
