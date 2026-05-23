@@ -29,6 +29,13 @@ import {
   positiveInt,
   type TerminalLinkOpenMessage,
 } from '../lib/fileReferences';
+import {
+  AGENT_SPACE_SETTINGS_EVENT,
+  AGENT_SPACE_SETTINGS_KEY,
+  loadAgentSpaceSettings,
+  normalizeAgentSpaceSettings,
+  type AgentSpaceSettings,
+} from '../lib/agentSpaceSettings';
 import type { FileEntry } from '../types/openfocus';
 
 type AgentSpaceConfig = {
@@ -52,15 +59,6 @@ type TerminalApi = {
     options?: { bracketedPaste?: boolean; submit?: boolean; focus?: boolean },
   ) => Promise<boolean>;
   applyAgentSpaceSettings?: (settings?: AgentSpaceSettings) => unknown;
-};
-
-type AgentSpaceSettings = {
-  filesFontSize: number;
-  previewFontSize: number;
-  terminalFontSize: number;
-  showFiles: boolean;
-  showPreview: boolean;
-  showTerminal: boolean;
 };
 
 type AgentSpacePane = 'files' | 'preview' | 'terminal';
@@ -120,59 +118,6 @@ function clamp(value: number, minValue: number, maxValue: number): number {
   if (value < minValue) return minValue;
   if (value > maxValue) return maxValue;
   return value;
-}
-
-const AGENT_SPACE_SETTINGS_KEY = 'openfocus.agent_space.settings.v1';
-const AGENT_SPACE_SETTINGS_EVENT = 'openfocus:agent-space-settings-changed';
-const DEFAULT_AGENT_SPACE_SETTINGS: AgentSpaceSettings = {
-  filesFontSize: 13,
-  previewFontSize: 12,
-  terminalFontSize: 13,
-  showFiles: true,
-  showPreview: true,
-  showTerminal: true,
-};
-
-function clampSetting(value: unknown, minValue: number, maxValue: number, fallback: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.round(clamp(n, minValue, maxValue));
-}
-
-function normalizeAgentSpaceSettings(raw: Partial<AgentSpaceSettings> | null | undefined): AgentSpaceSettings {
-  const src = raw && typeof raw === 'object' ? raw : {};
-  return {
-    filesFontSize: clampSetting(src.filesFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.filesFontSize),
-    previewFontSize: clampSetting(src.previewFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.previewFontSize),
-    terminalFontSize: clampSetting(src.terminalFontSize, 10, 24, DEFAULT_AGENT_SPACE_SETTINGS.terminalFontSize),
-    showFiles: src.showFiles !== false,
-    showPreview: src.showPreview !== false,
-    showTerminal: src.showTerminal !== false,
-  };
-}
-
-function loadAgentSpaceSettings(): AgentSpaceSettings {
-  try {
-    const raw = localStorage.getItem(AGENT_SPACE_SETTINGS_KEY);
-    return normalizeAgentSpaceSettings(raw ? JSON.parse(raw) as Partial<AgentSpaceSettings> : null);
-  } catch (_) {
-    return normalizeAgentSpaceSettings(null);
-  }
-}
-
-function saveAgentSpaceSettings(settings: Partial<AgentSpaceSettings>, source = 'agent-space'): AgentSpaceSettings {
-  const next = normalizeAgentSpaceSettings(settings);
-  try {
-    localStorage.setItem(AGENT_SPACE_SETTINGS_KEY, JSON.stringify(next));
-  } catch (_) {
-    // ignore storage failures
-  }
-  try {
-    window.dispatchEvent(new CustomEvent(AGENT_SPACE_SETTINGS_EVENT, { detail: { settings: next, source } }));
-  } catch (_) {
-    // ignore event failures
-  }
-  return next;
 }
 
 function paneGridColumn(pane: AgentSpacePane, visiblePanes: AgentSpacePane[], index: number): string {

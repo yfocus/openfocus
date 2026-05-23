@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
-    "test:frontend": "tsc -p tsconfig.json && tsc -p tsconfig.frontend-tests.json && node .tmp/frontend-tests/tests/fileReferences.test.js"
+    "test:frontend": "tsc -p tsconfig.json && tsc -p tsconfig.frontend-tests.json && node .tmp/frontend-tests/tests/run-tests.js"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",
