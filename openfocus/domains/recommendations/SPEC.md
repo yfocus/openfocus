@@ -9,6 +9,7 @@ The Recommendations domain owns Next Move generation and user feedback persisten
 - persist recommendation runs
 - expose the latest recommendation payload shape
 - persist feedback and feedback-learning memory notes
+- build pure JSON recommendation context snapshots from goals, tasks, memory, events, and feedback
 
 ## Boundaries
 
