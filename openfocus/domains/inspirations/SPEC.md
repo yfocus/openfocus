@@ -17,6 +17,7 @@ The Inspirations domain owns the ideation and planning workspace lifecycle:
 - External terminal agents are untrusted collaborators. They may create files in the inspiration workspace, but cannot directly create Goals/Tasks or mark an inspiration as published.
 - Draft generation and publish confirmation remain OpenFocus-controlled workflows.
 - Publishing must call the Goals domain service so Goal/Task defaults, events, and audit behavior stay consistent.
+- Background publish failures must be observed in the domain: escaped publish/release exceptions restore a user-visible terminal state and write an error message plus audit entry.
 - Domain code must not depend on FastAPI request/response objects or Jinja templates.
 
 ## Invariants

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import logging
 import os
@@ -166,16 +165,13 @@ def _inspiration_publish_sync(
 
 
 async def _kickoff_inspiration_publish(**kwargs) -> None:
-    space_id = int(kwargs["space_id"])
-    await asyncio.to_thread(
-        _inspiration_publish_sync,
-        space_id=space_id,
+    await inspiration_service.kickoff_publish(
+        space_id=int(kwargs["space_id"]),
         draft_id=int(kwargs["draft_id"]),
         due_date_iso=str(kwargs["due_date_iso"]),
         previous_status=str(kwargs.get("previous_status") or "open"),
-    )
-    await inspiration_service.complete_publish_release(
-        space_id=space_id, release_terminals=_inspiration_release_terminals
+        release_terminals=_inspiration_release_terminals,
+        publish_func=_inspiration_publish_sync,
     )
 
 

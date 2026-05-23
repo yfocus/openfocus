@@ -486,6 +486,66 @@ def publish_sync(
     )
 
 
+def record_publish_background_failure(
+    *, space_id: int, draft_id: int, previous_status: str, error: Exception
+) -> None:
+    error_text = str(error)
+    with session_scope() as s:
+        space = s.get(InspirationSpace, int(space_id))
+        if space is not None:
+            status = str(space.status or "")
+            if status == "publishing":
+                space.status = str(previous_status or "open")
+            elif status == "publishing_releasing":
+                space.status = "published"
+            space.last_activity_at = memory_service.utcnow()
+            s.add(
+                InspirationMessage(
+                    space_id=int(space_id),
+                    role="assistant",
+                    kind="error",
+                    content=f"Failed to publish the draft: {error_text}",
+                    payload={"error": error_text, "draft_id": int(draft_id)},
+                )
+            )
+    memory_service.try_audit_memory(
+        kind="inspiration.publish_error",
+        source="web",
+        summary=f"Failed publishing inspiration space {int(space_id)}.",
+        detail=error_text,
+        metadata={"space_id": int(space_id), "draft_id": int(draft_id)},
+    )
+
+
+def record_publish_release_failure(*, space_id: int, error: Exception) -> None:
+    error_text = str(error)
+    with session_scope() as s:
+        space = s.get(InspirationSpace, int(space_id))
+        if space is not None:
+            if str(space.status or "") == "publishing_releasing":
+                space.status = "published"
+            space.last_activity_at = memory_service.utcnow()
+            s.add(
+                InspirationMessage(
+                    space_id=int(space_id),
+                    role="assistant",
+                    kind="error",
+                    content=(
+                        "Published the draft, but failed to release inspiration "
+                        f"terminals: {error_text}"
+                    ),
+                    payload={"error": error_text, "phase": "release_terminals"},
+                )
+            )
+    memory_service.try_audit_memory(
+        kind="inspiration.publish_release_error",
+        source="web",
+        summary=f"Failed releasing terminals for inspiration space {int(space_id)}.",
+        detail=error_text,
+        metadata={"space_id": int(space_id)},
+    )
+
+
 async def kickoff_publish(
     *,
     space_id: int,
@@ -493,14 +553,26 @@ async def kickoff_publish(
     due_date_iso: str,
     previous_status: str,
     release_terminals: Callable[[int], Awaitable[int]],
+    publish_func: Callable[..., None] | None = None,
 ) -> None:
-    await asyncio.to_thread(
-        publish_sync,
-        space_id=int(space_id),
-        draft_id=int(draft_id),
-        due_date_iso=str(due_date_iso),
-        previous_status=str(previous_status or "open"),
-    )
+    publish_worker = publish_func or publish_sync
+    try:
+        await asyncio.to_thread(
+            publish_worker,
+            space_id=int(space_id),
+            draft_id=int(draft_id),
+            due_date_iso=str(due_date_iso),
+            previous_status=str(previous_status or "open"),
+        )
+    except Exception as exc:
+        await asyncio.to_thread(
+            record_publish_background_failure,
+            space_id=int(space_id),
+            draft_id=int(draft_id),
+            previous_status=str(previous_status or "open"),
+            error=exc,
+        )
+        return
     await complete_publish_release(
         space_id=int(space_id), release_terminals=release_terminals
     )
@@ -518,7 +590,13 @@ async def complete_publish_release(
             "publishing_releasing",
         }
     if should_release:
-        await release_terminals(int(space_id))
+        try:
+            await release_terminals(int(space_id))
+        except Exception as exc:
+            await asyncio.to_thread(
+                record_publish_release_failure, space_id=int(space_id), error=exc
+            )
+            return
         with session_scope() as s:
             space = s.get(InspirationSpace, int(space_id))
             if space is not None and str(space.status or "") == "publishing_releasing":
