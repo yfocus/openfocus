@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from ...db import session_scope
+from ...domains.goals.classification import (
+    infer_context_key,
+    infer_estimated_minutes,
+    infer_task_type,
+)
 from ...domains.memory import service as memory_service
 from ...models import AgentSpace, Event, Goal, NextMoveFeedback, Task
 from ..core.loop import AgentLoopConfig, parse_json_strict, run_tool_loop
@@ -83,30 +88,6 @@ class AttentionSchedulerAgent:
             "admin": "Admin",
         }
         return labels.get(str(task_type or "").strip().lower(), "Execution")
-
-    def _infer_task_type(self, title: str, content: str) -> str:
-        text = f"{title}\n{content}".lower()
-        if any(k in text for k in ["review", "pr", "diff", "code review", "审查"]):
-            return "review"
-        if any(k in text for k in ["email", "sync", "meeting", "沟通", "回复"]):
-            return "communication"
-        if any(k in text for k in ["整理", "报销", "admin", "配置", "清理"]):
-            return "admin"
-        if any(k in text for k in ["design", "implement", "refactor", "实现", "重构"]):
-            return "deep_work"
-        return "execution"
-
-    def _infer_estimated_minutes(self, task_type: str, title: str, content: str) -> int:
-        text = f"{title}\n{content}".lower()
-        if any(k in text for k in ["quick", "small", "minor", "简单", "快速"]):
-            return 25
-        if task_type == "deep_work":
-            return 90
-        if task_type in {"communication", "admin"}:
-            return 30
-        if task_type == "review":
-            return 45
-        return 60
 
     def _iso(self, value: object) -> str | None:
         if value is None:
@@ -331,13 +312,22 @@ class AttentionSchedulerAgent:
                 recent_not_for_now_task_public_ids.append(pid)
         tasks_by_goal: dict[int, list[dict[str, Any]]] = {}
         for t in open_tasks:
+            space = spaces_by_task.get(t.public_id)
+            root_path = getattr(space, "root_path", "") if space is not None else ""
             task_type = str(
                 getattr(t, "task_type", "") or ""
-            ).strip().lower() or self._infer_task_type(t.title, t.content)
+            ).strip().lower() or infer_task_type(t.title, t.content)
             estimated_minutes = int(
                 getattr(t, "estimated_minutes", 0) or 0
-            ) or self._infer_estimated_minutes(task_type, t.title, t.content)
-            space = spaces_by_task.get(t.public_id)
+            ) or infer_estimated_minutes(task_type, t.title, t.content)
+            context_key = str(getattr(t, "context_key", "") or "").strip()
+            if not context_key:
+                context_key = infer_context_key(
+                    t.title,
+                    t.content,
+                    goal_id=int(t.goal_id),
+                    root_path=root_path,
+                )
             tasks_by_goal.setdefault(int(t.goal_id), []).append(
                 {
                     "id": int(t.id),
@@ -348,10 +338,8 @@ class AttentionSchedulerAgent:
                     "task_type": task_type,
                     "task_type_label": self._task_type_label(task_type),
                     "estimated_minutes": estimated_minutes,
-                    "context_key": str(getattr(t, "context_key", "") or ""),
-                    "agent_space_root_path": getattr(space, "root_path", "")
-                    if space is not None
-                    else "",
+                    "context_key": context_key,
+                    "agent_space_root_path": root_path,
                     "created_at": self._iso(t.created_at),
                 }
             )

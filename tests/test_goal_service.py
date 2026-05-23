@@ -75,6 +75,8 @@ def test_goal_service_create_update_and_task_lifecycle(monkeypatch, tmp_path):
         assert task.status == "todo"
         assert task.completed_at is None
         assert task.task_type == "communication"
+        assert task.estimated_minutes == 20
+        assert task.context_key.startswith(f"goal:{goal_id}:")
 
         done_event = s.query(Event).filter(Event.kind == "task.confirmed_done").one()
         assert done_event.task_id == task_public_id
