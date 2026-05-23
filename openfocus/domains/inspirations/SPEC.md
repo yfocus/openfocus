@@ -27,3 +27,10 @@ The Inspirations domain owns the ideation and planning workspace lifecycle:
 - `Published Summary` is generated after successful publish from the final confirmed draft and selected tasks.
 - No Goal/Task rows are written before the user confirms `Publish`.
 - Published inspiration spaces are read-only and cannot be reopened.
+
+
+## External Interface
+
+- `workspace.py` owns Inspiration workspace read models for list/detail/page context and lifecycle state transitions for close, reopen, and delete.
+- Web routes call the workspace interface and translate domain errors into HTTP responses; routes must not rebuild list/detail counts, latest draft aggregation, or close/reopen/delete state-machine mutations.
+- Lifecycle results may instruct the web adapter to perform asynchronous terminal release, but the state transition and related row/file cleanup stay in the domain.

@@ -6,7 +6,6 @@ import base64
 import contextlib
 import datetime as dt
 import json
-import shutil
 from pathlib import Path
 
 from fastapi import (
@@ -28,16 +27,14 @@ from ...domains.companion import service as companion_service
 from ...domains.inspirations import publishing as inspiration_publishing
 from ...domains.inspirations import resources as inspiration_resources
 from ...domains.inspirations import service as inspiration_service
+from ...domains.inspirations import workspace as inspiration_workspace
 from ...domains.memory import service as memory_service
 from ...domains.terminals import gateway as terminal_gateway
 from ...models import (
-    Goal,
     InspirationDraft,
     InspirationMessage,
-    InspirationPublishRecord,
     InspirationResource,
     InspirationSpace,
-    RemoteTerminalSession,
 )
 
 
@@ -68,6 +65,24 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         if isinstance(exc, companion_service.CompanionRuntimeError):
             return HTTPException(status_code=502, detail=exc.detail)
         return HTTPException(status_code=500, detail=exc.detail)
+
+    def _workspace_http_error(
+        exc: inspiration_workspace.InspirationWorkspaceError,
+    ) -> HTTPException:
+        if isinstance(exc, inspiration_workspace.InspirationWorkspaceNotFound):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, inspiration_workspace.InspirationWorkspaceValidationError):
+            return HTTPException(status_code=400, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    def _audit_workspace_result(result) -> None:
+        deps.try_audit_memory(
+            kind=result.audit_kind,
+            source="web",
+            summary=result.audit_summary,
+            detail=result.audit_detail,
+            metadata=result.audit_metadata,
+        )
 
     async def _enqueue_turn(space_id: int, content: str) -> dict:
         try:
@@ -137,70 +152,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.get("/api/inspirations")
     def inspirations_list_api(limit: int = 50) -> dict:
-        limit = max(1, min(int(limit or 50), 200))
-        with session_scope() as s:
-            spaces = (
-                s.query(InspirationSpace)
-                .order_by(
-                    InspirationSpace.last_activity_at.desc(), InspirationSpace.id.desc()
-                )
-                .limit(limit)
-                .all()
-            )
-            space_ids = [int(sp.id) for sp in spaces]
-            resource_counts = {sid: 0 for sid in space_ids}
-            draft_counts = {sid: 0 for sid in space_ids}
-            publish_counts = {sid: 0 for sid in space_ids}
-            latest_drafts: dict[int, InspirationDraft] = {}
-            if space_ids:
-                for sid, count in (
-                    s.query(InspirationResource.space_id, InspirationResource.id)
-                    .filter(InspirationResource.space_id.in_(space_ids))
-                    .filter(InspirationResource.deleted_at.is_(None))
-                    .all()
-                ):
-                    resource_counts[int(sid)] = resource_counts.get(int(sid), 0) + 1
-                for sid, count in (
-                    s.query(InspirationDraft.space_id, InspirationDraft.id)
-                    .filter(InspirationDraft.space_id.in_(space_ids))
-                    .all()
-                ):
-                    draft_counts[int(sid)] = draft_counts.get(int(sid), 0) + 1
-                for sid, count in (
-                    s.query(
-                        InspirationPublishRecord.space_id, InspirationPublishRecord.id
-                    )
-                    .filter(InspirationPublishRecord.space_id.in_(space_ids))
-                    .all()
-                ):
-                    publish_counts[int(sid)] = publish_counts.get(int(sid), 0) + 1
-                drafts = (
-                    s.query(InspirationDraft)
-                    .filter(InspirationDraft.space_id.in_(space_ids))
-                    .order_by(
-                        InspirationDraft.space_id.asc(),
-                        InspirationDraft.version.desc(),
-                        InspirationDraft.id.desc(),
-                    )
-                    .all()
-                )
-                for draft in drafts:
-                    sid = int(draft.space_id)
-                    if sid not in latest_drafts:
-                        latest_drafts[sid] = draft
-        return {
-            "ok": True,
-            "items": [
-                deps.inspiration_space_payload(
-                    space,
-                    latest_draft=latest_drafts.get(int(space.id)),
-                    resource_count=resource_counts.get(int(space.id), 0),
-                    draft_count=draft_counts.get(int(space.id), 0),
-                    publish_count=publish_counts.get(int(space.id), 0),
-                )
-                for space in spaces
-            ],
-        }
+        return inspiration_workspace.list_spaces(limit=limit)
 
     @router.post("/api/inspirations")
     def inspirations_create_api(payload: dict) -> dict:
@@ -311,56 +263,12 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     def inspirations_get_api(
         space_id: int, before_id: int | None = None, page_size: int = 60
     ) -> dict:
-        page_size = max(1, min(int(page_size or 60), 200))
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            is_waiting = deps.inspiration_is_waiting(s, int(space_id))
-            messages, next_before = deps.inspiration_messages_page(
-                s,
-                int(space_id),
-                before_id=before_id,
-                page_size=page_size,
+        try:
+            return inspiration_workspace.get_space_detail(
+                int(space_id), before_id=before_id, page_size=page_size
             )
-            resources = deps.inspiration_non_deleted_resources(s, int(space_id))
-            drafts = (
-                s.query(InspirationDraft)
-                .filter(InspirationDraft.space_id == int(space_id))
-                .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
-                .all()
-            )
-            records = (
-                s.query(InspirationPublishRecord)
-                .filter(InspirationPublishRecord.space_id == int(space_id))
-                .order_by(InspirationPublishRecord.id.desc())
-                .all()
-            )
-            latest_draft = drafts[0] if drafts else None
-            item = deps.inspiration_space_payload(
-                space,
-                latest_draft=latest_draft,
-                resource_count=len(resources),
-                draft_count=len(drafts),
-                publish_count=len(records),
-            )
-            return {
-                "ok": True,
-                "item": item,
-                "is_waiting": is_waiting,
-                "is_publishing": deps.inspiration_is_publishing(space),
-                "messages": [deps.inspiration_message_payload(msg) for msg in messages],
-                "next_before_id": next_before,
-                "resources": [
-                    deps.inspiration_resource_payload(
-                        int(space_id), res, include_text=True
-                    )
-                    for res in resources
-                ],
-                "drafts": [deps.inspiration_draft_payload(draft) for draft in drafts],
-                "publish_records": [
-                    deps.inspiration_publish_record_payload(record)
-                    for record in records
-                ],
-            }
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
 
     @router.post("/api/inspirations/{space_id:int}/messages")
     async def inspiration_message_create_api(space_id: int, payload: dict) -> dict:
@@ -371,110 +279,32 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.post("/api/inspirations/{space_id:int}/close")
     async def inspiration_close_api(space_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") == "published":
-                raise HTTPException(
-                    status_code=400, detail="Published spaces cannot be closed"
-                )
-            if str(space.status or "open") != "open":
-                raise HTTPException(
-                    status_code=400, detail="Only open spaces can be closed"
-                )
-            now = deps.utcnow()
-            space.status = "closed"
-            space.closed_at = now
-            space.last_activity_at = now
-            s.query(InspirationMessage).filter(
-                InspirationMessage.space_id == int(space_id),
-                InspirationMessage.kind == "draft_generated",
-            ).delete(synchronize_session=False)
-            s.query(InspirationDraft).filter(
-                InspirationDraft.space_id == int(space_id)
-            ).delete(synchronize_session=False)
-            s.add(
-                InspirationMessage(
-                    space_id=int(space_id),
-                    role="assistant",
-                    kind="system",
-                    content="This Inspiration space is now closed. Reopen it to continue editing.",
-                )
-            )
-            payload = deps.inspiration_space_payload(space)
-        await deps.inspiration_release_terminals(int(space_id))
-        deps.try_audit_memory(
-            kind="inspiration.closed",
-            source="web",
-            summary=f"Closed inspiration space {int(space_id)}.",
-            detail="User closed the inspiration space.",
-            metadata={"space_id": int(space_id)},
-        )
-        return {"ok": True, "item": payload}
+        try:
+            result = inspiration_workspace.close_space(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        if result.release_terminals:
+            await deps.inspiration_release_terminals(int(result.space_id))
+        _audit_workspace_result(result)
+        return {"ok": True, "item": result.item}
 
     @router.post("/api/inspirations/{space_id:int}/reopen")
     def inspiration_reopen_api(space_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") != "closed":
-                raise HTTPException(
-                    status_code=400, detail="Only closed spaces can be reopened"
-                )
-            now = deps.utcnow()
-            space.status = "open"
-            space.closed_at = None
-            space.last_activity_at = now
-            s.add(
-                InspirationMessage(
-                    space_id=int(space_id),
-                    role="assistant",
-                    kind="system",
-                    content="This Inspiration space is open again. You can continue the discussion.",
-                )
-            )
-            payload = deps.inspiration_space_payload(space)
-        deps.try_audit_memory(
-            kind="inspiration.reopened",
-            source="web",
-            summary=f"Reopened inspiration space {int(space_id)}.",
-            detail="User reopened the inspiration space.",
-            metadata={"space_id": int(space_id)},
-        )
-        return {"ok": True, "item": payload}
+        try:
+            result = inspiration_workspace.reopen_space(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        _audit_workspace_result(result)
+        return {"ok": True, "item": result.item}
 
     @router.delete("/api/inspirations/{space_id:int}")
     def inspiration_delete_api(space_id: int) -> dict:
-        removed_files_dir = str(deps.inspiration_space_files_dir(int(space_id)))
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") == "published":
-                raise HTTPException(
-                    status_code=400, detail="Published spaces cannot be deleted"
-                )
-            s.query(InspirationPublishRecord).filter(
-                InspirationPublishRecord.space_id == int(space_id)
-            ).delete(synchronize_session=False)
-            s.query(InspirationDraft).filter(
-                InspirationDraft.space_id == int(space_id)
-            ).delete(synchronize_session=False)
-            s.query(InspirationMessage).filter(
-                InspirationMessage.space_id == int(space_id)
-            ).delete(synchronize_session=False)
-            s.query(InspirationResource).filter(
-                InspirationResource.space_id == int(space_id)
-            ).delete(synchronize_session=False)
-            s.delete(space)
         try:
-            shutil.rmtree(removed_files_dir, ignore_errors=True)
-        except Exception:
-            pass
-        deps.try_audit_memory(
-            kind="inspiration.deleted",
-            source="web",
-            summary=f"Deleted inspiration space {int(space_id)}.",
-            detail="User deleted the inspiration space before publication.",
-            metadata={"space_id": int(space_id)},
-        )
-        return {"ok": True, "space_id": int(space_id)}
+            result = inspiration_workspace.delete_space(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        _audit_workspace_result(result)
+        return {"ok": True, "space_id": int(result.space_id)}
 
     @router.post("/api/inspirations/{space_id:int}/resources")
     async def inspiration_resource_create_api(
@@ -947,62 +777,11 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         return {"ok": True, "item": payload_out}
 
     def _inspiration_detail_page_context(space_id: int | None) -> dict:
-        with session_scope() as s:
-            spaces = (
-                s.query(InspirationSpace)
-                .order_by(
-                    InspirationSpace.last_activity_at.desc(), InspirationSpace.id.desc()
-                )
-                .all()
-            )
-            space = _space_or_404(s, int(space_id)) if space_id is not None else None
-            is_waiting = (
-                deps.inspiration_is_waiting(s, int(space_id))
-                if space is not None
-                else False
-            )
-            is_publishing = deps.inspiration_is_publishing(space)
-            terminals: list[RemoteTerminalSession] = []
-            inspiration_terminal: dict | None = None
-            messages: list[InspirationMessage] = []
-            resources: list[InspirationResource] = []
-            published_goal: Goal | None = None
-            if space is not None:
-                messages = (
-                    s.query(InspirationMessage)
-                    .filter(InspirationMessage.space_id == int(space_id))
-                    .order_by(InspirationMessage.id.asc())
-                    .all()
-                )
-                resources = deps.inspiration_non_deleted_resources(s, int(space_id))
-                terminals = terminal_service.list_terminals(
-                    s, terminal_service.owner_for_inspiration_space(int(space_id))
-                )
-                if terminals:
-                    inspiration_terminal = deps.inspiration_terminal_payload(
-                        int(space_id), terminals[0]
-                    )
-                published_goal = (
-                    s.get(Goal, int(space.published_goal_id))
-                    if getattr(space, "published_goal_id", None)
-                    else None
-                )
-        return {
-            "spaces": spaces,
-            "space": space,
-            "is_waiting": is_waiting,
-            "is_publishing": is_publishing,
-            "messages": messages,
-            "resources": resources,
-            "inspiration_terminal": inspiration_terminal,
-            "inspiration_terminal_count": len(terminals),
-            "has_online_companion": deps.has_online_companion(),
-            "draft_summary_prompt": deps.build_inspiration_draft_summary_prompt(space)
-            if space
-            else "",
-            "published_goal": published_goal,
-            "default_due": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
-        }
+        return inspiration_workspace.detail_page_context(
+            int(space_id) if space_id is not None else None,
+            has_online_companion=deps.has_online_companion(),
+            default_due=dt.date.today() + dt.timedelta(days=7),
+        )
 
     @router.get("/inspirations", response_class=HTMLResponse)
     def inspirations_page(request: Request) -> HTMLResponse:
@@ -1016,9 +795,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     def inspiration_detail_page(request: Request, space_id: int) -> HTMLResponse:
         try:
             context = _inspiration_detail_page_context(int(space_id))
-        except HTTPException as exc:
-            if exc.status_code != 404:
-                raise
+        except inspiration_workspace.InspirationWorkspaceNotFound:
             context = _inspiration_detail_page_context(None)
             context["missing_space_id"] = int(space_id)
         return templates.TemplateResponse(
