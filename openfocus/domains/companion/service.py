@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Protocol
 
 from ...companion.grpc import CompanionGrpcError
 from ...db import session_scope
@@ -82,8 +82,73 @@ class CompanionRawFileResult:
     mime: str
 
 
+class CompanionCommandPort(Protocol):
+    async def request_pair(
+        self, code: str, *, timeout_seconds: float = 10.0
+    ) -> str: ...
+
+    async def request_pairing_code(
+        self, *, force_new: bool, timeout_seconds: float = 10.0
+    ) -> tuple[str, str]: ...
+
+    async def request_choose_directory(
+        self, *, timeout_seconds: float = 30.0
+    ) -> str: ...
+
+    async def request_files_list(
+        self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0
+    ) -> Any: ...
+
+    async def request_files_read(
+        self, *, root_path: str, rel_path: str, max_bytes: int
+    ) -> Any: ...
+
+    async def request_files_raw(
+        self, *, root_path: str, rel_path: str, max_bytes: int
+    ) -> Any: ...
+
+
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _is_unpaired(companion: Companion) -> bool:
+    return (
+        companion.status or ""
+    ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
+        companion.auth_token or ""
+    ).strip()
+
+
+def _get_command_port(
+    grpc_server: Any, companion_id: int
+) -> CompanionCommandPort | None:
+    return grpc_server.registry.get(int(companion_id))
+
+
+def _raise_missing_command_port() -> NoReturn:
+    raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
+
+
+def _require_command_port(grpc_server: Any, companion_id: int) -> CompanionCommandPort:
+    port = _get_command_port(grpc_server, int(companion_id))
+    if port is None:
+        _raise_missing_command_port()
+    return port
+
+
+def _require_paired_command_port(
+    grpc_server: Any, companion_id: int
+) -> CompanionCommandPort:
+    with session_scope() as session:
+        companion = CompanionRepository(session).get(int(companion_id))
+        if companion is None:
+            raise CompanionNotFoundError("Companion not found")
+        if _is_unpaired(companion):
+            raise CompanionUnavailableOrUnpairedError(
+                "Companion is not paired or unavailable"
+            )
+    return _require_command_port(grpc_server, int(companion_id))
 
 
 def display_status(
@@ -106,7 +171,9 @@ def display_status(
         return COMPANION_STATUS_PENDING_CERTIFICATION
 
     companion_id = int(getattr(companion, "id", 0) or 0)
-    online = bool(companion_id and (grpc_server.registry.get(companion_id) is not None))
+    online = bool(
+        companion_id and (_get_command_port(grpc_server, companion_id) is not None)
+    )
     return COMPANION_STATUS_ACTIVE if online else COMPANION_STATUS_OFFLINE
 
 
@@ -263,9 +330,7 @@ async def pair_companion(grpc_server: Any, companion_id: int, payload: Any) -> d
             device_id=device_id,
         )
 
-    conn = grpc_server.registry.get(int(companion_id))
-    if conn is None:
-        raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
+    conn = _require_command_port(grpc_server, int(companion_id))
     try:
         token = await conn.request_pair(code, timeout_seconds=10.0)
     except CompanionGrpcError as exc:
@@ -303,9 +368,7 @@ async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
         if display_status(companion, grpc_server) == COMPANION_STATUS_OFFLINE:
             raise CompanionOfflineError("Companion offline")
 
-    conn = grpc_server.registry.get(int(companion_id))
-    if conn is None:
-        raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
+    conn = _require_command_port(grpc_server, int(companion_id))
 
     try:
         _code, expires_at = await conn.request_pairing_code(
@@ -320,22 +383,7 @@ async def request_pairing_code(grpc_server: Any, companion_id: int) -> dict:
 
 
 async def choose_directory(grpc_server: Any, companion_id: int) -> dict:
-    with session_scope() as session:
-        companion = CompanionRepository(session).get(int(companion_id))
-        if companion is None:
-            raise CompanionNotFoundError("Companion not found")
-        if (
-            companion.status or ""
-        ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
-            companion.auth_token or ""
-        ).strip():
-            raise CompanionUnavailableOrUnpairedError(
-                "Companion is not paired or unavailable"
-            )
-
-    conn = grpc_server.registry.get(int(companion_id))
-    if conn is None:
-        raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
+    conn = _require_paired_command_port(grpc_server, int(companion_id))
     try:
         path = await conn.request_choose_directory(timeout_seconds=30.0)
     except CompanionGrpcError as exc:
@@ -361,18 +409,11 @@ def load_space_and_optional_companion(
 def require_online(grpc_server: Any, *, companion: Companion | None):
     if companion is None:
         raise CompanionValidationError("AgentSpace is not bound to a Companion")
-    if (
-        companion.status or ""
-    ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
-        companion.auth_token or ""
-    ).strip():
+    if _is_unpaired(companion):
         raise CompanionUnavailableOrUnpairedError(
             "Companion is not paired or unavailable"
         )
-    conn = grpc_server.registry.get(int(companion.id))
-    if conn is None:
-        raise CompanionRuntimeError("Companion is not online (no gRPC connection)")
-    return conn
+    return _require_command_port(grpc_server, int(companion.id))
 
 
 def select_online(
@@ -386,13 +427,9 @@ def select_online(
         else:
             companions = repo.list_all_recent()
         for companion in companions:
-            if (
-                companion.status or ""
-            ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
-                companion.auth_token or ""
-            ).strip():
+            if _is_unpaired(companion):
                 continue
-            conn = grpc_server.registry.get(int(companion.id))
+            conn = _get_command_port(grpc_server, int(companion.id))
             if conn is None:
                 continue
             # Do not leak SQLAlchemy ORM instances outside the repository/session
@@ -406,13 +443,9 @@ def has_online(grpc_server: Any) -> bool:
     with session_scope() as session:
         companions = CompanionRepository(session).list_all_recent()
         for companion in companions:
-            if (
-                companion.status or ""
-            ).strip() == COMPANION_STATUS_PENDING_CERTIFICATION or not (
-                companion.auth_token or ""
-            ).strip():
+            if _is_unpaired(companion):
                 continue
-            if grpc_server.registry.get(int(companion.id)) is not None:
+            if _get_command_port(grpc_server, int(companion.id)) is not None:
                 return True
     return False
 
