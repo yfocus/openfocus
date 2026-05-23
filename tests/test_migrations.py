@@ -4,6 +4,37 @@ from __future__ import annotations
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base
 
+TRACKING_TABLES = {"alembic_version", "schema_migrations"}
+
+
+def _model_owned_table_info(engine, base):
+    with engine.begin() as conn:
+        return {
+            table_name: [
+                (row[1], row[2], row[3])
+                for row in conn.exec_driver_sql(
+                    f"PRAGMA table_info({table_name})"
+                ).fetchall()
+            ]
+            for table_name in base.metadata.tables
+            if table_name not in TRACKING_TABLES
+        }
+
+
+def _model_owned_index_names(engine, base):
+    with engine.begin() as conn:
+        return {
+            table_name: sorted(
+                str(row[1])
+                for row in conn.exec_driver_sql(
+                    f"PRAGMA index_list({table_name})"
+                ).fetchall()
+                if not str(row[1]).startswith("sqlite_autoindex_")
+            )
+            for table_name in base.metadata.tables
+            if table_name not in TRACKING_TABLES
+        }
+
 
 def test_migration_service_records_baseline_on_current_schema(tmp_path):
     from openfocus.infrastructure import migrations
@@ -80,6 +111,77 @@ def test_migration_service_adds_agent_space_start_command_after_applied_baseline
     assert migrations.AGENT_SPACE_START_COMMAND_MIGRATION_ID in migration_ids
 
 
+def test_migration_service_repairs_inspiration_space_columns_after_applied_baseline(
+    tmp_path,
+):
+    from openfocus.infrastructure import migrations
+    from openfocus.models import Base
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'legacy_inspiration_space.db'}", future=True
+    )
+    missing_columns = {
+        "published_goal_id",
+        "forked_from_space_id",
+        "last_activity_at",
+        "message_turn_count",
+        "last_phase_summary_turn",
+        "last_phase_summary_at",
+    }
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE inspiration_spaces ("
+                "id INTEGER PRIMARY KEY, "
+                "title VARCHAR(512) NOT NULL DEFAULT '', "
+                "status VARCHAR(32) NOT NULL DEFAULT 'open', "
+                "mode VARCHAR(32) NOT NULL DEFAULT 'built_in', "
+                "workspace_path VARCHAR(4000) NOT NULL DEFAULT '', "
+                "created_at DATETIME, "
+                "updated_at DATETIME, "
+                "closed_at DATETIME, "
+                "published_at DATETIME"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO inspiration_spaces "
+                "(id, title, status, mode, workspace_path) "
+                "VALUES (1, 'Legacy space', 'open', 'built_in', '/tmp/inspiration')"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE schema_migrations ("
+                "id VARCHAR(128) PRIMARY KEY, "
+                "applied_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL"
+                ")"
+            )
+        )
+        conn.execute(
+            text("INSERT INTO schema_migrations (id) VALUES (:id)"),
+            {"id": migrations.STARTUP_SCHEMA_MIGRATION_ID},
+        )
+
+    migrations.initialize_database(engine, Base)
+
+    with engine.begin() as conn:
+        columns = {
+            r[1] for r in conn.exec_driver_sql("PRAGMA table_info(inspiration_spaces)")
+        }
+        row = conn.execute(
+            text(
+                "SELECT message_turn_count, last_phase_summary_turn "
+                "FROM inspiration_spaces WHERE id = 1"
+            )
+        ).one()
+
+    assert missing_columns.issubset(columns)
+    assert row == (0, 0)
+
+
 def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
     from alembic import command
     from alembic.config import Config
@@ -120,6 +222,33 @@ def test_alembic_upgrade_head_creates_current_schema(monkeypatch, tmp_path):
         }
     assert {"companion_id", "float_ball_enabled", "float_ball_base_url"}.issubset(
         system_inbox_cols
+    )
+
+
+def test_alembic_and_startup_fresh_schema_match_model_owned_table_info_and_indexes(
+    monkeypatch, tmp_path
+):
+    from alembic import command
+    from alembic.config import Config
+
+    from openfocus.infrastructure import migrations
+    from openfocus.models import Base
+
+    alembic_db_path = tmp_path / "alembic_current.db"
+    startup_db_path = tmp_path / "startup_current.db"
+
+    monkeypatch.setenv("OPENFOCUS_DB_PATH", str(alembic_db_path))
+    command.upgrade(Config("alembic.ini"), "head")
+
+    alembic_engine = create_engine(f"sqlite:///{alembic_db_path}", future=True)
+    startup_engine = create_engine(f"sqlite:///{startup_db_path}", future=True)
+    migrations.initialize_database(startup_engine, Base)
+
+    assert _model_owned_table_info(alembic_engine, Base) == _model_owned_table_info(
+        startup_engine, Base
+    )
+    assert _model_owned_index_names(alembic_engine, Base) == _model_owned_index_names(
+        startup_engine, Base
     )
 
 

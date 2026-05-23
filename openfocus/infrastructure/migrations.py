@@ -51,27 +51,17 @@ def _mark_applied(conn: Any, migration_id: str) -> None:
     )
 
 
-def _is_applied(conn: Any, migration_id: str) -> bool:
-    row = conn.execute(
-        text("SELECT 1 FROM schema_migrations WHERE id = :id"),
-        {"id": str(migration_id)},
-    ).one_or_none()
-    return row is not None
-
-
 def _apply_migration(conn: Any, migration_id: str, migrate_fn: Any) -> None:
-    if _is_applied(conn, migration_id):
-        return
     migrate_fn(conn)
     _mark_applied(conn, migration_id)
 
 
 def initialize_database(engine: Engine, base: Any) -> None:
-    """Create the current schema and run OpenFocus startup migrations.
+    """Create model tables and run compatibility repairs for local SQLite DBs.
 
-    This is a deliberately small migration runner. It makes existing startup
-    schema repair explicit and records a baseline id, while avoiding a partial
-    Alembic integration until the project is ready to own full revision files.
+    Alembic is the canonical schema history for durable upgrades. This startup
+    path remains intentionally small and idempotent so existing local databases
+    can still boot while legacy SQLite repair migrations are phased out.
     """
 
     base.metadata.create_all(bind=engine)
@@ -179,6 +169,43 @@ def _migrate_startup_schema_baseline(conn: Any) -> None:
         conn.execute(
             text(
                 "ALTER TABLE inspiration_spaces ADD COLUMN workspace_path VARCHAR(4000) NOT NULL DEFAULT ''"
+            )
+        )
+    if "published_goal_id" not in insp_space_cols:
+        conn.execute(
+            text("ALTER TABLE inspiration_spaces ADD COLUMN published_goal_id INTEGER")
+        )
+    if "forked_from_space_id" not in insp_space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE inspiration_spaces ADD COLUMN forked_from_space_id INTEGER"
+            )
+        )
+    if "last_activity_at" not in insp_space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE inspiration_spaces ADD COLUMN last_activity_at "
+                "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'"
+            )
+        )
+    if "message_turn_count" not in insp_space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE inspiration_spaces ADD COLUMN message_turn_count "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+    if "last_phase_summary_turn" not in insp_space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE inspiration_spaces ADD COLUMN last_phase_summary_turn "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+    if "last_phase_summary_at" not in insp_space_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE inspiration_spaces ADD COLUMN last_phase_summary_at DATETIME"
             )
         )
 

@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column("due_date", sa.Date(), nullable=False),
         sa.Column("source_inspiration_space_id", sa.Integer(), nullable=True),
         sa.Column("source_inspiration_draft_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "events",
@@ -37,7 +37,7 @@ def upgrade() -> None:
         sa.Column("agent", sa.String(length=256), nullable=False),
         sa.Column("task_id", sa.String(length=256), nullable=True),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "tasks",
@@ -58,12 +58,13 @@ def upgrade() -> None:
         ),
         sa.Column("source_inspiration_space_id", sa.Integer(), nullable=True),
         sa.Column("source_inspiration_draft_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
         "next_move_runs",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("generated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "trigger_kind",
             sa.String(length=64),
@@ -72,7 +73,7 @@ def upgrade() -> None:
         ),
         sa.Column("context_summary", sa.JSON(), nullable=False),
         sa.Column("recommendations", sa.JSON(), nullable=False),
-        sa.Column("generated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "next_move_feedback",
@@ -87,9 +88,9 @@ def upgrade() -> None:
             "reason_text", sa.String(length=2000), nullable=False, server_default=""
         ),
         sa.Column(
-            "learned_summary", sa.String(length=4000), nullable=False, server_default=""
+            "learned_summary", sa.String(length=2000), nullable=False, server_default=""
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "attention_items",
@@ -109,7 +110,7 @@ def upgrade() -> None:
             "status", sa.String(length=32), nullable=False, server_default="active"
         ),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("dismissed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("acted_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -136,10 +137,21 @@ def upgrade() -> None:
         sa.Column(
             "workspace_path", sa.String(length=4000), nullable=False, server_default=""
         ),
-        sa.Column("created_goal_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("published_goal_id", sa.Integer(), nullable=True),
+        sa.Column("forked_from_space_id", sa.Integer(), nullable=True),
+        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "message_turn_count", sa.Integer(), nullable=False, server_default="0"
+        ),
+        sa.Column(
+            "last_phase_summary_turn",
+            sa.Integer(),
+            nullable=False,
+            server_default="0",
+        ),
+        sa.Column("last_phase_summary_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -154,7 +166,7 @@ def upgrade() -> None:
         sa.Column("content", sa.Text(), nullable=False, server_default=""),
         sa.Column("payload", sa.JSON(), nullable=False),
         sa.Column("draft_version", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "inspiration_resources",
@@ -179,8 +191,8 @@ def upgrade() -> None:
         sa.Column(
             "is_system_generated", sa.Boolean(), nullable=False, server_default="0"
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_table(
@@ -196,7 +208,7 @@ def upgrade() -> None:
         sa.Column("open_questions", sa.JSON(), nullable=False),
         sa.Column("rejected_or_deferred_ideas", sa.JSON(), nullable=False),
         sa.Column("source_message_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "inspiration_publish_records",
@@ -207,7 +219,7 @@ def upgrade() -> None:
         sa.Column("created_task_ids", sa.JSON(), nullable=False),
         sa.Column("deferred_tasks", sa.JSON(), nullable=False),
         sa.Column("summary_resource_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "agent_spaces",
@@ -227,8 +239,8 @@ def upgrade() -> None:
             nullable=False,
             server_default="",
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "agent_space_prompts",
@@ -239,8 +251,8 @@ def upgrade() -> None:
         sa.Column(
             "auto_enabled", sa.Boolean(), nullable=False, server_default=sa.false()
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "agent_sessions",
@@ -259,8 +271,8 @@ def upgrade() -> None:
         sa.Column(
             "status", sa.String(length=32), nullable=False, server_default="active"
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "agent_messages",
@@ -273,8 +285,8 @@ def upgrade() -> None:
         sa.Column("content", sa.Text(), nullable=False, server_default=""),
         sa.Column("done", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("error", sa.String(length=2000), nullable=False, server_default=""),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "agent_runtime_sessions",
@@ -298,10 +310,10 @@ def upgrade() -> None:
             "last_signal_kind", sa.String(length=128), nullable=False, server_default=""
         ),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(
         "ix_agent_runtime_sessions_state",
@@ -335,11 +347,11 @@ def upgrade() -> None:
         sa.Column("summary", sa.String(length=2000), nullable=False, server_default=""),
         sa.Column("error", sa.String(length=2000), nullable=False, server_default=""),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(
         "ix_agent_turns_task_state", "agent_turns", ["task_public_id", "state"]
@@ -371,11 +383,11 @@ def upgrade() -> None:
         sa.Column("title", sa.String(length=512), nullable=False, server_default=""),
         sa.Column("summary", sa.String(length=2000), nullable=False, server_default=""),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("state_started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("dismissed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(
         "ix_task_agent_activity_state", "task_agent_activity", ["state", "updated_at"]
@@ -405,8 +417,8 @@ def upgrade() -> None:
         sa.Column(
             "status", sa.String(length=32), nullable=False, server_default="active"
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "remote_terminal_outputs",
@@ -415,7 +427,7 @@ def upgrade() -> None:
         sa.Column("terminal_id", sa.String(length=64), nullable=False),
         sa.Column("data_b64", sa.Text(), nullable=False, server_default=""),
         sa.Column("nbytes", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "companions",
@@ -439,8 +451,8 @@ def upgrade() -> None:
         sa.Column(
             "pair_attempt_count", sa.Integer(), nullable=False, server_default="0"
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_table(
         "system_inbox_targets",
@@ -477,8 +489,8 @@ def upgrade() -> None:
             nullable=False,
             server_default="",
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(
         "ix_system_inbox_targets_companion",
