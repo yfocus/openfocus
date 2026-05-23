@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+from collections.abc import Coroutine
+from typing import Any
 
 from sqlalchemy import text
 
@@ -28,6 +31,100 @@ TERM_HISTORY_MAX_BYTES = 1024 * 1024 * 1024
 
 # 回放接口单次返回的最大体积（避免把 1GB 直接塞给浏览器/WS）。
 TERM_HISTORY_PUBLIC_MAX_BYTES = 4 * 1024 * 1024
+
+_LOG = logging.getLogger(__name__)
+
+
+def _safe_log(level: str, *args: object, **kwargs: object) -> None:
+    try:
+        log_method = getattr(_LOG, level)
+        log_method(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def _close_unscheduled_coro(coro: Coroutine[Any, Any, Any]) -> None:
+    close = getattr(coro, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        _safe_log(
+            "debug", "failed to close unscheduled streaming coroutine", exc_info=True
+        )
+
+
+def _record_background_task_failure(
+    *, task_name: str, failure_context: dict[str, object], error: BaseException
+) -> None:
+    safe_task_name = str(task_name or "streaming.background_task")
+    metadata = dict(failure_context)
+    metadata["task_name"] = safe_task_name
+    metadata["error_type"] = type(error).__name__
+    try:
+        memory_service.try_audit_memory(
+            kind="streaming.background_task.failure",
+            source=f"streaming:{safe_task_name}",
+            summary=f"Streaming background task failed: {safe_task_name}",
+            detail=str(error),
+            metadata=metadata,
+        )
+    except Exception:
+        _safe_log(
+            "warning",
+            "failed to audit streaming background task failure",
+            exc_info=True,
+        )
+    _safe_log(
+        "error",
+        "streaming background task failed: %s context=%r",
+        safe_task_name,
+        failure_context,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
+def schedule_observed_task(
+    coro: Coroutine[Any, Any, Any],
+    *,
+    task_name: str,
+    failure_context: dict[str, object] | None = None,
+) -> asyncio.Task[Any] | None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _close_unscheduled_coro(coro)
+        _safe_log(
+            "debug", "skipping streaming task without running loop: %s", task_name
+        )
+        return None
+
+    context = dict(failure_context or {})
+    task = loop.create_task(coro, name=str(task_name or "streaming.background_task"))
+
+    def _observe_result(done_task: asyncio.Task[Any]) -> None:
+        if done_task.cancelled():
+            return
+        try:
+            error = done_task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _safe_log(
+                "warning", "failed to observe streaming task result", exc_info=True
+            )
+            _record_background_task_failure(
+                task_name=task_name, failure_context=context, error=exc
+            )
+            return
+        if error is not None:
+            _record_background_task_failure(
+                task_name=task_name, failure_context=context, error=error
+            )
+
+    task.add_done_callback(_observe_result)
+    return task
 
 
 class AgentSSEHub:
@@ -234,11 +331,14 @@ def install_agent_chunk_listener_once() -> None:
         return
 
     def _on_chunk(ch) -> None:
-        try:
-            asyncio.get_running_loop().create_task(persist_and_publish_agent_chunk(ch))
-        except RuntimeError:
-            # 没有 event loop 时直接忽略（正常情况下不会发生）
-            pass
+        schedule_observed_task(
+            persist_and_publish_agent_chunk(ch),
+            task_name="agent_chunk",
+            failure_context={
+                "session_id": str(getattr(ch, "session_id", "") or ""),
+                "request_id": str(getattr(ch, "request_id", "") or ""),
+            },
+        )
 
     add_agent_chunk_listener(_on_chunk)
     _AGENT_LISTENER_INSTALLED = True
@@ -345,10 +445,13 @@ def install_terminal_listener_once() -> None:
         return
 
     def _on_out(out) -> None:
-        try:
-            asyncio.get_running_loop().create_task(handle_terminal_output(out))
-        except RuntimeError:
-            pass
+        schedule_observed_task(
+            handle_terminal_output(out),
+            task_name="terminal_output",
+            failure_context={
+                "terminal_id": str(getattr(out, "terminal_id", "") or ""),
+            },
+        )
 
     add_terminal_output_listener(_on_out)
     _TERM_LISTENER_INSTALLED = True
@@ -388,10 +491,20 @@ def install_runtime_signal_listener_once() -> None:
         return
 
     def _on_signal(sig) -> None:
-        try:
-            asyncio.get_running_loop().create_task(handle_runtime_signal(sig))
-        except RuntimeError:
-            pass
+        schedule_observed_task(
+            handle_runtime_signal(sig),
+            task_name="runtime_signal",
+            failure_context={
+                "kind": str(getattr(sig, "kind", "") or ""),
+                "raw_kind": str(getattr(sig, "raw_kind", "") or ""),
+                "session_id": str(getattr(sig, "session_id", "") or ""),
+                "turn_id": str(getattr(sig, "turn_id", "") or ""),
+                "task_public_id": str(getattr(sig, "task_public_id", "") or ""),
+                "terminal_id": str(getattr(sig, "terminal_id", "") or ""),
+                "companion_id": int(getattr(sig, "companion_id", 0) or 0),
+                "source": str(getattr(sig, "source", "") or "companion"),
+            },
+        )
 
     add_runtime_signal_listener(_on_signal)
     _RUNTIME_SIGNAL_LISTENER_INSTALLED = True
