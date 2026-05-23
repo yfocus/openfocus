@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import uuid
 from typing import Any
 
@@ -456,24 +455,12 @@ def _record_runtime_journal(
     task_public_id: str,
     payload: dict[str, Any],
 ) -> None:
-    if kind.startswith("journal."):
-        journal_kind = kind
-    else:
-        journal_kind = kind
-    event_service.record_event(
+    event_service.record_runtime_journal(
         s,
-        kind=journal_kind,
-        agent=agent_runtime or "runtime",
-        task_id=task_public_id or None,
+        kind=kind,
+        agent_runtime=agent_runtime,
+        task_public_id=task_public_id,
         payload=payload,
-        create_attention=False,
-        audit={
-            "kind": f"event.{journal_kind}",
-            "source": f"runtime:{agent_runtime or 'unknown'}",
-            "summary": f"Runtime signal `{journal_kind}` was recorded.",
-            "detail": json.dumps(payload or {}, ensure_ascii=False, indent=2),
-            "task_public_id": task_public_id or None,
-        },
     )
 
 

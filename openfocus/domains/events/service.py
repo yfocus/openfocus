@@ -263,15 +263,15 @@ def record_event(
     return event
 
 
-def report_agent_event(
+def record_agent_report(
     s: Session,
     *,
     kind: str,
     agent: str,
     task_id: str | None,
     payload: dict[str, Any],
-) -> dict:
-    event = record_event(
+) -> Event:
+    return record_event(
         s,
         kind=kind,
         agent=agent,
@@ -286,10 +286,9 @@ def report_agent_event(
             "task_public_id": task_id,
         },
     )
-    return {"id": int(event.id or 0), "created_at": event.created_at}
 
 
-def report_focus_result(s: Session, report: Any) -> dict:
+def record_focus_report(s: Session, report: Any) -> Event:
     payload = {
         "task_name": report.task_name,
         "status": report.status,
@@ -299,7 +298,7 @@ def report_focus_result(s: Session, report: Any) -> dict:
         "assistant_response": report.assistant_response,
         "metadata": report.metadata,
     }
-    record_event(
+    return record_event(
         s,
         kind="skill.focus_report",
         agent=report.agent,
@@ -316,6 +315,55 @@ def report_focus_result(s: Session, report: Any) -> dict:
             "metadata": {"status": report.status},
         },
     )
+
+
+def record_runtime_journal(
+    s: Session,
+    *,
+    kind: str,
+    agent_runtime: str,
+    task_public_id: str,
+    payload: dict[str, Any],
+) -> Event:
+    journal_kind = str(kind or "")
+    runtime = agent_runtime or "runtime"
+    return record_event(
+        s,
+        kind=journal_kind,
+        agent=runtime,
+        task_id=task_public_id or None,
+        payload=payload,
+        create_attention=False,
+        audit={
+            "kind": f"event.{journal_kind}",
+            "source": f"runtime:{agent_runtime or 'unknown'}",
+            "summary": f"Runtime signal `{journal_kind}` was recorded.",
+            "detail": json.dumps(payload or {}, ensure_ascii=False, indent=2),
+            "task_public_id": task_public_id or None,
+        },
+    )
+
+
+def report_agent_event(
+    s: Session,
+    *,
+    kind: str,
+    agent: str,
+    task_id: str | None,
+    payload: dict[str, Any],
+) -> dict:
+    event = record_agent_report(
+        s,
+        kind=kind,
+        agent=agent,
+        task_id=task_id,
+        payload=payload,
+    )
+    return {"id": int(event.id or 0), "created_at": event.created_at}
+
+
+def report_focus_result(s: Session, report: Any) -> dict:
+    record_focus_report(s, report)
     return {"ok": True, "task_updated": None}
 
 

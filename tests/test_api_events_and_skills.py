@@ -8,13 +8,28 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 
+def _read_audit_text(memory_root: Path) -> str:
+    audit_files = sorted((memory_root / "audit").glob("**/*.md"))
+    assert audit_files
+    return "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
+
+
 @pytest.mark.anyio
-async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm():
+async def test_agent_events_journal_and_audit_only(monkeypatch, tmp_path):
+    memory_root = tmp_path / "memory"
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(memory_root))
+
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import AttentionItem, Event, Goal, Task, TaskAgentActivity
+    from openfocus.models import (
+        AgentTurn,
+        AttentionItem,
+        Event,
+        Goal,
+        Task,
+        TaskAgentActivity,
+    )
 
-    # seed goal + task
     with session_scope() as s:
         g = Goal(title="g", content="", due_date=dt.date.today())
         s.add(g)
@@ -36,6 +51,11 @@ async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm
             },
         )
         assert r.status_code == 200
+        body = r.json()
+        assert isinstance(body["id"], int)
+        assert body["id"] > 0
+        assert isinstance(body["created_at"], str)
+        assert body["created_at"]
 
     with session_scope() as s:
         t2 = s.query(Task).filter(Task.public_id == public_id).one()
@@ -44,14 +64,29 @@ async def test_agent_events_persist_but_not_mark_task_done_without_human_confirm
         assert ev is not None
         assert ev.task_id == public_id
         assert s.query(AttentionItem).count() == 0
+        assert s.query(AgentTurn).count() == 0
         assert s.query(TaskAgentActivity).count() == 0
+
+    audit_text = _read_audit_text(memory_root)
+    assert "task.completed" in audit_text
+    assert "Agent reported event" in audit_text
 
 
 @pytest.mark.anyio
-async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm():
+async def test_focus_report_journal_and_audit_only(monkeypatch, tmp_path):
+    memory_root = tmp_path / "memory"
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(memory_root))
+
     from openfocus.app import app
     from openfocus.db import session_scope
-    from openfocus.models import AttentionItem, Event, Goal, Task, TaskAgentActivity
+    from openfocus.models import (
+        AgentTurn,
+        AttentionItem,
+        Event,
+        Goal,
+        Task,
+        TaskAgentActivity,
+    )
 
     with session_scope() as s:
         g = Goal(title="g2", content="", due_date=dt.date.today())
@@ -88,7 +123,12 @@ async def test_focus_report_persist_but_not_mark_task_done_without_human_confirm
         ev = s.query(Event).order_by(Event.id.desc()).first()
         assert ev.kind == "skill.focus_report"
         assert s.query(AttentionItem).count() == 0
+        assert s.query(AgentTurn).count() == 0
         assert s.query(TaskAgentActivity).count() == 0
+
+    audit_text = _read_audit_text(memory_root)
+    assert "skill.focus_report" in audit_text
+    assert "Focus report for task" in audit_text
 
 
 @pytest.mark.anyio
@@ -305,10 +345,22 @@ async def test_runtime_session_start_does_not_create_activity_and_can_correlate_
         assert body["buckets"]["running"][0]["task_public_id"] == public_id
 
 
-def test_runtime_activity_signal_without_active_turn_stays_journal_only():
+def test_runtime_activity_signal_without_active_turn_stays_journal_only(
+    monkeypatch, tmp_path
+):
+    memory_root = tmp_path / "memory"
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(memory_root))
+
     from openfocus.db import session_scope
     from openfocus.domains.agent_activity import service as agent_activity_service
-    from openfocus.models import AgentTurn, Event, Goal, Task, TaskAgentActivity
+    from openfocus.models import (
+        AgentTurn,
+        AttentionItem,
+        Event,
+        Goal,
+        Task,
+        TaskAgentActivity,
+    )
 
     with session_scope() as s:
         g = Goal(title="activity goal", content="", due_date=dt.date.today())
@@ -324,11 +376,17 @@ def test_runtime_activity_signal_without_active_turn_stays_journal_only():
             task_public_id=t.public_id,
             source="test",
             payload={"message": "tool starting"},
+            create_journal=True,
         )
         assert result["state"] == "activity_without_turn"
         assert s.query(AgentTurn).count() == 0
+        assert s.query(AttentionItem).count() == 0
         assert s.query(TaskAgentActivity).count() == 0
         assert s.query(Event).filter(Event.kind == "runtime.turn.activity").count() == 1
+
+    audit_text = _read_audit_text(memory_root)
+    assert "runtime.turn.activity" in audit_text
+    assert "Runtime signal" in audit_text
 
 
 def test_agent_completed_next_move_event_sink_creates_attention_item(
