@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 import { createRoot } from 'react-dom/client';
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { apiJson } from '../api/client';
+import { createInspirationBusyPollingController } from '../lib/inspirationBusyPolling';
 import {
   closeSpace,
   createInspiration,
@@ -45,7 +46,7 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     publishing: config.isPublishing,
     resourceModalMode: 'create',
     resourceModalResourceId: 0,
-    busyPollTimer: 0,
+    timer: 0,
   });
 
   const getRoot = useCallback(() => document.getElementById('insp-page-root'), []);
@@ -126,7 +127,6 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
   const terminalApi = () => document.getElementById('insp-remote-terminal')?.__openfocusRemoteTerminal || null;
 
   const bindUIRef = useRef<() => void>(() => undefined);
-  const scheduleBusyPollRef = useRef<(delay?: number) => void>(() => undefined);
 
   const refreshPageFromServer = useCallback(async (options?: { scrollChat?: boolean }) => {
     const prevScroll = captureScrollState();
@@ -144,31 +144,24 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     if (options?.scrollChat) scrollChat();
   }, [getRoot, scrollChat, syncStateFromRoot]);
 
-  const scheduleBusyPoll = useCallback((delay = 900) => {
-    const state = stateRef.current;
-    if (state.busyPollTimer) window.clearTimeout(state.busyPollTimer);
-    if (!state.hasSpace || !config.spaceId || (!state.waiting && !state.publishing)) return;
-    state.busyPollTimer = window.setTimeout(async () => {
-      try {
-        const data = await getInspiration(config.spaceId);
-        const nextWaiting = !!data.is_waiting;
-        const nextPublishing = !!data.is_publishing;
-        if (nextWaiting || nextPublishing) {
-          stateRef.current.waiting = nextWaiting;
-          stateRef.current.publishing = nextPublishing;
-          setWaitingUI(nextWaiting);
-          setPublishingUI(nextPublishing);
-          scheduleBusyPollRef.current(900);
-          return;
-        }
-        await refreshPageFromServer({ scrollChat: true });
-      } catch (_) {
-        scheduleBusyPollRef.current(1400);
-      }
-    }, Number(delay || 900));
-  }, [config.spaceId, refreshPageFromServer, setPublishingUI, setWaitingUI]);
+  const busyPolling = useMemo(() => createInspirationBusyPollingController({
+    state: stateRef.current,
+    spaceId: config.spaceId,
+    fetchStatus: getInspiration,
+    onStillBusy: ({ waiting, publishing }) => {
+      setWaitingUI(waiting);
+      setPublishingUI(publishing);
+    },
+    onDone: () => refreshPageFromServer({ scrollChat: true }),
+    timer: {
+      setTimeout: (callback, nextDelay) => window.setTimeout(callback, nextDelay),
+      clearTimeout: (timer) => window.clearTimeout(timer),
+    },
+  }), [config.spaceId, refreshPageFromServer, setPublishingUI, setWaitingUI]);
 
-  scheduleBusyPollRef.current = scheduleBusyPoll;
+  const scheduleBusyPoll = useCallback((delay = 900) => {
+    busyPolling.schedule(delay);
+  }, [busyPolling]);
 
   const appendResourceReference = (reference: string, card: HTMLElement | null) => {
     const { waiting, publishing, hasSpace } = stateRef.current;
@@ -546,9 +539,9 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
     scrollChat();
     if (stateRef.current.waiting || stateRef.current.publishing) scheduleBusyPoll(900);
     return () => {
-      if (stateRef.current.busyPollTimer) window.clearTimeout(stateRef.current.busyPollTimer);
+      busyPolling.cleanup();
     };
-  }, [bindUI, scheduleBusyPoll, scrollChat, syncStateFromRoot]);
+  }, [bindUI, busyPolling, scheduleBusyPoll, scrollChat, syncStateFromRoot]);
 
   return null;
 }
