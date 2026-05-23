@@ -109,6 +109,12 @@ class ResourceSyncResult:
     audit_metadata: dict
 
 
+@dataclass(frozen=True)
+class DraftGenerationRequest:
+    space_id: int
+    prompt: str
+
+
 def _space_or_error(s, space_id: int) -> InspirationSpace:
     space = s.get(InspirationSpace, int(space_id))
     if space is None:
@@ -293,6 +299,68 @@ def get_space_detail(
                 presenters.publish_record_payload(record) for record in records
             ],
         }
+
+
+def list_drafts(space_id: int) -> dict:
+    with session_scope() as s:
+        _space_or_error(s, int(space_id))
+        drafts = (
+            s.query(InspirationDraft)
+            .filter(InspirationDraft.space_id == int(space_id))
+            .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
+            .all()
+        )
+        items = [presenters.draft_payload(draft) for draft in drafts]
+    return {"ok": True, "items": items}
+
+
+def prepare_draft_from_draft_summary(space_id: int) -> DraftGenerationRequest:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        try:
+            summary_path = (
+                resources.writable_resources_dir(space, int(space_id))
+                / "draft_summary.md"
+            )
+        except resources.ResourceStorageError as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        if not summary_path.is_file():
+            raise InspirationWorkspaceValidationError("Summary is missing")
+        try:
+            item = resources.sync_draft_summary_file(s, space)
+        except resources.EmptyDraftSummary as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        except resources.DraftSummaryReadError as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        except resources.ResourceStorageError as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        if item is None:
+            raise InspirationWorkspaceValidationError("Summary is missing")
+    return DraftGenerationRequest(space_id=int(space_id), prompt="/plan")
+
+
+def prepare_draft_from_resource(
+    space_id: int, resource_id: int | None
+) -> DraftGenerationRequest:
+    try:
+        normalized_resource_id = int(resource_id or 0)
+    except (TypeError, ValueError):
+        normalized_resource_id = 0
+    if normalized_resource_id <= 0:
+        raise InspirationWorkspaceValidationError("resource_id is required")
+
+    with session_scope() as s:
+        _space_or_error(s, int(space_id))
+        resource = _resource_or_error(s, int(space_id), normalized_resource_id)
+        resource_ref = resources.resource_reference(resource)
+    prompt = (
+        "/plan\n"
+        "Create a Goal and Tasks using this resource as the primary source. "
+        "If it follows the OpenFocus bridge Markdown format, map the level-1 heading to the goal title, "
+        "the content under it to the goal content, and each level-2 heading plus its body to one task.\n\n"
+        f"{resource_ref}"
+    )
+    return DraftGenerationRequest(space_id=int(space_id), prompt=prompt)
 
 
 def detail_page_context(

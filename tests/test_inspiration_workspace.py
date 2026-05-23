@@ -86,6 +86,170 @@ def test_inspiration_workspace_lists_and_loads_detail_payloads():
     assert detail["messages"][0]["content"] == "hello"
 
 
+def test_inspiration_workspace_lists_drafts_by_latest_version_and_id():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import workspace
+    from openfocus.models import InspirationDraft, InspirationSpace
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Draft list", status="open")
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        s.add_all(
+            [
+                InspirationDraft(
+                    space_id=space_id,
+                    version=1,
+                    goal_title="v1",
+                    goal_description="oldest",
+                ),
+                InspirationDraft(
+                    space_id=space_id,
+                    version=2,
+                    goal_title="v2 older id",
+                    goal_description="same version first",
+                ),
+                InspirationDraft(
+                    space_id=space_id,
+                    version=2,
+                    goal_title="v2 newer id",
+                    goal_description="same version second",
+                ),
+            ]
+        )
+
+    listed = workspace.list_drafts(space_id)
+
+    assert listed["ok"] is True
+    assert [item["goal_title"] for item in listed["items"]] == [
+        "v2 newer id",
+        "v2 older id",
+        "v1",
+    ]
+    assert listed["items"][0]["version"] == 2
+
+
+def test_inspiration_workspace_prepares_draft_generation_from_resource():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import resources, workspace
+    from openfocus.models import InspirationResource, InspirationSpace
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Resource draft", status="open")
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        space.workspace_path = str(resources.workspace_path(space, space_id))
+        active = InspirationResource(
+            space_id=space_id,
+            resource_seq_id=7,
+            type="text",
+            name="Bridge summary",
+            text_content="# Goal\n\nBody\n\n## Task\n\nDo it",
+        )
+        deleted = InspirationResource(
+            space_id=space_id,
+            resource_seq_id=8,
+            type="text",
+            name="Deleted summary",
+            text_content="ignore me",
+            deleted_at=dt.datetime.now(dt.timezone.utc),
+        )
+        s.add_all([active, deleted])
+        s.flush()
+        active_id = int(active.id)
+        deleted_id = int(deleted.id)
+
+    request = workspace.prepare_draft_from_resource(space_id, active_id)
+
+    assert request.space_id == space_id
+    assert request.prompt.startswith("/plan\n")
+    assert "Create a Goal and Tasks using this resource as the primary source" in (
+        request.prompt
+    )
+    assert "[Resource #7]" in request.prompt
+    assert "Name: Bridge summary" in request.prompt
+    assert "Type: text" in request.prompt
+
+    for bad_id in (None, 0):
+        try:
+            workspace.prepare_draft_from_resource(space_id, bad_id)
+        except workspace.InspirationWorkspaceValidationError as exc:
+            assert str(exc) == "resource_id is required"
+        else:
+            raise AssertionError("missing resource_id should be rejected")
+
+    for missing_id in (deleted_id, active_id + deleted_id + 1000):
+        try:
+            workspace.prepare_draft_from_resource(space_id, missing_id)
+        except workspace.InspirationWorkspaceResourceNotFound as exc:
+            assert str(exc) == "Resource not found"
+        else:
+            raise AssertionError("missing/deleted resources should be rejected")
+
+
+def test_inspiration_workspace_prepares_draft_generation_from_draft_summary():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import resources, workspace
+    from openfocus.models import Goal, InspirationResource, InspirationSpace, Task
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Summary draft", status="open", mode="terminal")
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        root = resources.workspace_path(space, space_id)
+        space.workspace_path = str(root)
+
+    try:
+        workspace.prepare_draft_from_draft_summary(space_id)
+    except workspace.InspirationWorkspaceValidationError as exc:
+        assert str(exc) == "Summary is missing"
+    else:
+        raise AssertionError("missing summary should be rejected")
+
+    summary_path = root / "resources" / "draft_summary.md"
+    summary_path.write_text("# Goal\n\nBody\n\n## Task\n\nDo it\n", encoding="utf-8")
+
+    request = workspace.prepare_draft_from_draft_summary(space_id)
+
+    assert request.space_id == space_id
+    assert request.prompt == "/plan"
+    with session_scope() as s:
+        assert s.query(Goal).count() == 0
+        assert s.query(Task).count() == 0
+        summary = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.space_id == space_id)
+            .filter(InspirationResource.type == "summary")
+            .one()
+        )
+        summary_id = int(summary.id)
+
+    workspace.delete_resource(space_id, summary_id)
+    summary_path.write_text("# Goal revived\n\nBody\n", encoding="utf-8")
+
+    try:
+        workspace.prepare_draft_from_draft_summary(space_id)
+    except workspace.InspirationWorkspaceValidationError as exc:
+        assert str(exc) == "Summary is missing"
+    else:
+        raise AssertionError("tombstoned summary should not be resynced")
+
+    with session_scope() as s:
+        assert s.query(Goal).count() == 0
+        assert s.query(Task).count() == 0
+        active_summaries = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.space_id == space_id)
+            .filter(InspirationResource.type == "summary")
+            .filter(InspirationResource.deleted_at.is_(None))
+            .all()
+        )
+        assert active_summaries == []
+
+
 def test_inspiration_workspace_close_reopen_and_delete_lifecycle():
     from openfocus.db import session_scope
     from openfocus.domains.inspirations import resources, workspace

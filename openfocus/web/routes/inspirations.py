@@ -5,9 +5,11 @@ import asyncio
 import base64
 import contextlib
 import datetime as dt
+from typing import Any
 
 from fastapi import (
     APIRouter,
+    Body,
     File,
     Form,
     HTTPException,
@@ -23,17 +25,11 @@ from ...db import session_scope
 from ...domains.agent_spaces import terminals as terminal_service
 from ...domains.companion import service as companion_service
 from ...domains.inspirations import publishing as inspiration_publishing
-from ...domains.inspirations import resources as inspiration_resources
 from ...domains.inspirations import service as inspiration_service
 from ...domains.inspirations import workspace as inspiration_workspace
 from ...domains.memory import service as memory_service
 from ...domains.terminals import gateway as terminal_gateway
-from ...models import (
-    InspirationDraft,
-    InspirationMessage,
-    InspirationResource,
-    InspirationSpace,
-)
+from ...models import InspirationMessage, InspirationSpace
 
 
 def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
@@ -118,16 +114,6 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                 space_id=int(space_id), seq_id=int(seq_id), file=file
             )
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    def _sync_draft_summary_file(s, space: InspirationSpace):
-        try:
-            return deps.inspiration_sync_draft_summary_file(s, space)
-        except inspiration_resources.EmptyDraftSummary as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except inspiration_resources.DraftSummaryReadError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except inspiration_resources.ResourceStorageError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
     def _terminal_conn(companion_id: int | None):
@@ -452,16 +438,17 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
 
     @router.post("/api/inspirations/{space_id:int}/drafts/generate_from_draft_summary")
     async def inspiration_draft_generate_from_draft_summary_api(space_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
-            item = _sync_draft_summary_file(s, space)
-            if item is None:
-                raise HTTPException(status_code=400, detail="Summary is missing")
-        return await _enqueue_turn(int(space_id), "/plan")
+        try:
+            result = inspiration_workspace.prepare_draft_from_draft_summary(
+                int(space_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return await _enqueue_turn(int(result.space_id), result.prompt)
 
     @router.post("/api/inspirations/{space_id:int}/drafts/generate_from_resource")
     async def inspiration_draft_generate_from_resource_api(
-        space_id: int, payload: dict
+        space_id: int, payload: Any = Body(...)
     ) -> dict:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="invalid payload")
@@ -469,43 +456,20 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             resource_id = int(payload.get("resource_id") or 0)
         except Exception:
             resource_id = 0
-        if resource_id <= 0:
-            raise HTTPException(status_code=400, detail="resource_id is required")
-        with session_scope() as s:
-            _space_or_404(s, int(space_id))
-            resource = (
-                s.query(InspirationResource)
-                .filter(InspirationResource.space_id == int(space_id))
-                .filter(InspirationResource.id == int(resource_id))
-                .filter(InspirationResource.deleted_at.is_(None))
-                .one_or_none()
+        try:
+            result = inspiration_workspace.prepare_draft_from_resource(
+                int(space_id), resource_id
             )
-            if resource is None:
-                raise HTTPException(status_code=404, detail="Resource not found")
-            resource_ref = deps.inspiration_resource_reference(resource)
-        prompt = (
-            "/plan\n"
-            "Create a Goal and Tasks using this resource as the primary source. "
-            "If it follows the OpenFocus bridge Markdown format, map the level-1 heading to the goal title, "
-            "the content under it to the goal content, and each level-2 heading plus its body to one task.\n\n"
-            f"{resource_ref}"
-        )
-        return await _enqueue_turn(int(space_id), prompt)
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return await _enqueue_turn(int(result.space_id), result.prompt)
 
     @router.get("/api/inspirations/{space_id:int}/drafts")
     def inspiration_drafts_list_api(space_id: int) -> dict:
-        with session_scope() as s:
-            _space_or_404(s, space_id)
-            drafts = (
-                s.query(InspirationDraft)
-                .filter(InspirationDraft.space_id == int(space_id))
-                .order_by(InspirationDraft.version.desc(), InspirationDraft.id.desc())
-                .all()
-            )
-        return {
-            "ok": True,
-            "items": [deps.inspiration_draft_payload(draft) for draft in drafts],
-        }
+        try:
+            return inspiration_workspace.list_drafts(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
 
     @router.post("/api/inspirations/{space_id:int}/publish")
     async def inspiration_publish_api(space_id: int, payload: dict) -> dict:

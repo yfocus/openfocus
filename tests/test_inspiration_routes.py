@@ -423,6 +423,54 @@ async def test_inspiration_workspace_resource_files_and_draft_summary_sync(monke
 
 
 @pytest.mark.anyio
+async def test_inspiration_draft_generation_error_compatibility(monkeypatch):
+    monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
+
+    from openfocus.app import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/inspirations", json={"title": "Draft error mapping"}
+        )
+        assert create_resp.status_code == 200
+        space_id = int(create_resp.json()["item"]["id"])
+
+        invalid_payload = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json=[],
+        )
+        assert invalid_payload.status_code == 400
+        assert invalid_payload.json()["detail"] == "invalid payload"
+
+        missing_resource_id = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource", json={}
+        )
+        assert missing_resource_id.status_code == 400
+        assert missing_resource_id.json()["detail"] == "resource_id is required"
+
+        zero_resource_id = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json={"resource_id": 0},
+        )
+        assert zero_resource_id.status_code == 400
+        assert zero_resource_id.json()["detail"] == "resource_id is required"
+
+        missing_resource = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_resource",
+            json={"resource_id": 999999},
+        )
+        assert missing_resource.status_code == 404
+        assert missing_resource.json()["detail"] == "Resource not found"
+
+        missing_summary = await client.post(
+            f"/api/inspirations/{space_id}/drafts/generate_from_draft_summary"
+        )
+        assert missing_summary.status_code == 400
+        assert missing_summary.json()["detail"] == "Summary is missing"
+
+
+@pytest.mark.anyio
 async def test_inspiration_terminal_api_uses_workspace_and_direct_prompt(monkeypatch):
     monkeypatch.delenv("OPENFOCUS_OPENAI_API_KEY", raising=False)
 
