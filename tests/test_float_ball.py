@@ -26,6 +26,11 @@ class _Grpc:
         self.registry = _Registry(conn)
 
 
+def _read_audit_text(memory_root):
+    audit_files = list((memory_root / "audit").glob("**/*.md"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
+
+
 class _FloatBallConn:
     capabilities = ["system_float_ball", "system_float_ball.test"]
 
@@ -92,7 +97,8 @@ def test_set_system_inbox_target_requires_capability() -> None:
         )
 
 
-def test_set_system_inbox_target_records_target() -> None:
+def test_set_system_inbox_target_records_target(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
     cid = _paired_companion()
     conn = _FloatBallConn()
 
@@ -106,7 +112,12 @@ def test_set_system_inbox_target_records_target() -> None:
         target = s.get(SystemInboxTarget, float_ball_service.SYSTEM_INBOX_TARGET_ID)
         assert target is not None
         assert target.companion_id == cid
-        assert s.query(Event).filter(Event.kind == "float_ball.target_set").count() == 1
+        event = s.query(Event).filter(Event.kind == "float_ball.target_set").one()
+        assert event.agent == "openfocus/system"
+        assert event.task_id is None
+        assert event.payload == {"previous_companion_id": None, "companion_id": cid}
+
+    assert _read_audit_text(tmp_path / "memory") == ""
 
 
 def test_float_ball_preflight_checks_capability_after_target_selection() -> None:

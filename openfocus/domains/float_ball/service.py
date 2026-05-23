@@ -227,16 +227,10 @@ def set_target(grpc_server: Any, *, companion_id: int) -> dict:
                 target.float_ball_last_started_at = None
             target.updated_at = now
         s.add(target)
-        event_service.record_event(
+        event_service.record_float_ball_target_set(
             s,
-            kind="float_ball.target_set",
-            agent="openfocus/system",
-            task_id=None,
-            payload={
-                "previous_companion_id": previous_companion_id or None,
-                "companion_id": cid,
-            },
-            audit=False,
+            previous_companion_id=previous_companion_id or None,
+            companion_id=cid,
         )
     return target_payload(grpc_server)
 
@@ -272,19 +266,13 @@ async def clear_target(grpc_server: Any) -> dict:
             stop_error = "target_companion_offline"
 
     with session_scope() as s:
-        event_service.record_event(
+        event_service.record_float_ball_target_cleared(
             s,
-            kind="float_ball.target_cleared",
-            agent="openfocus/system",
-            task_id=None,
-            payload={
-                "previous_companion_id": previous_companion_id or None,
-                "browser_session_id": stop_browser_session_id,
-                "stop_requested": should_stop,
-                "stopped": stopped,
-                "stop_error": stop_error,
-            },
-            audit=False,
+            previous_companion_id=previous_companion_id or None,
+            browser_session_id=stop_browser_session_id,
+            stop_requested=should_stop,
+            stopped=stopped,
+            stop_error=stop_error,
         )
     return {
         "ok": True,
@@ -390,17 +378,11 @@ async def start_float_ball(
             openfocus_base_url=openfocus_base_url,
             backend=backend,
         )
-        event_service.record_event(
+        event_service.record_float_ball_started(
             s,
-            kind="float_ball.started",
-            agent="openfocus/system",
-            task_id=None,
-            payload={
-                "browser_session_id": browser_session_id,
-                "companion_id": int(getattr(companion, "id", 0) or 0),
-                "backend": backend,
-            },
-            audit=False,
+            browser_session_id=browser_session_id,
+            companion_id=int(getattr(companion, "id", 0) or 0),
+            backend=backend,
         )
     return {
         "ok": True,
@@ -430,16 +412,10 @@ async def stop_float_ball(grpc_server: Any, *, browser_session_id: str) -> dict:
     except CompanionGrpcError as exc:
         return {"ok": False, "mode": "web", "reason": "grpc_error", "error": str(exc)}
     with session_scope() as s:
-        event_service.record_event(
+        event_service.record_float_ball_stopped(
             s,
-            kind="float_ball.stopped",
-            agent="openfocus/system",
-            task_id=None,
-            payload={
-                "browser_session_id": stop_browser_session_id,
-                "companion_id": int(getattr(companion, "id", 0) or 0),
-            },
-            audit=False,
+            browser_session_id=stop_browser_session_id,
+            companion_id=int(getattr(companion, "id", 0) or 0),
         )
     return {"ok": True, "mode": "system", "reason": "stopped"}
 
@@ -491,17 +467,11 @@ async def restore_desired_float_balls_for_companion(
                 enabled=True,
                 error=str(exc),
             )
-            event_service.record_event(
+            event_service.record_float_ball_restore_failed(
                 s,
-                kind="float_ball.restore_failed",
-                agent="openfocus/system",
-                task_id=None,
-                payload={
-                    "browser_session_id": sid,
-                    "companion_id": cid,
-                    "error": str(exc),
-                },
-                audit=False,
+                browser_session_id=sid,
+                companion_id=cid,
+                error=str(exc),
             )
         return 0
 
@@ -513,17 +483,11 @@ async def restore_desired_float_balls_for_companion(
             openfocus_base_url=base_url,
             backend=backend,
         )
-        event_service.record_event(
+        event_service.record_float_ball_restored(
             s,
-            kind="float_ball.restored",
-            agent="openfocus/system",
-            task_id=None,
-            payload={
-                "browser_session_id": sid,
-                "companion_id": cid,
-                "backend": backend,
-            },
-            audit=False,
+            browser_session_id=sid,
+            companion_id=cid,
+            backend=backend,
         )
     return 1
 
@@ -535,17 +499,11 @@ def record_float_ball_action(
     if not action:
         raise HTTPException(status_code=400, detail="action is required")
     with session_scope() as s:
-        event_service.record_event(
+        event_service.record_float_ball_action(
             s,
-            kind="float_ball.action",
-            agent="openfocus/companion",
-            task_id=None,
-            payload={
-                "browser_session_id": valid_browser_session_id(browser_session_id),
-                "action": action,
-                "payload": payload if isinstance(payload, dict) else {},
-            },
-            audit=False,
+            browser_session_id=valid_browser_session_id(browser_session_id),
+            action=action,
+            payload=payload if isinstance(payload, dict) else {},
         )
     return {"ok": True}
 

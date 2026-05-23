@@ -465,6 +465,233 @@ def record_task_reopened(
     )
 
 
+def record_companion_deleted(
+    s: Session,
+    *,
+    companion_id: int,
+    device_id: str,
+    unbound_spaces: int,
+) -> Event:
+    return record_event(
+        s,
+        kind="companion.deleted",
+        agent="openfocus/ui",
+        task_id=None,
+        payload={
+            "companion_id": int(companion_id),
+            "device_id": str(device_id or ""),
+            "unbound_spaces": int(unbound_spaces),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_companion_pair_attempted(
+    s: Session,
+    *,
+    companion_id: int,
+    device_id: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="companion.pair.attempted",
+        agent="openfocus/ui",
+        task_id=None,
+        payload={"companion_id": int(companion_id), "device_id": str(device_id or "")},
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_companion_paired(
+    s: Session,
+    *,
+    companion_id: int,
+    device_id: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="companion.paired",
+        agent="openfocus/ui",
+        task_id=None,
+        payload={"companion_id": int(companion_id), "device_id": str(device_id or "")},
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_companion_pairing_code_requested(
+    s: Session,
+    *,
+    companion_id: int,
+    device_id: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="companion.pairing_code.requested",
+        agent="openfocus/ui",
+        task_id=None,
+        payload={"companion_id": int(companion_id), "device_id": str(device_id or "")},
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_target_set(
+    s: Session,
+    *,
+    previous_companion_id: int | None,
+    companion_id: int,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.target_set",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "previous_companion_id": previous_companion_id,
+            "companion_id": int(companion_id),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_target_cleared(
+    s: Session,
+    *,
+    previous_companion_id: int | None,
+    browser_session_id: str,
+    stop_requested: bool,
+    stopped: bool,
+    stop_error: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.target_cleared",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "previous_companion_id": previous_companion_id,
+            "browser_session_id": str(browser_session_id or ""),
+            "stop_requested": bool(stop_requested),
+            "stopped": bool(stopped),
+            "stop_error": str(stop_error or ""),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_started(
+    s: Session,
+    *,
+    browser_session_id: str,
+    companion_id: int,
+    backend: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.started",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "browser_session_id": str(browser_session_id or ""),
+            "companion_id": int(companion_id),
+            "backend": str(backend or ""),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_stopped(
+    s: Session,
+    *,
+    browser_session_id: str,
+    companion_id: int,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.stopped",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "browser_session_id": str(browser_session_id or ""),
+            "companion_id": int(companion_id),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_restore_failed(
+    s: Session,
+    *,
+    browser_session_id: str,
+    companion_id: int,
+    error: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.restore_failed",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "browser_session_id": str(browser_session_id or ""),
+            "companion_id": int(companion_id),
+            "error": str(error or ""),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_restored(
+    s: Session,
+    *,
+    browser_session_id: str,
+    companion_id: int,
+    backend: str,
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.restored",
+        agent="openfocus/system",
+        task_id=None,
+        payload={
+            "browser_session_id": str(browser_session_id or ""),
+            "companion_id": int(companion_id),
+            "backend": str(backend or ""),
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
+def record_float_ball_action(
+    s: Session,
+    *,
+    browser_session_id: str,
+    action: str,
+    payload: dict[str, Any],
+) -> Event:
+    return record_event(
+        s,
+        kind="float_ball.action",
+        agent="openfocus/companion",
+        task_id=None,
+        payload={
+            "browser_session_id": str(browser_session_id or ""),
+            "action": str(action or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+        },
+        create_attention=False,
+        audit=False,
+    )
+
+
 def record_agent_report(
     s: Session,
     *,

@@ -22,6 +22,11 @@ class _GrpcServer:
     registry = _Registry()
 
 
+def _read_audit_text(memory_root):
+    audit_files = list((memory_root / "audit").glob("**/*.md"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in audit_files)
+
+
 def _app() -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -67,6 +72,60 @@ def test_delete_companion_missing_raises_domain_not_found_error() -> None:
 
     assert exc_info.value.detail == "Companion not found"
     assert not isinstance(exc_info.value, HTTPException)
+
+
+def test_delete_companion_records_event_without_audit_memory(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.db import session_scope
+    from openfocus.models import AgentSpace, Companion, Event
+
+    with session_scope() as session:
+        companion = Companion(
+            device_id="delete-companion-device",
+            name="delete companion",
+            base_url="grpc://delete-companion",
+            status="active",
+            auth_token="tok_delete",
+        )
+        session.add(companion)
+        session.flush()
+        companion_id = int(companion.id)
+        session.add(
+            AgentSpace(
+                task_public_id="delete-companion-task",
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+            )
+        )
+
+    result = companion_service.delete_companion(_GrpcServer(), companion_id)
+
+    assert result == {
+        "ok": True,
+        "companion_id": companion_id,
+        "unbound_spaces": 1,
+    }
+    with session_scope() as session:
+        event = session.query(Event).filter(Event.kind == "companion.deleted").one()
+        assert event.agent == "openfocus/ui"
+        assert event.task_id is None
+        assert event.payload == {
+            "companion_id": companion_id,
+            "device_id": "delete-companion-device",
+            "unbound_spaces": 1,
+        }
+        assert session.get(Companion, companion_id) is None
+        space = (
+            session.query(AgentSpace)
+            .filter_by(task_public_id="delete-companion-task")
+            .one()
+        )
+        assert space.companion_id is None
+
+    assert _read_audit_text(tmp_path / "memory") == ""
 
 
 def test_load_missing_agent_space_raises_domain_error_not_http_exception() -> None:
