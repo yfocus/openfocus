@@ -3,23 +3,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from ...domains.memory import service as memory_service
 from ...domains.recommendations.context_builder import (
     RecommendationContextBuilder,
-    memory_daily_files,
-    read_text,
-    serialize_event,
     task_type_label,
 )
-from ...models import Event
+from ...domains.recommendations.tool_adapter import build_recommendation_tool_registry
 from ..core.loop import AgentLoopConfig, parse_json_strict, run_tool_loop
 from ..core.tooling import SimpleToolRegistry
-from ..core.types import EventSink, Json, ToolSpec
+from ..core.types import EventSink, Json
 from ..llm.types import LLMProvider
-from ..tools.goals import build_goal_tools
 
 
 @dataclass
@@ -82,100 +76,8 @@ class AttentionSchedulerAgent:
     def _task_type_label(self, task_type: str | None) -> str:
         return task_type_label(task_type)
 
-    def _read_text(self, path: Path) -> str:
-        return read_text(path)
-
-    def _memory_daily_files(self) -> list[dict[str, Any]]:
-        return memory_daily_files()
-
-    def _tool_list_daily_memory_files(self, args: Json) -> str:
-        limit = max(1, min(int(args.get("limit") or 30), 365))
-        return json.dumps(
-            {"files": self._memory_daily_files()[:limit], "limit": limit},
-            ensure_ascii=False,
-        )
-
-    def _tool_read_daily_memory_file(self, args: Json) -> str:
-        rel = str(args.get("rel_path") or "").strip()
-        if not rel:
-            return json.dumps({"error": "rel_path is required"}, ensure_ascii=False)
-        try:
-            p = memory_service.path_from_rel(rel)
-            daily_root = memory_service.daily_root().resolve()
-            if p.resolve() != daily_root and daily_root not in p.resolve().parents:
-                raise ValueError("not a daily memory file")
-            return json.dumps(
-                {"rel_path": rel, "content": self._read_text(p)}, ensure_ascii=False
-            )
-        except Exception as e:
-            return json.dumps({"error": str(e), "rel_path": rel}, ensure_ascii=False)
-
-    def _serialize_event(self, ev: Event) -> dict[str, Any]:
-        return serialize_event(ev)
-
-    def _tool_list_recent_events(self, args: Json) -> str:
-        from ...db import session_scope
-
-        limit = max(1, min(int(args.get("limit") or 100), 200))
-        offset = max(0, int(args.get("offset") or 0))
-        with session_scope() as s:
-            q = s.query(Event).order_by(Event.id.desc()).offset(offset).limit(limit)
-            rows = q.all()
-        return json.dumps(
-            {
-                "events": [self._serialize_event(ev) for ev in rows],
-                "limit": limit,
-                "offset": offset,
-                "next_offset": offset + len(rows),
-            },
-            ensure_ascii=False,
-        )
-
     def _build_tool_registry(self) -> SimpleToolRegistry:
-        reg = build_goal_tools()
-        reg.register(
-            ToolSpec(
-                name="list_daily_memory_files",
-                description="列出可读取的 daily memory 文件。先用该工具找到 rel_path，再调用 read_daily_memory_file。",
-                parameters_json_schema={
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 365}
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            handler=self._tool_list_daily_memory_files,
-        )
-        reg.register(
-            ToolSpec(
-                name="read_daily_memory_file",
-                description="读取某个 daily memory 文件的完整内容。rel_path 必须来自 list_daily_memory_files。",
-                parameters_json_schema={
-                    "type": "object",
-                    "properties": {"rel_path": {"type": "string"}},
-                    "required": ["rel_path"],
-                    "additionalProperties": False,
-                },
-            ),
-            handler=self._tool_read_daily_memory_file,
-        )
-        reg.register(
-            ToolSpec(
-                name="list_recent_events",
-                description="查看更多事件。支持 offset/limit 翻页；返回最新事件优先。",
-                parameters_json_schema={
-                    "type": "object",
-                    "properties": {
-                        "offset": {"type": "integer", "minimum": 0},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                    },
-                    "additionalProperties": False,
-                },
-            ),
-            handler=self._tool_list_recent_events,
-        )
-        return reg
+        return build_recommendation_tool_registry()
 
     def _build_context(self) -> dict[str, Any]:
         return RecommendationContextBuilder(goal_id=self.goal_id).build()
