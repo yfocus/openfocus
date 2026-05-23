@@ -443,6 +443,99 @@ def test_agent_completed_next_move_event_sink_creates_attention_item(
     assert audit_files
     audit_text = audit_files[0].read_text(encoding="utf-8")
     assert "agent.completed" in audit_text
+    assert "Agent emitted event" in audit_text
+
+
+def test_agent_completed_task_decomposer_payload_does_not_create_attention_item(
+    monkeypatch, tmp_path
+):
+    memory_root = tmp_path / "memory"
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(memory_root))
+
+    from openfocus.agent.storage.events import DbEventSink
+    from openfocus.db import session_scope
+    from openfocus.models import AttentionItem, Event, Goal, Task
+
+    with session_scope() as s:
+        g = Goal(title="decompose goal", content="", due_date=dt.date.today())
+        s.add(g)
+        s.flush()
+        t = Task(
+            goal_id=g.id, title="created by decomposer", content="d", status="todo"
+        )
+        s.add(t)
+        s.flush()
+        goal_id = int(g.id)
+        task_row_id = int(t.id)
+        public_id = t.public_id
+        task_title = t.title
+
+    DbEventSink().emit(
+        "agent.completed",
+        "task_decomposer",
+        {
+            "goal_id": goal_id,
+            "created_tasks": [
+                {
+                    "id": task_row_id,
+                    "public_id": public_id,
+                    "title": task_title,
+                }
+            ],
+            "usage": {"total_tokens": 42},
+        },
+    )
+
+    with session_scope() as s:
+        ev = s.query(Event).filter(Event.kind == "agent.completed").one()
+        assert ev.agent == "task_decomposer"
+        assert ev.task_id is None
+        assert ev.payload["goal_id"] == goal_id
+        assert ev.payload["created_tasks"][0]["public_id"] == public_id
+        assert s.query(AttentionItem).count() == 0
+
+    audit_text = _read_audit_text(memory_root)
+    assert "agent.completed" in audit_text
+    assert "task_decomposer" in audit_text
+    assert "Agent emitted event" in audit_text
+
+
+def test_non_next_move_event_sink_emission_does_not_create_attention_item(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENFOCUS_MEMORY_DIR", str(tmp_path / "memory"))
+
+    from openfocus.agent.storage.events import DbEventSink
+    from openfocus.db import session_scope
+    from openfocus.models import AttentionItem, Event, Goal, Task
+
+    with session_scope() as s:
+        g = Goal(title="agent emission goal", content="", due_date=dt.date.today())
+        s.add(g)
+        s.flush()
+        t = Task(goal_id=g.id, title="ordinary task", content="d", status="todo")
+        s.add(t)
+        s.flush()
+        public_id = t.public_id
+
+    DbEventSink().emit(
+        "agent.fallback",
+        "attention_scheduler",
+        {"status": "failed", "message": "fallback used"},
+        task_id=public_id,
+    )
+
+    with session_scope() as s:
+        ev = s.query(Event).filter(Event.kind == "agent.fallback").one()
+        assert ev.agent == "attention_scheduler"
+        assert ev.task_id == public_id
+        assert s.query(AttentionItem).count() == 0
+
+    audit_files = list(Path(tmp_path / "memory" / "audit").glob("**/*.md"))
+    assert audit_files
+    audit_text = audit_files[0].read_text(encoding="utf-8")
+    assert "agent.fallback" in audit_text
+    assert "Agent emitted event" in audit_text
 
 
 @pytest.mark.anyio

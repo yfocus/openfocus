@@ -298,38 +298,17 @@ def submit_feedback(s: Session, payload: dict) -> dict:
     s.add(row)
     s.flush()
     feedback_id = int(row.id or 0)
-    feedback_event_payload = {
-        "run_id": run_id,
-        "feedback_id": feedback_id,
-        "feedback_type": feedback_type,
-        "reason_code": reason_code,
-        "reason_text": reason_text,
-        "task_title": task.title,
-        "goal_id": int(task.goal_id),
-    }
-    event_service.record_event(
+    event_service.record_next_move_feedback(
         s,
-        kind="next_move.not_for_now"
-        if feedback_type == "dismiss"
-        else "next_move.feedback",
-        agent="web",
-        task_id=task_public_id,
-        payload=feedback_event_payload,
-        audit={
-            "kind": "next_move.not_for_now"
-            if feedback_type == "dismiss"
-            else "next_move.feedback",
-            "source": "web",
-            "summary": f"Next Move feedback for task: {task_public_id}",
-            "detail": f"Feedback type: {feedback_type}\nReason code: {reason_code or '-'}\nReason text:\n\n{reason_text or '-'}",
-            "goal_id": int(task.goal_id),
-            "task_public_id": task_public_id,
-            "metadata": {
-                "run_id": run_id,
-                "reason_code": reason_code,
-                "learned_summary": learned_summary,
-            },
-        },
+        feedback_type=feedback_type,
+        run_id=run_id,
+        feedback_id=feedback_id,
+        task_public_id=task_public_id,
+        task_title=str(task.title or ""),
+        goal_id=int(task.goal_id),
+        reason_code=reason_code,
+        reason_text=reason_text,
+        learned_summary=learned_summary,
     )
     similar_rows = (
         s.query(NextMoveFeedback)

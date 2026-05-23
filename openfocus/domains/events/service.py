@@ -16,6 +16,24 @@ NOISE_EVENT_KINDS = {"companion.connected", "companion.disconnected"}
 AuditPayload = dict[str, Any] | bool | None
 
 
+def _has_next_move_task_target(payload: dict[str, Any]) -> bool:
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        if str(target.get("task_public_id") or "").strip():
+            return True
+    return False
+
+
+def _should_project_agent_emission_to_attention(
+    *, kind: str, payload: dict[str, Any]
+) -> bool:
+    return kind == "agent.completed" and _has_next_move_task_target(payload)
+
+
 def _audit_value(audit: dict[str, Any], key: str, default: Any = None) -> Any:
     return audit[key] if key in audit else default
 
@@ -288,6 +306,37 @@ def record_agent_report(
     )
 
 
+def record_agent_emission(
+    s: Session,
+    *,
+    kind: str,
+    agent: str,
+    task_id: str | None,
+    payload: dict[str, Any],
+) -> Event:
+    event_kind = str(kind or "")
+    event_agent = str(agent or "")
+    event_payload = payload or {}
+    return record_event(
+        s,
+        kind=event_kind,
+        agent=event_agent,
+        task_id=task_id,
+        payload=event_payload,
+        create_attention=_should_project_agent_emission_to_attention(
+            kind=event_kind,
+            payload=event_payload,
+        ),
+        audit={
+            "kind": f"event.{event_kind}",
+            "source": f"agent:{event_agent}",
+            "summary": f"Agent emitted event `{event_kind}`.",
+            "detail": json.dumps(event_payload, ensure_ascii=False, indent=2),
+            "task_public_id": task_id,
+        },
+    )
+
+
 def record_focus_report(s: Session, report: Any) -> Event:
     payload = {
         "task_name": report.task_name,
@@ -313,6 +362,64 @@ def record_focus_report(s: Session, report: Any) -> Event:
             "goal_id": report.goal_id,
             "task_public_id": report.task_public_id,
             "metadata": {"status": report.status},
+        },
+    )
+
+
+def record_next_move_feedback(
+    s: Session,
+    *,
+    feedback_type: str,
+    run_id: int | None,
+    feedback_id: int,
+    task_public_id: str,
+    task_title: str,
+    goal_id: int | None,
+    reason_code: str,
+    reason_text: str,
+    learned_summary: str,
+) -> Event:
+    normalized_feedback_type = (
+        str(feedback_type or "dismiss").strip().lower() or "dismiss"
+    )
+    event_kind = (
+        "next_move.not_for_now"
+        if normalized_feedback_type == "dismiss"
+        else "next_move.feedback"
+    )
+    payload = {
+        "run_id": run_id,
+        "feedback_id": feedback_id,
+        "feedback_type": normalized_feedback_type,
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "task_title": task_title,
+        "goal_id": goal_id,
+    }
+    return record_event(
+        s,
+        kind=event_kind,
+        agent="web",
+        task_id=task_public_id,
+        payload=payload,
+        create_attention=False,
+        audit={
+            "kind": event_kind,
+            "source": "web",
+            "summary": f"Next Move feedback for task: {task_public_id}",
+            "detail": (
+                f"Feedback type: {normalized_feedback_type}\n"
+                f"Reason code: {reason_code or '-'}\n"
+                "Reason text:\n\n"
+                f"{reason_text or '-'}"
+            ),
+            "goal_id": goal_id,
+            "task_public_id": task_public_id,
+            "metadata": {
+                "run_id": run_id,
+                "reason_code": reason_code,
+                "learned_summary": learned_summary,
+            },
         },
     )
 

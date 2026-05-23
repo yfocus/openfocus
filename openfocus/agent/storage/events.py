@@ -21,15 +21,10 @@ class DbEventSink(EventSink):
         with session_scope() as s:
             from ...domains.events import service as event_service
 
-            event_service.record_event(
+            event_service.record_agent_emission(
                 s,
                 kind=kind,
                 agent=agent,
                 task_id=task_id or self.default_task_id,
                 payload=payload or {},
-                audit={
-                    "kind": f"event.{kind}",
-                    "source": f"agent:{agent}",
-                    "summary": f"Agent emitted event `{kind}`.",
-                },
             )
