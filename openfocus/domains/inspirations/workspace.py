@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -35,6 +36,10 @@ class InspirationWorkspaceValidationError(InspirationWorkspaceError):
     """Raised when a request is invalid for the workspace state."""
 
 
+class InspirationWorkspaceResourceNotFound(InspirationWorkspaceError):
+    """Raised when an Inspiration resource cannot be found."""
+
+
 @dataclass(frozen=True)
 class WorkspaceLifecycleResult:
     space_id: int
@@ -55,6 +60,55 @@ class WorkspaceDeleteResult:
     audit_metadata: dict
 
 
+@dataclass(frozen=True)
+class StoredResourceFile:
+    seq_id: int
+    path: Path
+    uploaded_name: str
+
+
+@dataclass(frozen=True)
+class ResourceUploadSlot:
+    space_id: int
+    seq_id: int
+
+
+@dataclass(frozen=True)
+class ResourceMutationResult:
+    space_id: int
+    resource_id: int
+    item: dict
+    audit_kind: str | None = None
+    audit_summary: str = ""
+    audit_detail: str = ""
+    audit_metadata: dict | None = None
+
+
+@dataclass(frozen=True)
+class ResourceDeleteResult:
+    space_id: int
+    resource_id: int
+
+
+@dataclass(frozen=True)
+class ResourceRawFileResult:
+    path: Path
+    media_type: str
+    filename: str
+
+
+@dataclass(frozen=True)
+class ResourceSyncResult:
+    space_id: int
+    synced: bool
+    items: list[dict]
+    item: dict | None
+    audit_kind: str
+    audit_summary: str
+    audit_detail: str
+    audit_metadata: dict
+
+
 def _space_or_error(s, space_id: int) -> InspirationSpace:
     space = s.get(InspirationSpace, int(space_id))
     if space is None:
@@ -65,6 +119,23 @@ def _space_or_error(s, space_id: int) -> InspirationSpace:
     if not str(getattr(space, "mode", "") or "").strip():
         space.mode = "built_in"
     return space
+
+
+def _ensure_open(space: InspirationSpace, message: str) -> None:
+    if str(space.status or "open") != "open":
+        raise InspirationWorkspaceValidationError(message)
+
+
+def _resource_or_error(
+    s, space_id: int, resource_id: int, *, file_lookup: bool = False
+) -> InspirationResource:
+    resource = s.get(InspirationResource, int(resource_id))
+    if resource is None or int(resource.space_id) != int(space_id):
+        raise InspirationWorkspaceResourceNotFound("Resource not found")
+    if resource.deleted_at is not None:
+        detail = "File resource not found" if file_lookup else "Resource not found"
+        raise InspirationWorkspaceResourceNotFound(detail)
+    return resource
 
 
 def _count_by_space(s, model, space_ids: list[int]) -> dict[int, int]:
@@ -283,6 +354,315 @@ def detail_page_context(
             "published_goal": published_goal,
             "default_due": due.isoformat(),
         }
+
+
+def prepare_resource_upload(space_id: int) -> ResourceUploadSlot:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces accept new resources")
+        try:
+            resources.writable_resources_dir(space, int(space_id))
+        except resources.ResourceStorageError as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        seq_id = resources.next_resource_seq(s, int(space_id))
+    return ResourceUploadSlot(space_id=int(space_id), seq_id=int(seq_id))
+
+
+def prepare_resource_file_replacement(
+    space_id: int, resource_id: int
+) -> ResourceUploadSlot:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces can replace resource files")
+        resource = _resource_or_error(s, int(space_id), int(resource_id))
+        if str(resource.type or "") != "image":
+            raise InspirationWorkspaceValidationError(
+                "Only image resources support replace"
+            )
+        try:
+            resources.writable_resources_dir(space, int(space_id))
+        except resources.ResourceStorageError as exc:
+            raise InspirationWorkspaceValidationError(str(exc)) from exc
+        seq_id = int(resource.resource_seq_id or 0)
+    return ResourceUploadSlot(space_id=int(space_id), seq_id=seq_id)
+
+
+def create_resource(
+    space_id: int,
+    *,
+    resource_type: str,
+    name: str | None = None,
+    text_content: str | None = None,
+    url_content: str | None = None,
+    stored_file: StoredResourceFile | None = None,
+) -> ResourceMutationResult:
+    normalized_type = str(resource_type or "").strip().lower()
+    if normalized_type not in {"url", "image", "text", "summary"}:
+        raise InspirationWorkspaceValidationError("unsupported resource type")
+
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces accept new resources")
+        seq_id = (
+            int(stored_file.seq_id)
+            if stored_file is not None
+            else resources.next_resource_seq(s, int(space_id))
+        )
+        resource_name = str(name or "").strip()
+        now = resources.utcnow()
+        resource = InspirationResource(
+            space_id=int(space_id),
+            resource_seq_id=seq_id,
+            type=normalized_type,
+            name=resource_name or f"resource-{seq_id}",
+            text_content="",
+            url_content="",
+            file_path="",
+            is_system_generated=False,
+        )
+        if normalized_type == "url":
+            url_text = str(url_content or "").strip()
+            if not url_text:
+                raise InspirationWorkspaceValidationError("url_content is required")
+            resource.url_content = url_text[:4000]
+            resource.source = "user"
+            if not resource_name:
+                resource.name = url_text[:512]
+        elif normalized_type in {"text", "summary"}:
+            body = str(text_content or "").strip()
+            if not body:
+                raise InspirationWorkspaceValidationError("text_content is required")
+            resource.text_content = body[:20000]
+            resource.source = "user"
+            if normalized_type == "summary":
+                resource.is_system_generated = True
+                resource.source = "built_in_agent"
+            if not resource_name:
+                resource.name = f"{normalized_type}-{seq_id}"
+        else:
+            if stored_file is None:
+                raise InspirationWorkspaceValidationError(
+                    "file is required for image resources"
+                )
+            safe_file_path = resources.safe_resource_file_path(
+                space, int(space_id), stored_file.path
+            )
+            if safe_file_path is None:
+                raise InspirationWorkspaceValidationError("unsafe resource file path")
+            resource.file_path = str(safe_file_path)
+            try:
+                resource.external_path = str(
+                    safe_file_path.relative_to(
+                        resources.workspace_path(space, int(space_id))
+                    )
+                )
+            except Exception:
+                resource.external_path = str(safe_file_path)
+            resource.source = "user"
+            resource.name = resource_name or str(stored_file.uploaded_name or "image")
+        s.add(resource)
+        if normalized_type in {"url", "text", "summary"}:
+            try:
+                resources.write_resource_file(resource, space)
+            except resources.ResourceStorageError as exc:
+                raise InspirationWorkspaceValidationError(str(exc)) from exc
+        space.last_activity_at = now
+        s.flush()
+        payload = presenters.resource_payload(
+            int(space_id), resource, include_text=True
+        )
+
+    return ResourceMutationResult(
+        space_id=int(space_id),
+        resource_id=int(payload["id"]),
+        item=payload,
+        audit_kind="inspiration.resource_added",
+        audit_summary=(
+            f"Added a {normalized_type} resource to inspiration space {int(space_id)}."
+        ),
+        audit_detail=str(payload.get("reference") or ""),
+        audit_metadata={
+            "space_id": int(space_id),
+            "resource_id": int(payload["id"]),
+            "resource_type": normalized_type,
+        },
+    )
+
+
+def update_resource(
+    space_id: int, resource_id: int, payload: dict
+) -> ResourceMutationResult:
+    if not isinstance(payload, dict):
+        raise InspirationWorkspaceValidationError("invalid payload")
+
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces can edit resources")
+        resource = _resource_or_error(s, int(space_id), int(resource_id))
+        if "name" in payload:
+            name = str(payload.get("name") or "").strip()
+            if name:
+                resource.name = name[:512]
+        if str(resource.type or "") == "url" and "url_content" in payload:
+            url_text = str(payload.get("url_content") or "").strip()
+            if not url_text:
+                raise InspirationWorkspaceValidationError("url_content is required")
+            resource.url_content = url_text[:4000]
+        if (
+            str(resource.type or "") in {"text", "summary"}
+            and "text_content" in payload
+        ):
+            body = str(payload.get("text_content") or "").strip()
+            if not body:
+                raise InspirationWorkspaceValidationError("text_content is required")
+            resource.text_content = body[:20000]
+        if str(resource.type or "") in {"url", "text", "summary"}:
+            try:
+                resources.write_resource_file(resource, space)
+            except resources.ResourceStorageError as exc:
+                raise InspirationWorkspaceValidationError(str(exc)) from exc
+        space.last_activity_at = resources.utcnow()
+        payload_out = presenters.resource_payload(
+            int(space_id), resource, include_text=True
+        )
+    return ResourceMutationResult(
+        space_id=int(space_id), resource_id=int(resource_id), item=payload_out
+    )
+
+
+def replace_resource_file(
+    space_id: int,
+    resource_id: int,
+    *,
+    stored_file: StoredResourceFile,
+    name: str | None = None,
+) -> ResourceMutationResult:
+    old_file_to_delete: Path | None = None
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces can replace resource files")
+        resource = _resource_or_error(s, int(space_id), int(resource_id))
+        if str(resource.type or "") != "image":
+            raise InspirationWorkspaceValidationError(
+                "Only image resources support replace"
+            )
+        new_path_obj = resources.safe_resource_file_path(
+            space, int(space_id), stored_file.path
+        )
+        if new_path_obj is None:
+            raise InspirationWorkspaceValidationError("unsafe resource file path")
+        old_path_raw = str(resource.file_path or "").strip()
+        if old_path_raw:
+            old_path = resources.safe_resource_file_path(
+                space, int(space_id), old_path_raw
+            )
+            if old_path is not None and old_path != new_path_obj:
+                old_file_to_delete = old_path
+        resource.file_path = str(new_path_obj)
+        try:
+            resource.external_path = str(
+                new_path_obj.relative_to(resources.workspace_path(space, int(space_id)))
+            )
+        except Exception:
+            resource.external_path = str(new_path_obj)
+        next_name = str(name or "").strip()
+        if next_name:
+            resource.name = next_name[:512]
+        elif not str(resource.name or "").strip():
+            resource.name = str(stored_file.uploaded_name or "image")
+        space.last_activity_at = resources.utcnow()
+        payload_out = presenters.resource_payload(
+            int(space_id), resource, include_text=True
+        )
+
+    if old_file_to_delete is not None:
+        try:
+            if not old_file_to_delete.is_symlink() and old_file_to_delete.is_file():
+                old_file_to_delete.unlink()
+        except Exception:
+            pass
+    return ResourceMutationResult(
+        space_id=int(space_id), resource_id=int(resource_id), item=payload_out
+    )
+
+
+def delete_resource(space_id: int, resource_id: int) -> ResourceDeleteResult:
+    file_to_delete: Path | None = None
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        _ensure_open(space, "Only open spaces can delete resources")
+        resource = s.get(InspirationResource, int(resource_id))
+        if resource is None or int(resource.space_id) != int(space_id):
+            raise InspirationWorkspaceResourceNotFound("Resource not found")
+        if resource.deleted_at is None:
+            raw_file_path = str(resource.file_path or "").strip()
+            if raw_file_path:
+                file_to_delete = resources.safe_resource_file_path(
+                    space, int(space_id), raw_file_path
+                )
+            resource.deleted_at = resources.utcnow()
+            space.last_activity_at = resources.utcnow()
+    if file_to_delete is not None:
+        try:
+            if not file_to_delete.is_symlink() and file_to_delete.is_file():
+                file_to_delete.unlink()
+        except Exception:
+            pass
+    return ResourceDeleteResult(space_id=int(space_id), resource_id=int(resource_id))
+
+
+def raw_resource_file(space_id: int, resource_id: int) -> ResourceRawFileResult:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        resource = _resource_or_error(
+            s, int(space_id), int(resource_id), file_lookup=True
+        )
+        if not str(resource.file_path or "").strip():
+            raise InspirationWorkspaceResourceNotFound("File resource not found")
+        file_path = resources.safe_resource_file_path(
+            space, int(space_id), str(resource.file_path or "")
+        )
+        if file_path is None:
+            raise InspirationWorkspaceResourceNotFound("File resource not found")
+        return ResourceRawFileResult(
+            path=file_path,
+            media_type=resources.guess_media_type(file_path),
+            filename=str(resource.name or file_path.name),
+        )
+
+
+def sync_resources(space_id: int) -> ResourceSyncResult:
+    with session_scope() as s:
+        space = _space_or_error(s, int(space_id))
+        if str(space.status or "open") == "published":
+            raise InspirationWorkspaceValidationError("Published spaces are read-only")
+        items = resources.sync_resources_dir(s, space)
+        payloads = [
+            presenters.resource_payload(int(space_id), item, include_text=True)
+            for item in items
+        ]
+        draft_item = next(
+            (
+                item
+                for item in payloads
+                if item.get("external_path") == "resources/draft_summary.md"
+            ),
+            None,
+        )
+    return ResourceSyncResult(
+        space_id=int(space_id),
+        synced=bool(payloads),
+        items=payloads,
+        item=draft_item,
+        audit_kind="inspiration.resources_synced",
+        audit_summary=(
+            f"Synced resources directory for inspiration space {int(space_id)}."
+        ),
+        audit_detail=json.dumps(
+            [item.get("external_path") for item in payloads], ensure_ascii=False
+        )[:4000],
+        audit_metadata={"space_id": int(space_id), "resource_count": len(payloads)},
+    )
 
 
 def close_space(space_id: int) -> WorkspaceLifecycleResult:

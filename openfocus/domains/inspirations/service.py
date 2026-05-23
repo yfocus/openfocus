@@ -50,12 +50,15 @@ ReleaseTerminalMode = Callable[[str], None]
 
 async def store_uploaded_resource_file(*, space_id: int, seq_id: int, file) -> tuple:
     content = await file.read()
-    return resources.store_uploaded_resource_bytes(
-        space_id=int(space_id),
-        seq_id=int(seq_id),
-        original_name=str(getattr(file, "filename", "") or "image"),
-        content=content,
-    )
+    with session_scope() as s:
+        space = s.get(InspirationSpace, int(space_id))
+        return resources.store_uploaded_resource_bytes(
+            space_id=int(space_id),
+            seq_id=int(seq_id),
+            original_name=str(getattr(file, "filename", "") or "image"),
+            content=content,
+            space=space,
+        )
 
 
 def truncate_zh(text: str, n: int = 20) -> str:

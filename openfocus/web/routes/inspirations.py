@@ -5,8 +5,6 @@ import asyncio
 import base64
 import contextlib
 import datetime as dt
-import json
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -69,7 +67,13 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     def _workspace_http_error(
         exc: inspiration_workspace.InspirationWorkspaceError,
     ) -> HTTPException:
-        if isinstance(exc, inspiration_workspace.InspirationWorkspaceNotFound):
+        if isinstance(
+            exc,
+            (
+                inspiration_workspace.InspirationWorkspaceNotFound,
+                inspiration_workspace.InspirationWorkspaceResourceNotFound,
+            ),
+        ):
             return HTTPException(status_code=404, detail=str(exc))
         if isinstance(exc, inspiration_workspace.InspirationWorkspaceValidationError):
             return HTTPException(status_code=400, detail=str(exc))
@@ -122,6 +126,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         except inspiration_resources.EmptyDraftSummary as e:
             raise HTTPException(status_code=400, detail=str(e))
         except inspiration_resources.DraftSummaryReadError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except inspiration_resources.ResourceStorageError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
     def _terminal_conn(companion_id: int | None):
@@ -316,141 +322,50 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         file: UploadFile | None = File(default=None),
     ) -> dict:
         normalized_type = str(resource_type or "").strip().lower()
-        if normalized_type not in {"url", "image", "text", "summary"}:
-            raise HTTPException(status_code=400, detail="unsupported resource type")
-
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") != "open":
+        stored_file: inspiration_workspace.StoredResourceFile | None = None
+        if normalized_type == "image":
+            if file is None:
                 raise HTTPException(
-                    status_code=400, detail="Only open spaces accept new resources"
+                    status_code=400, detail="file is required for image resources"
                 )
-            seq_id = deps.inspiration_next_resource_seq(s, int(space_id))
-            resource_name = str(name or "").strip()
-            now = deps.utcnow()
-            resource = InspirationResource(
+            try:
+                slot = inspiration_workspace.prepare_resource_upload(int(space_id))
+            except inspiration_workspace.InspirationWorkspaceError as exc:
+                raise _workspace_http_error(exc) from exc
+            target_path, uploaded_name = await _store_uploaded_resource_file(
                 space_id=int(space_id),
-                resource_seq_id=int(seq_id),
-                type=normalized_type,
-                name=resource_name or f"resource-{int(seq_id)}",
-                text_content="",
-                url_content="",
-                file_path="",
-                is_system_generated=False,
+                seq_id=int(slot.seq_id),
+                file=file,
             )
-            if normalized_type == "url":
-                url_text = str(url_content or "").strip()
-                if not url_text:
-                    raise HTTPException(
-                        status_code=400, detail="url_content is required"
-                    )
-                resource.url_content = url_text[:4000]
-                resource.source = "user"
-                if not resource_name:
-                    resource.name = url_text[:512]
-            elif normalized_type in {"text", "summary"}:
-                body = str(text_content or "").strip()
-                if not body:
-                    raise HTTPException(
-                        status_code=400, detail="text_content is required"
-                    )
-                resource.text_content = body[:20000]
-                resource.source = "user"
-                if normalized_type == "summary":
-                    resource.is_system_generated = True
-                    resource.source = "built_in_agent"
-                if not resource_name:
-                    resource.name = f"{normalized_type}-{int(seq_id)}"
-            else:
-                if file is None:
-                    raise HTTPException(
-                        status_code=400, detail="file is required for image resources"
-                    )
-                (
-                    target_path,
-                    uploaded_name,
-                ) = await _store_uploaded_resource_file(
-                    space_id=int(space_id),
-                    seq_id=int(seq_id),
-                    file=file,
-                )
-                resource.file_path = str(target_path)
-                try:
-                    resource.external_path = str(
-                        target_path.relative_to(
-                            deps.inspiration_workspace_path(space, int(space_id))
-                        )
-                    )
-                except Exception:
-                    resource.external_path = str(target_path)
-                resource.source = "user"
-                resource.name = resource_name or uploaded_name
-            s.add(resource)
-            if normalized_type in {"url", "text", "summary"}:
-                deps.inspiration_write_resource_file(resource, space)
-            space.last_activity_at = now
-            s.flush()
-            payload = deps.inspiration_resource_payload(
-                int(space_id), resource, include_text=True
+            stored_file = inspiration_workspace.StoredResourceFile(
+                seq_id=int(slot.seq_id), path=target_path, uploaded_name=uploaded_name
             )
-        deps.try_audit_memory(
-            kind="inspiration.resource_added",
-            source="web",
-            summary=f"Added a {normalized_type} resource to inspiration space {int(space_id)}.",
-            detail=str(payload.get("reference") or ""),
-            metadata={
-                "space_id": int(space_id),
-                "resource_id": int(payload["id"]),
-                "resource_type": normalized_type,
-            },
-        )
-        return {"ok": True, "item": payload}
+
+        try:
+            result = inspiration_workspace.create_resource(
+                int(space_id),
+                resource_type=normalized_type,
+                name=name,
+                text_content=text_content,
+                url_content=url_content,
+                stored_file=stored_file,
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        _audit_workspace_result(result)
+        return {"ok": True, "item": result.item}
 
     @router.patch("/api/inspirations/{space_id:int}/resources/{resource_id:int}")
     def inspiration_resource_update_api(
         space_id: int, resource_id: int, payload: dict
     ) -> dict:
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="invalid payload")
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") != "open":
-                raise HTTPException(
-                    status_code=400, detail="Only open spaces can edit resources"
-                )
-            resource = s.get(InspirationResource, int(resource_id))
-            if resource is None or int(resource.space_id) != int(space_id):
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if resource.deleted_at is not None:
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if "name" in payload:
-                name = str(payload.get("name") or "").strip()
-                if name:
-                    resource.name = name[:512]
-            if str(resource.type or "") == "url" and "url_content" in payload:
-                url_text = str(payload.get("url_content") or "").strip()
-                if not url_text:
-                    raise HTTPException(
-                        status_code=400, detail="url_content is required"
-                    )
-                resource.url_content = url_text[:4000]
-            if (
-                str(resource.type or "") in {"text", "summary"}
-                and "text_content" in payload
-            ):
-                body = str(payload.get("text_content") or "").strip()
-                if not body:
-                    raise HTTPException(
-                        status_code=400, detail="text_content is required"
-                    )
-                resource.text_content = body[:20000]
-            if str(resource.type or "") in {"url", "text", "summary"}:
-                deps.inspiration_write_resource_file(resource, space)
-            space.last_activity_at = deps.utcnow()
-            payload_out = deps.inspiration_resource_payload(
-                int(space_id), resource, include_text=True
+        try:
+            result = inspiration_workspace.update_resource(
+                int(space_id), int(resource_id), payload
             )
-        return {"ok": True, "item": payload_out}
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return {"ok": True, "item": result.item}
 
     @router.post("/api/inspirations/{space_id:int}/resources/{resource_id:int}/replace")
     async def inspiration_resource_replace_api(
@@ -463,140 +378,68 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise HTTPException(
                 status_code=400, detail="file is required for image replacement"
             )
-        old_path_raw = ""
-        new_path_obj: Path | None = None
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") != "open":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only open spaces can replace resource files",
-                )
-            resource = s.get(InspirationResource, int(resource_id))
-            if resource is None or int(resource.space_id) != int(space_id):
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if resource.deleted_at is not None:
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if str(resource.type or "") != "image":
-                raise HTTPException(
-                    status_code=400, detail="Only image resources support replace"
-                )
-            old_path_raw = str(resource.file_path or "").strip()
-            (
-                new_path_obj,
-                uploaded_name,
-            ) = await _store_uploaded_resource_file(
-                space_id=int(space_id),
-                seq_id=int(resource.resource_seq_id or 0),
-                file=file,
+        try:
+            slot = inspiration_workspace.prepare_resource_file_replacement(
+                int(space_id), int(resource_id)
             )
-            resource.file_path = str(new_path_obj)
-            try:
-                resource.external_path = str(
-                    new_path_obj.relative_to(
-                        deps.inspiration_workspace_path(space, int(space_id))
-                    )
-                )
-            except Exception:
-                resource.external_path = str(new_path_obj)
-            next_name = str(name or "").strip()
-            if next_name:
-                resource.name = next_name[:512]
-            elif not str(resource.name or "").strip():
-                resource.name = uploaded_name
-            space.last_activity_at = deps.utcnow()
-            payload_out = deps.inspiration_resource_payload(
-                int(space_id), resource, include_text=True
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+
+        target_path, uploaded_name = await _store_uploaded_resource_file(
+            space_id=int(space_id),
+            seq_id=int(slot.seq_id),
+            file=file,
+        )
+        stored_file = inspiration_workspace.StoredResourceFile(
+            seq_id=int(slot.seq_id), path=target_path, uploaded_name=uploaded_name
+        )
+        try:
+            result = inspiration_workspace.replace_resource_file(
+                int(space_id),
+                int(resource_id),
+                stored_file=stored_file,
+                name=name,
             )
-        if old_path_raw:
-            try:
-                old_path = Path(old_path_raw).expanduser()
-                if (
-                    new_path_obj is not None
-                    and old_path != new_path_obj
-                    and old_path.exists()
-                    and old_path.is_file()
-                ):
-                    old_path.unlink()
-            except Exception:
-                pass
-        return {"ok": True, "item": payload_out}
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return {"ok": True, "item": result.item}
 
     @router.delete("/api/inspirations/{space_id:int}/resources/{resource_id:int}")
     def inspiration_resource_delete_api(space_id: int, resource_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, space_id)
-            if str(space.status or "open") != "open":
-                raise HTTPException(
-                    status_code=400, detail="Only open spaces can delete resources"
-                )
-            resource = s.get(InspirationResource, int(resource_id))
-            if resource is None or int(resource.space_id) != int(space_id):
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if resource.deleted_at is not None:
-                return {"ok": True, "resource_id": int(resource_id)}
-            resource.deleted_at = deps.utcnow()
-            space.last_activity_at = deps.utcnow()
-        return {"ok": True, "resource_id": int(resource_id)}
+        try:
+            result = inspiration_workspace.delete_resource(
+                int(space_id), int(resource_id)
+            )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return {"ok": True, "resource_id": int(result.resource_id)}
 
     @router.get("/api/inspirations/{space_id:int}/resources/{resource_id:int}/raw")
     def inspiration_resource_raw_api(space_id: int, resource_id: int) -> FileResponse:
-        with session_scope() as s:
-            _space_or_404(s, space_id)
-            resource = s.get(InspirationResource, int(resource_id))
-            if resource is None or int(resource.space_id) != int(space_id):
-                raise HTTPException(status_code=404, detail="Resource not found")
-            if (
-                resource.deleted_at is not None
-                or not str(resource.file_path or "").strip()
-            ):
-                raise HTTPException(status_code=404, detail="File resource not found")
-            file_path = Path(str(resource.file_path or "")).expanduser()
-            if not file_path.exists() or not file_path.is_file():
-                raise HTTPException(status_code=404, detail="File resource not found")
-            return FileResponse(
-                path=str(file_path),
-                media_type=deps.guess_media_type(file_path),
-                filename=str(resource.name or file_path.name),
+        try:
+            result = inspiration_workspace.raw_resource_file(
+                int(space_id), int(resource_id)
             )
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        return FileResponse(
+            path=str(result.path),
+            media_type=result.media_type,
+            filename=result.filename,
+        )
 
     @router.post("/api/inspirations/{space_id:int}/resources/sync")
     def inspiration_resources_sync_api(space_id: int) -> dict:
-        with session_scope() as s:
-            space = _space_or_404(s, int(space_id))
-            if str(space.status or "open") == "published":
-                raise HTTPException(
-                    status_code=400, detail="Published spaces are read-only"
-                )
-            items = deps.inspiration_sync_resources_dir(s, space)
-            payloads = [
-                deps.inspiration_resource_payload(
-                    int(space_id), item, include_text=True
-                )
-                for item in items
-            ]
-            draft_item = next(
-                (
-                    item
-                    for item in payloads
-                    if item.get("external_path") == "resources/draft_summary.md"
-                ),
-                None,
-            )
-        deps.try_audit_memory(
-            kind="inspiration.resources_synced",
-            source="web",
-            summary=f"Synced resources directory for inspiration space {int(space_id)}.",
-            detail=json.dumps(
-                [item.get("external_path") for item in payloads], ensure_ascii=False
-            )[:4000],
-            metadata={"space_id": int(space_id), "resource_count": len(payloads)},
-        )
+        try:
+            result = inspiration_workspace.sync_resources(int(space_id))
+        except inspiration_workspace.InspirationWorkspaceError as exc:
+            raise _workspace_http_error(exc) from exc
+        _audit_workspace_result(result)
         return {
             "ok": True,
-            "synced": bool(payloads),
-            "items": payloads,
-            "item": draft_item,
+            "synced": result.synced,
+            "items": result.items,
+            "item": result.item,
         }
 
     @router.post("/api/inspirations/{space_id:int}/commands/summary_title")
