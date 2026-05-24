@@ -574,7 +574,46 @@ a.rt-task-title:hover{
 }
 
 .rt-settings-modal-card{
-  width:min(560px, calc(100vw - 40px));
+  width:min(760px, calc(100vw - 40px));
+}
+
+.rt-settings-tabs{
+  display:flex;
+  gap:6px;
+  padding:3px;
+  border:1px solid var(--border);
+  border-radius:calc(var(--radius) - 2px);
+  background:var(--background);
+}
+
+.rt-settings-tab{
+  flex:1 1 0;
+  width:auto;
+  min-height:30px;
+  padding:6px 9px;
+  border:1px solid transparent;
+  border-radius:calc(var(--radius) - 3px);
+  background:transparent;
+  color:var(--muted-foreground);
+  font-size:12px;
+  font-weight:700;
+  cursor:pointer;
+}
+
+.rt-settings-tab.active{
+  border-color:var(--border);
+  background:var(--card);
+  color:var(--foreground);
+}
+
+.rt-settings-tab-panel{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+
+.rt-settings-tab-panel[hidden]{
+  display:none;
 }
 
 .rt-settings-field{
@@ -617,11 +656,98 @@ a.rt-task-title:hover{
   width:auto;
 }
 
+.rt-shortcut-list{
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  max-height:min(52vh, 430px);
+  overflow:auto;
+  padding-right:2px;
+}
+
+.rt-shortcut-row{
+  display:grid;
+  grid-template-columns:minmax(130px, 1fr) minmax(180px, 1.15fr) auto;
+  gap:10px;
+  align-items:center;
+  padding:9px 10px;
+  border:1px solid var(--border);
+  border-radius:calc(var(--radius) - 2px);
+  background:var(--background);
+}
+
+.rt-shortcut-main,
+.rt-shortcut-bindings{
+  min-width:0;
+}
+
+.rt-shortcut-label{
+  color:var(--foreground);
+  font-size:13px;
+  font-weight:750;
+  line-height:1.2;
+}
+
+.rt-shortcut-scope,
+.rt-shortcut-bindings span,
+.rt-shortcut-status{
+  color:var(--muted-foreground);
+  font-size:11px;
+  line-height:1.25;
+}
+
+.rt-shortcut-bindings{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:7px;
+}
+
+.rt-shortcut-bindings div{
+  min-width:0;
+}
+
+.rt-shortcut-bindings span,
+.rt-shortcut-bindings strong{
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.rt-shortcut-bindings strong{
+  color:var(--foreground);
+  font-size:12px;
+  font-weight:750;
+}
+
+.rt-shortcut-actions{
+  display:flex;
+  gap:6px;
+  justify-content:flex-end;
+}
+
+.rt-shortcut-actions button{
+  width:auto;
+  min-height:28px;
+  padding:5px 8px;
+  font-size:11px;
+}
+
+.rt-shortcut-status{
+  min-height:14px;
+}
+
+.rt-shortcut-status.error{
+  color:#ff8b8b;
+}
+
 @media (max-width: 1100px){
   .rt-shell{ flex-direction:column; }
   .rt-side{ width:auto; min-width:0; max-width:none; }
   .rt-settings-grid,
   .rt-pane-toggles{ grid-template-columns:1fr; }
+  .rt-shortcut-row{ grid-template-columns:1fr; }
+  .rt-shortcut-actions{ justify-content:flex-start; flex-wrap:wrap; }
 }
 
 .rt-top{

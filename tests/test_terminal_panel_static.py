@@ -59,6 +59,34 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert 'id="rt-show-files"' in source
     assert 'id="rt-show-preview"' in source
     assert 'id="rt-show-terminal"' in source
+    assert 'data-rt-settings-tab="general"' in source
+    assert 'data-rt-settings-tab="appearance"' in source
+    assert 'data-rt-settings-tab="shortcuts"' in source
+    assert 'id="rt-shortcut-list"' in source
+    assert "openfocus.agent_space.shortcuts.v1" in source
+    assert "search_everywhere" in source
+    assert "Search Everywhere" in source
+    assert "find_in_files" in source
+    assert "Find in Files" in source
+    assert "go_to_definition" in source
+    assert "Go to Definition" in source
+    assert "find_usages" in source
+    assert "Find Usages" in source
+    assert "navigation_back" in source
+    assert "Navigate Back" in source
+    assert "navigation_forward" in source
+    assert "Navigate Forward" in source
+    assert "focus_files" in source
+    assert "Focus Files" in source
+    assert "focus_preview" in source
+    assert "Focus Preview" in source
+    assert "focus_terminal" in source
+    assert "Focus Terminal" in source
+    assert "Double Shift" in source
+    assert "Press shortcut" in source
+    assert "Browser-reserved shortcut" in source
+    assert ".rt-settings-tabs" in css
+    assert ".rt-shortcut-row" in css
     assert 'data-rt-pane="${esc(pane)}"' in source
     assert "toggleAgentSpacePane" in source
     assert (

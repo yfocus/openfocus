@@ -43,6 +43,8 @@
 
   const AGENT_SPACE_SETTINGS_KEY = 'openfocus.agent_space.settings.v1';
   const AGENT_SPACE_SETTINGS_EVENT = 'openfocus:agent-space-settings-changed';
+  const AGENT_SPACE_SHORTCUTS_KEY = 'openfocus.agent_space.shortcuts.v1';
+  const AGENT_SPACE_SHORTCUTS_EVENT = 'openfocus:agent-space-shortcuts-changed';
   const AGENT_SPACE_DEFAULT_SETTINGS = {
     filesFontSize: 13,
     previewFontSize: 12,
@@ -51,6 +53,23 @@
     showPreview: true,
     showTerminal: true,
   };
+  const AGENT_SPACE_SHORTCUT_COMMANDS = [
+    { id: 'search_everywhere', label: 'Search Everywhere', scope: 'global except active terminal input', defaults: [{ keys: ['Shift', 'Shift'], platform: 'all' }] },
+    { id: 'find_in_files', label: 'Find in Files', scope: 'global except active terminal input', defaults: [{ keys: ['Meta', 'Shift', 'F'], platform: 'mac' }, { keys: ['Ctrl', 'Shift', 'F'], platform: 'other' }] },
+    { id: 'go_to_definition', label: 'Go to Definition', scope: 'PREVIEW', defaults: [{ keys: ['Meta', 'B'], platform: 'mac' }, { keys: ['Ctrl', 'B'], platform: 'other' }] },
+    { id: 'find_usages', label: 'Find Usages', scope: 'PREVIEW', defaults: [{ keys: ['Alt', 'F7'], platform: 'all' }] },
+    { id: 'navigation_back', label: 'Navigate Back', scope: 'AgentSpace', defaults: [{ keys: ['Meta', '['], platform: 'mac' }, { keys: ['Ctrl', 'Alt', 'ArrowLeft'], platform: 'other' }] },
+    { id: 'navigation_forward', label: 'Navigate Forward', scope: 'AgentSpace', defaults: [{ keys: ['Meta', ']'], platform: 'mac' }, { keys: ['Ctrl', 'Alt', 'ArrowRight'], platform: 'other' }] },
+    { id: 'focus_files', label: 'Focus Files', scope: 'AgentSpace', defaults: [{ keys: ['Alt', '1'], platform: 'all' }] },
+    { id: 'focus_preview', label: 'Focus Preview', scope: 'AgentSpace', defaults: [{ keys: ['Alt', '2'], platform: 'all' }] },
+    { id: 'focus_terminal', label: 'Focus Terminal', scope: 'AgentSpace', defaults: [{ keys: ['Alt', '3'], platform: 'all' }] },
+  ];
+  const AGENT_SPACE_SHORTCUT_COMMAND_BY_ID = new Map(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd]));
+  const AGENT_SPACE_SHORTCUT_DEFAULTS = {
+    version: 1,
+    bindings: Object.fromEntries(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd.defaults.map((binding)=> ({ keys: binding.keys.slice(), platform: binding.platform }))])),
+  };
+  const MODIFIER_KEYS = ['Meta', 'Ctrl', 'Alt', 'Shift'];
 
   function clampNumber(value, minValue, maxValue, fallback){
     const n = Number(value);
@@ -84,6 +103,153 @@
     try{ localStorage.setItem(AGENT_SPACE_SETTINGS_KEY, JSON.stringify(next)); }catch(_){ }
     try{ window.dispatchEvent(new CustomEvent(AGENT_SPACE_SETTINGS_EVENT, { detail: { settings: next, source: source || 'terminal' } })); }catch(_){ }
     return next;
+  }
+
+  function currentShortcutPlatform(){
+    try{
+      const p = String(navigator && (navigator.userAgentData && navigator.userAgentData.platform || navigator.platform || '') || '').toLowerCase();
+      return /mac|iphone|ipad|ipod/.test(p) ? 'mac' : 'other';
+    }catch(_){
+      return 'other';
+    }
+  }
+
+  function normalizeShortcutKeyName(key){
+    const raw = String(key || '').trim();
+    const lower = raw.toLowerCase();
+    if(!raw) return '';
+    if(lower === 'cmd' || lower === 'command' || lower === 'meta' || lower === 'os') return 'Meta';
+    if(lower === 'control' || lower === 'ctrl') return 'Ctrl';
+    if(lower === 'option' || lower === 'alt') return 'Alt';
+    if(lower === 'shift') return 'Shift';
+    if(lower === 'esc' || lower === 'escape') return 'Escape';
+    if(lower === 'space' || lower === 'spacebar' || raw === ' ') return 'Space';
+    if(lower === 'left' || lower === 'arrowleft') return 'ArrowLeft';
+    if(lower === 'right' || lower === 'arrowright') return 'ArrowRight';
+    if(lower === 'up' || lower === 'arrowup') return 'ArrowUp';
+    if(lower === 'down' || lower === 'arrowdown') return 'ArrowDown';
+    if(/^key[a-z]$/i.test(raw)) return raw.slice(3).toUpperCase();
+    if(/^digit[0-9]$/i.test(raw)) return raw.slice(5);
+    if(/^f([1-9]|1[0-9]|2[0-4])$/i.test(raw)) return raw.toUpperCase();
+    if(raw.length === 1 && /^[a-z]$/i.test(raw)) return raw.toUpperCase();
+    return raw;
+  }
+
+  function normalizeShortcutBinding(raw){
+    if(!raw || typeof raw !== 'object' || !Array.isArray(raw.keys)) return null;
+    const keys = raw.keys.map(normalizeShortcutKeyName).filter(Boolean);
+    const platform = raw.platform === 'mac' || raw.platform === 'other' || raw.platform === 'all' ? raw.platform : 'all';
+    if(!keys.length) return null;
+    if(keys.length === 2 && keys[0] === 'Shift' && keys[1] === 'Shift') return { keys: ['Shift', 'Shift'], platform };
+    const out = [];
+    MODIFIER_KEYS.forEach((k)=> { if(keys.includes(k)) out.push(k); });
+    keys.forEach((k)=> { if(!MODIFIER_KEYS.includes(k) && !out.includes(k)) out.push(k); });
+    return { keys: out, platform };
+  }
+
+  function normalizeShortcutSettings(raw){
+    const src = raw && typeof raw === 'object' ? raw : {};
+    const rawBindings = src.bindings && typeof src.bindings === 'object' ? src.bindings : {};
+    const bindings = {};
+    AGENT_SPACE_SHORTCUT_COMMANDS.forEach((cmd)=> {
+      const value = rawBindings[cmd.id];
+      bindings[cmd.id] = Array.isArray(value)
+        ? value.map(normalizeShortcutBinding).filter(Boolean)
+        : AGENT_SPACE_SHORTCUT_DEFAULTS.bindings[cmd.id].map((binding)=> ({ keys: binding.keys.slice(), platform: binding.platform }));
+    });
+    return { version: 1, bindings };
+  }
+
+  function loadAgentSpaceShortcuts(){
+    try{
+      const raw = localStorage.getItem(AGENT_SPACE_SHORTCUTS_KEY);
+      return normalizeShortcutSettings(raw ? JSON.parse(raw) : null);
+    }catch(_){
+      return normalizeShortcutSettings(null);
+    }
+  }
+
+  function saveAgentSpaceShortcuts(settings, source){
+    const next = normalizeShortcutSettings(settings);
+    try{ localStorage.setItem(AGENT_SPACE_SHORTCUTS_KEY, JSON.stringify(next)); }catch(_){ }
+    try{ window.dispatchEvent(new CustomEvent(AGENT_SPACE_SHORTCUTS_EVENT, { detail: { shortcuts: next, source: source || 'terminal' } })); }catch(_){ }
+    return next;
+  }
+
+  function shortcutPlatformMatches(bindingPlatform, platform){
+    return bindingPlatform === 'all' || platform === 'all' || bindingPlatform === platform;
+  }
+
+  function shortcutPlatformsOverlap(left, right){
+    return left === 'all' || right === 'all' || left === right;
+  }
+
+  function resolveShortcutBinding(settings, commandId, platform){
+    const bindings = normalizeShortcutSettings(settings).bindings[commandId] || [];
+    return bindings.find((binding)=> binding.platform === platform) || bindings.find((binding)=> shortcutPlatformMatches(binding.platform, platform)) || null;
+  }
+
+  function formatShortcutBinding(binding, platform){
+    const normalized = normalizeShortcutBinding(binding);
+    if(!normalized) return 'Unassigned';
+    if(normalized.keys.length === 2 && normalized.keys[0] === 'Shift' && normalized.keys[1] === 'Shift') return 'Double Shift';
+    return normalized.keys.map((key)=> {
+      if(key === 'Meta') return platform === 'mac' ? 'Cmd' : 'Meta';
+      if(key === 'ArrowLeft') return 'Left';
+      if(key === 'ArrowRight') return 'Right';
+      if(key === 'ArrowUp') return 'Up';
+      if(key === 'ArrowDown') return 'Down';
+      return key;
+    }).join('+');
+  }
+
+  function normalizeShortcutKeyEvent(event){
+    if(!event) return null;
+    const code = String(event.code || '');
+    const baseKey = normalizeShortcutKeyName(/^Key[A-Z]$|^Digit[0-9]$/i.test(code) ? code : event.key);
+    if(!baseKey) return null;
+    const keys = [];
+    if(event.metaKey) keys.push('Meta');
+    if(event.ctrlKey) keys.push('Ctrl');
+    if(event.altKey) keys.push('Alt');
+    if(event.shiftKey) keys.push('Shift');
+    if(!MODIFIER_KEYS.includes(baseKey)) keys.push(baseKey);
+    return normalizeShortcutBinding({ keys, platform: 'all' });
+  }
+
+  function shortcutConflict(settings, commandId, binding){
+    const normalized = normalizeShortcutBinding(binding);
+    if(!normalized) return null;
+    const signature = normalized.keys.join('+');
+    const all = normalizeShortcutSettings(settings);
+    for(const cmd of AGENT_SPACE_SHORTCUT_COMMANDS){
+      if(cmd.id === commandId) continue;
+      for(const other of all.bindings[cmd.id] || []){
+        if(other.keys.join('+') === signature && shortcutPlatformsOverlap(other.platform, normalized.platform)){
+          return { commandId: cmd.id, label: cmd.label, binding: other };
+        }
+      }
+    }
+    return null;
+  }
+
+  function validateShortcutBinding(binding, settings, commandId){
+    const normalized = normalizeShortcutBinding(binding);
+    if(!normalized) return { ok: false, reason: 'empty' };
+    const baseKey = normalized.keys[normalized.keys.length - 1];
+    const modifierCount = normalized.keys.slice(0, -1).filter((key)=> MODIFIER_KEYS.includes(key)).length;
+    if(['L', 'R', 'W', 'T', 'N'].includes(baseKey) && modifierCount === 1 && (normalized.keys.includes('Meta') || normalized.keys.includes('Ctrl'))){
+      return { ok: false, reason: 'reserved_browser_shortcut' };
+    }
+    const isDoubleShift = normalized.keys.length === 2 && normalized.keys[0] === 'Shift' && normalized.keys[1] === 'Shift';
+    const hasModifier = normalized.keys.some((key)=> MODIFIER_KEYS.includes(key));
+    const hasNonModifier = normalized.keys.some((key)=> !MODIFIER_KEYS.includes(key));
+    const isFunction = /^F([1-9]|1[0-9]|2[0-4])$/.test(baseKey);
+    if(!isDoubleShift && !hasNonModifier) return { ok: false, reason: 'plain_key_without_modifier' };
+    if(!isDoubleShift && !hasModifier && !isFunction) return { ok: false, reason: 'plain_key_without_modifier' };
+    const conflict = settings && commandId ? shortcutConflict(settings, commandId, normalized) : null;
+    if(conflict) return { ok: false, reason: 'conflict', conflict };
+    return { ok: true, binding: normalized };
   }
 
   function formatElapsedFrom(iso){
@@ -234,19 +400,32 @@
               <button type="button" class="btn-ghost" id="rt-start-settings-x">×</button>
             </div>
             <div class="rt-modal-body">
-              <label class="rt-settings-field" for="rt-start-command-input">
-                <span>Start Agent command</span>
-                <textarea id="rt-start-command-input" rows="3" placeholder="coco -y"></textarea>
-              </label>
-              <div class="rt-settings-grid">
-                <label class="rt-settings-field" for="rt-files-font-size"><span>Files font</span><input id="rt-files-font-size" type="number" min="10" max="24" step="1" /></label>
-                <label class="rt-settings-field" for="rt-preview-font-size"><span>Preview font</span><input id="rt-preview-font-size" type="number" min="10" max="24" step="1" /></label>
-                <label class="rt-settings-field" for="rt-terminal-font-size"><span>Terminal font</span><input id="rt-terminal-font-size" type="number" min="10" max="24" step="1" /></label>
+              <div class="rt-settings-tabs" role="tablist" aria-label="AgentSpace settings sections">
+                <button type="button" class="rt-settings-tab active" data-rt-settings-tab="general" role="tab" aria-selected="true">General</button>
+                <button type="button" class="rt-settings-tab" data-rt-settings-tab="appearance" role="tab" aria-selected="false">Appearance</button>
+                <button type="button" class="rt-settings-tab" data-rt-settings-tab="shortcuts" role="tab" aria-selected="false">Shortcuts</button>
               </div>
-              <div class="rt-pane-toggles" aria-label="AgentSpace panes">
-                <label><input id="rt-show-files" type="checkbox" /> <span>files</span></label>
-                <label><input id="rt-show-preview" type="checkbox" /> <span>preview</span></label>
-                <label><input id="rt-show-terminal" type="checkbox" /> <span>terminal</span></label>
+              <div class="rt-settings-tab-panel" data-rt-settings-panel="general">
+                <label class="rt-settings-field" for="rt-start-command-input">
+                  <span>Start Agent command</span>
+                  <textarea id="rt-start-command-input" rows="3" placeholder="coco -y"></textarea>
+                </label>
+                <div class="rt-pane-toggles" aria-label="AgentSpace panes">
+                  <label><input id="rt-show-files" type="checkbox" /> <span>files</span></label>
+                  <label><input id="rt-show-preview" type="checkbox" /> <span>preview</span></label>
+                  <label><input id="rt-show-terminal" type="checkbox" /> <span>terminal</span></label>
+                </div>
+              </div>
+              <div class="rt-settings-tab-panel" data-rt-settings-panel="appearance" hidden>
+                <div class="rt-settings-grid">
+                  <label class="rt-settings-field" for="rt-files-font-size"><span>Files font</span><input id="rt-files-font-size" type="number" min="10" max="24" step="1" /></label>
+                  <label class="rt-settings-field" for="rt-preview-font-size"><span>Preview font</span><input id="rt-preview-font-size" type="number" min="10" max="24" step="1" /></label>
+                  <label class="rt-settings-field" for="rt-terminal-font-size"><span>Terminal font</span><input id="rt-terminal-font-size" type="number" min="10" max="24" step="1" /></label>
+                </div>
+              </div>
+              <div class="rt-settings-tab-panel" data-rt-settings-panel="shortcuts" hidden>
+                <div class="rt-shortcut-list" id="rt-shortcut-list" aria-label="AgentSpace shortcuts"></div>
+                <div class="rt-shortcut-status" id="rt-shortcut-status" aria-live="polite"></div>
               </div>
             </div>
             <div class="rt-modal-actions">
@@ -329,10 +508,16 @@
     const showFilesInput = q('#rt-show-files');
     const showPreviewInput = q('#rt-show-preview');
     const showTerminalInput = q('#rt-show-terminal');
+    const shortcutListEl = q('#rt-shortcut-list');
+    const shortcutStatusEl = q('#rt-shortcut-status');
 
     const terminals = new Map(); // terminal_id -> { terminalId, name, tabEl, nameEl, viewEl, iframeEl }
     let activeId = '';
     let initialLoadPromise = null;
+    let shortcutDraftSettings = loadAgentSpaceShortcuts();
+    let recordingShortcutId = '';
+    let recordingCapturedBinding = null;
+    let recordingLastShiftAt = 0;
 
     function setStatus(s){ if(statusEl) statusEl.textContent = String(s||'—'); }
 
@@ -502,8 +687,168 @@
       });
     }
 
+    function currentShortcutSettingsForInputs(){
+      return normalizeShortcutSettings(shortcutDraftSettings);
+    }
+
+    function setSettingsTab(name){
+      const tabName = String(name || 'general');
+      qq('[data-rt-settings-tab]').forEach((tab)=> {
+        const on = tab.getAttribute('data-rt-settings-tab') === tabName;
+        tab.classList.toggle('active', on);
+        tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      qq('[data-rt-settings-panel]').forEach((panel)=> {
+        panel.hidden = panel.getAttribute('data-rt-settings-panel') !== tabName;
+      });
+    }
+
+    function shortcutStatus(text, isError){
+      if(!shortcutStatusEl) return;
+      shortcutStatusEl.textContent = String(text || '');
+      shortcutStatusEl.classList.toggle('error', !!isError);
+    }
+
+    function renderShortcutSettings(){
+      if(!shortcutListEl) return;
+      const platform = currentShortcutPlatform();
+      shortcutListEl.innerHTML = AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> {
+        const current = resolveShortcutBinding(shortcutDraftSettings, cmd.id, platform);
+        const def = resolveShortcutBinding(AGENT_SPACE_SHORTCUT_DEFAULTS, cmd.id, platform);
+        const recording = recordingShortcutId === cmd.id;
+        return `
+          <div class="rt-shortcut-row" data-shortcut-command="${esc(cmd.id)}">
+            <div class="rt-shortcut-main">
+              <div class="rt-shortcut-label">${esc(cmd.label)}</div>
+              <div class="rt-shortcut-scope">${esc(cmd.scope)}</div>
+            </div>
+            <div class="rt-shortcut-bindings">
+              <div><span>Current</span><strong>${esc(recording ? 'Press shortcut' : formatShortcutBinding(current, platform))}</strong></div>
+              <div><span>Default</span><strong>${esc(formatShortcutBinding(def, platform))}</strong></div>
+            </div>
+            <div class="rt-shortcut-actions">
+              <button type="button" class="btn-ghost" data-shortcut-action="record" data-shortcut-command="${esc(cmd.id)}">${recording ? 'Recording' : 'Record'}</button>
+              <button type="button" class="btn-ghost" data-shortcut-action="reset" data-shortcut-command="${esc(cmd.id)}">Reset</button>
+              <button type="button" class="btn-ghost" data-shortcut-action="clear" data-shortcut-command="${esc(cmd.id)}">Clear</button>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function replaceShortcutBinding(settings, commandId, binding, platform){
+      const next = normalizeShortcutSettings(settings);
+      const normalized = normalizeShortcutBinding({ ...binding, platform: binding.platform || platform || 'all' });
+      if(!normalized) return next;
+      const targetPlatform = platform || normalized.platform;
+      next.bindings[commandId] = (next.bindings[commandId] || []).filter((existing)=> !shortcutPlatformsOverlap(existing.platform, targetPlatform));
+      next.bindings[commandId].push(normalized);
+      return next;
+    }
+
+    function clearShortcutBindingForPlatform(settings, commandId, platform){
+      const next = normalizeShortcutSettings(settings);
+      next.bindings[commandId] = (next.bindings[commandId] || []).filter((binding)=> !shortcutPlatformsOverlap(binding.platform, platform));
+      return next;
+    }
+
+    function resetShortcutBindingForPlatform(settings, commandId, platform){
+      const next = clearShortcutBindingForPlatform(settings, commandId, platform);
+      const defaults = AGENT_SPACE_SHORTCUT_DEFAULTS.bindings[commandId] || [];
+      next.bindings[commandId] = (next.bindings[commandId] || []).concat(defaults.filter((binding)=> shortcutPlatformMatches(binding.platform, platform)).map((binding)=> ({ keys: binding.keys.slice(), platform: binding.platform })));
+      return next;
+    }
+
+    function startShortcutRecording(commandId){
+      if(!AGENT_SPACE_SHORTCUT_COMMAND_BY_ID.has(commandId)) return;
+      recordingShortcutId = commandId;
+      recordingCapturedBinding = null;
+      recordingLastShiftAt = 0;
+      shortcutStatus('Press shortcut. Enter confirms, Backspace clears, Escape cancels.', false);
+      renderShortcutSettings();
+      try{ startSettingsModal && startSettingsModal.focus && startSettingsModal.focus(); }catch(_){ }
+    }
+
+    function cancelShortcutRecording(){
+      recordingShortcutId = '';
+      recordingCapturedBinding = null;
+      recordingLastShiftAt = 0;
+      shortcutStatus('', false);
+      renderShortcutSettings();
+    }
+
+    function confirmShortcutRecording(){
+      if(!recordingShortcutId || !recordingCapturedBinding) return;
+      const platform = currentShortcutPlatform();
+      const binding = { keys: recordingCapturedBinding.keys, platform };
+      const validation = validateShortcutBinding(binding, shortcutDraftSettings, recordingShortcutId);
+      if(!validation.ok){
+        const message = validation.reason === 'conflict' && validation.conflict
+          ? `Conflict with ${validation.conflict.label}. Clear or replace that shortcut first.`
+          : (validation.reason === 'reserved_browser_shortcut' ? 'Browser-reserved shortcut.' : 'Shortcut needs a modifier, function key, or Double Shift.');
+        shortcutStatus(message, true);
+        return;
+      }
+      shortcutDraftSettings = replaceShortcutBinding(shortcutDraftSettings, recordingShortcutId, validation.binding, platform);
+      recordingShortcutId = '';
+      recordingCapturedBinding = null;
+      recordingLastShiftAt = 0;
+      shortcutStatus('Shortcut updated. Save to persist.', false);
+      renderShortcutSettings();
+    }
+
+    function captureShortcutRecording(event){
+      if(!recordingShortcutId) return false;
+      if(event && event.preventDefault) event.preventDefault();
+      if(event && event.stopPropagation) event.stopPropagation();
+      const key = normalizeShortcutKeyName(event && event.key);
+      if(key === 'Escape'){
+        cancelShortcutRecording();
+        return true;
+      }
+      if(key === 'Backspace'){
+        shortcutDraftSettings = clearShortcutBindingForPlatform(shortcutDraftSettings, recordingShortcutId, currentShortcutPlatform());
+        cancelShortcutRecording();
+        shortcutStatus('Shortcut cleared. Save to persist.', false);
+        return true;
+      }
+      if(key === 'Enter'){
+        confirmShortcutRecording();
+        return true;
+      }
+      if(key === 'Shift'){
+        const now = Date.now();
+        if(now - recordingLastShiftAt <= 650){
+          recordingCapturedBinding = { keys: ['Shift', 'Shift'], platform: 'all' };
+          shortcutStatus('Double Shift captured. Press Enter to confirm.', false);
+          renderShortcutSettings();
+        }else{
+          shortcutStatus('Press Shift again for Double Shift.', false);
+        }
+        recordingLastShiftAt = now;
+        return true;
+      }
+      const binding = normalizeShortcutKeyEvent(event);
+      if(!binding) return true;
+      recordingCapturedBinding = binding;
+      const validation = validateShortcutBinding({ keys: binding.keys, platform: currentShortcutPlatform() }, shortcutDraftSettings, recordingShortcutId);
+      if(!validation.ok){
+        const message = validation.reason === 'conflict' && validation.conflict
+          ? `Conflict with ${validation.conflict.label}.`
+          : (validation.reason === 'reserved_browser_shortcut' ? 'Browser-reserved shortcut.' : 'Shortcut needs a modifier, function key, or Double Shift.');
+        shortcutStatus(message, true);
+      }else{
+        shortcutStatus(`${formatShortcutBinding(binding, currentShortcutPlatform())} captured. Press Enter to confirm.`, false);
+      }
+      renderShortcutSettings();
+      return true;
+    }
+
     function fillStartSettingsModal(){
       const settings = loadAgentSpaceSettings();
+      shortcutDraftSettings = loadAgentSpaceShortcuts();
+      recordingShortcutId = '';
+      recordingCapturedBinding = null;
+      recordingLastShiftAt = 0;
       if(startCommandInput && 'value' in startCommandInput) startCommandInput.value = String(startAgentCommand || '');
       if(filesFontInput && 'value' in filesFontInput) filesFontInput.value = String(settings.filesFontSize);
       if(previewFontInput && 'value' in previewFontInput) previewFontInput.value = String(settings.previewFontSize);
@@ -511,6 +856,8 @@
       if(showFilesInput instanceof HTMLInputElement) showFilesInput.checked = !!settings.showFiles;
       if(showPreviewInput instanceof HTMLInputElement) showPreviewInput.checked = !!settings.showPreview;
       if(showTerminalInput instanceof HTMLInputElement) showTerminalInput.checked = !!settings.showTerminal;
+      shortcutStatus('', false);
+      renderShortcutSettings();
     }
 
     let startSettingsResolve = null;
@@ -526,6 +873,7 @@
     function openStartSettingsModal(){
       if(!startSettingsModal) return Promise.resolve('');
       fillStartSettingsModal();
+      setSettingsTab('general');
       startSettingsModal.hidden = false;
       try{ startCommandInput && startCommandInput.focus && startCommandInput.focus(); }catch(_){ }
       return new Promise((resolve)=> {
@@ -537,6 +885,7 @@
       const command = String(startCommandInput && 'value' in startCommandInput ? startCommandInput.value : '').trim();
       const savedCommand = await saveStartAgentCommand(command);
       const settings = saveAgentSpaceSettings(currentSettingsForInputs(), 'terminal');
+      saveAgentSpaceShortcuts(currentShortcutSettingsForInputs(), 'terminal');
       applyAgentSpaceSettings(settings);
       toast(savedCommand ? 'AgentSpace settings saved' : 'Start Agent command cleared');
       closeStartSettingsModal(savedCommand);
@@ -987,6 +1336,31 @@
       void cleanupTaskAgentSpace();
     });
     taskDetailsModal?.addEventListener('click', (e)=>{ if(e.target === taskDetailsModal) closeTaskDetailsModal(); });
+    qq('[data-rt-settings-tab]').forEach((tab)=> {
+      tab.addEventListener('click', ()=> setSettingsTab(tab.getAttribute('data-rt-settings-tab') || 'general'));
+    });
+    shortcutListEl?.addEventListener('click', (e)=> {
+      const target = e.target && e.target.closest ? e.target.closest('[data-shortcut-action]') : null;
+      if(!target) return;
+      const commandId = String(target.getAttribute('data-shortcut-command') || '');
+      const action = String(target.getAttribute('data-shortcut-action') || '');
+      if(!AGENT_SPACE_SHORTCUT_COMMAND_BY_ID.has(commandId)) return;
+      if(action === 'record'){
+        startShortcutRecording(commandId);
+      }else if(action === 'reset'){
+        shortcutDraftSettings = resetShortcutBindingForPlatform(shortcutDraftSettings, commandId, currentShortcutPlatform());
+        recordingShortcutId = '';
+        recordingCapturedBinding = null;
+        shortcutStatus('Shortcut reset. Save to persist.', false);
+        renderShortcutSettings();
+      }else if(action === 'clear'){
+        shortcutDraftSettings = clearShortcutBindingForPlatform(shortcutDraftSettings, commandId, currentShortcutPlatform());
+        recordingShortcutId = '';
+        recordingCapturedBinding = null;
+        shortcutStatus('Shortcut cleared. Save to persist.', false);
+        renderShortcutSettings();
+      }
+    });
     startSettingsX?.addEventListener('click', ()=> closeStartSettingsModal(''));
     startSettingsCancel?.addEventListener('click', ()=> closeStartSettingsModal(''));
     startSettingsSave?.addEventListener('click', ()=> {
@@ -994,6 +1368,7 @@
     });
     startSettingsModal?.addEventListener('click', (e)=>{ if(e.target === startSettingsModal) closeStartSettingsModal(''); });
     startSettingsModal?.addEventListener('keydown', (e)=>{
+      if(recordingShortcutId && captureShortcutRecording(e)) return;
       if(e && e.key === 'Escape') closeStartSettingsModal('');
       if(e && e.key === 'Enter' && (e.metaKey || e.ctrlKey)){
         e.preventDefault();
