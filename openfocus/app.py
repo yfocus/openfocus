@@ -25,6 +25,7 @@ from .infrastructure import llm_config, streaming
 from .infrastructure import migrations as migration_service
 from .models import Base
 from .web.routes import agent_spaces as agent_spaces_routes
+from .web.routes import code_navigation as code_navigation_routes
 from .web.routes import companions as companion_routes
 from .web.routes import events as events_routes
 from .web.routes import float_ball as float_ball_routes
@@ -278,6 +279,7 @@ app.include_router(
         rewrite_ttyd_input_for_auto_prompts=streaming.terminal_event_hub.rewrite_ttyd_input_for_auto_prompts,
     )
 )
+app.include_router(code_navigation_routes.create_router(grpc_server=COMPANION_GRPC))
 app.include_router(
     inspirations_routes.create_router(
         templates=templates,
