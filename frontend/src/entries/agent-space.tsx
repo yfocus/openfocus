@@ -38,6 +38,14 @@ import {
   type AgentSpaceSettings,
 } from '../lib/agentSpaceSettings';
 import {
+  AGENT_SPACE_SHORTCUTS_EVENT,
+  AGENT_SPACE_SHORTCUTS_KEY,
+  loadAgentSpaceShortcuts,
+  normalizeShortcutSettings,
+  type AgentSpaceShortcutCommandId,
+  type AgentSpaceShortcutSettings,
+} from '../lib/agentSpaceShortcuts';
+import {
   codeSearchGroups,
   codeSearchBackendLabel,
   codeSearchOverlayStatusText,
@@ -49,6 +57,13 @@ import {
   openCodeSearchResult,
   shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
+import {
+  commandFromShortcutEvent,
+  createDoubleShiftDetector,
+  currentShortcutPlatform,
+  findActiveTerminalIframe,
+  shouldIgnoreAgentSpaceShortcut,
+} from '../lib/ideaKeymap';
 import type { FileEntry } from '../types/openfocus';
 
 type AgentSpaceConfig = {
@@ -143,6 +158,22 @@ type FindInFilesState = SearchEverywhereState & {
 
 function toast(message: string): void {
   if (typeof window.toast === 'function') window.toast(message);
+}
+
+function focusTerminalElement(root: HTMLElement | null): boolean {
+  if (!root) return false;
+  const activeFrame = findActiveTerminalIframe<HTMLIFrameElement>(root);
+  try {
+    activeFrame?.contentWindow?.focus();
+  } catch (_) {
+    // Cross-frame focus is best effort.
+  }
+  if (activeFrame) {
+    activeFrame.focus();
+    return true;
+  }
+  root.focus();
+  return true;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -547,12 +578,15 @@ function CodeMirrorPreview({
 
 function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const splitRef = useRef<HTMLDivElement | null>(null);
+  const filesPaneRef = useRef<HTMLDivElement | null>(null);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const previewContentRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<HTMLDivElement | null>(null);
   const terminalSideRef = useRef<HTMLDivElement | null>(null);
   const terminalApiRef = useRef<TerminalApi | null>(null);
   const previewSelectionRef = useRef<PreviewSelectionState>({ text: '' });
+  const doubleShiftRef = useRef(createDoubleShiftDetector());
+  const shortcutPlatform = useMemo(() => currentShortcutPlatform(), []);
   const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
   const [preview, setPreview] = useState<PreviewViewState>(() => ({
     path: '',
@@ -563,6 +597,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     error: '',
   }));
   const [settings, setSettings] = useState<AgentSpaceSettings>(() => loadAgentSpaceSettings());
+  const [shortcuts, setShortcuts] = useState<AgentSpaceShortcutSettings>(() => loadAgentSpaceShortcuts());
   const [searchEverywhere, setSearchEverywhere] = useState<SearchEverywhereState>(() => ({
     open: false,
     query: '',
@@ -856,6 +891,105 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     };
   }, []);
 
+  useEffect(() => {
+    const applyShortcuts = (next?: AgentSpaceShortcutSettings) => {
+      setShortcuts(next ? normalizeShortcutSettings(next) : loadAgentSpaceShortcuts());
+      doubleShiftRef.current.reset();
+    };
+    const onShortcuts = (event: Event) => {
+      const custom = event as CustomEvent<{ shortcuts?: AgentSpaceShortcutSettings }>;
+      applyShortcuts(custom.detail?.shortcuts);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === AGENT_SPACE_SHORTCUTS_KEY) applyShortcuts();
+    };
+    window.addEventListener(AGENT_SPACE_SHORTCUTS_EVENT, onShortcuts);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(AGENT_SPACE_SHORTCUTS_EVENT, onShortcuts);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const focusAgentSpacePane = useCallback(
+    (pane: AgentSpacePane) => {
+      if (pane === 'files') {
+        if (!settings.showFiles) {
+          toast('FILES pane is hidden');
+          return;
+        }
+        filesPaneRef.current?.focus();
+        return;
+      }
+      if (pane === 'preview') {
+        if (!settings.showPreview) {
+          toast('PREVIEW pane is hidden');
+          return;
+        }
+        previewScrollRef.current?.focus();
+        return;
+      }
+      if (!settings.showTerminal) {
+        toast('TERMINAL pane is hidden');
+        return;
+      }
+      if (!focusTerminalElement(terminalRef.current)) toast('Terminal unavailable');
+    },
+    [settings.showFiles, settings.showPreview, settings.showTerminal],
+  );
+
+  const runShortcutCommand = useCallback(
+    (command: AgentSpaceShortcutCommandId) => {
+      if (command === 'search_everywhere') {
+        openSearchEverywhere();
+        return;
+      }
+      if (command === 'find_in_files') {
+        openFindInFiles();
+        return;
+      }
+      if (command === 'focus_files') {
+        focusAgentSpacePane('files');
+        return;
+      }
+      if (command === 'focus_preview') {
+        focusAgentSpacePane('preview');
+        return;
+      }
+      if (command === 'focus_terminal') {
+        focusAgentSpacePane('terminal');
+      }
+    },
+    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (shouldIgnoreAgentSpaceShortcut(event, {
+        target: event.target,
+        activeElement: document.activeElement,
+        terminalRoot: terminalRef.current,
+      })) {
+        doubleShiftRef.current.reset();
+        return;
+      }
+      const command = commandFromShortcutEvent(event, shortcuts, shortcutPlatform, doubleShiftRef.current);
+      if (!command) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runShortcutCommand(command);
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      doubleShiftRef.current.keyup(event);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [runShortcutCommand, shortcutPlatform, shortcuts]);
+
   const savePreviewScroll = useCallback(
     (scrollTop: number, topLine: number) => {
       const state = loadPreviewState(config.spaceId) || {};
@@ -1132,7 +1266,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                 </div>
               </div>
               <div className="divider" />
-              <div className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, fontSize: `${settings.filesFontSize}px` }}>
+              <div ref={filesPaneRef} className="col-scroll pad" tabIndex={-1} style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, fontSize: `${settings.filesFontSize}px` }}>
                 <FileTree spaceId={config.spaceId} onOpenFile={openPreview} onFileContextMenu={handleFileContextMenu} />
               </div>
             </div>
@@ -1180,7 +1314,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                 </div>
               </div>
               <div className="divider" />
-              <div ref={previewScrollRef} className="col-scroll pad" style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto', fontSize: `${settings.previewFontSize}px` }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
+              <div ref={previewScrollRef} className="col-scroll pad" tabIndex={-1} style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto', fontSize: `${settings.previewFontSize}px` }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
                 <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
                   {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
                   {preview.error ? preview.error : null}
@@ -1206,7 +1340,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         <div className="panel" style={{ height: '100%', padding: 0, display: settings.showTerminal ? undefined : 'none' }}>
             <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               <div className="pad" style={{ flex: '1 1 auto', minHeight: 0, minWidth: 0, height: 'auto', padding: 12, fontSize: `${settings.terminalFontSize}px` }}>
-                <div ref={terminalRef} id="remote-terminal" style={{ height: '100%', minHeight: 0 }} />
+                <div ref={terminalRef} id="remote-terminal" data-agent-space-terminal="true" tabIndex={-1} style={{ height: '100%', minHeight: 0 }} />
               </div>
             </div>
         </div>
