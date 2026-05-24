@@ -28,6 +28,11 @@ content, enforces query/symbol/result limits, and returns stable frontend DTOs.
 V1 fallback search rejects `regex=true` instead of executing user-provided
 regular expressions in request handlers.
 
+Search responses expose both `results` and `groups`. `results` remains the flat
+ordered list for compatibility. `groups` is grouped by `path` in first-seen
+result order, with each group shaped as `{ path, results }`, so editor overlays
+can render file-grouped search results without re-grouping backend data.
+
 ## Backends
 
 Current backends:

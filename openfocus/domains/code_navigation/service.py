@@ -327,6 +327,7 @@ async def search(
         "backend": SEARCH_BACKEND,
         "truncated": collector.truncated or budget.truncated,
         "results": collector.results,
+        "groups": _group_search_results(collector.results),
     }
 
 
@@ -497,6 +498,20 @@ def _text_results(
             "preview": _preview(line),
             "backend": backend,
         }
+
+
+def _group_search_results(results: Iterable[dict]) -> list[dict]:
+    groups: list[dict] = []
+    by_path: dict[str, dict] = {}
+    for result in results:
+        path = str(result.get("path") or "")
+        group = by_path.get(path)
+        if group is None:
+            group = {"path": path, "results": []}
+            by_path[path] = group
+            groups.append(group)
+        group["results"].append(result)
+    return groups
 
 
 def _symbol_results_for_file(path: str, content: str, *, backend: str) -> list[dict]:

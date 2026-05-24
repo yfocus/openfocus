@@ -97,6 +97,19 @@ def _clean_rel(path: str) -> str:
     return raw
 
 
+def _group_by_path(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    by_path: dict[str, dict[str, Any]] = {}
+    for result in results:
+        group = by_path.get(result["path"])
+        if group is None:
+            group = {"path": result["path"], "results": []}
+            by_path[result["path"]] = group
+            groups.append(group)
+        group["results"].append(result)
+    return groups
+
+
 def _app(grpc_server: _GrpcServer) -> FastAPI:
     app = FastAPI()
     app.include_router(code_navigation_routes.create_router(grpc_server=grpc_server))
@@ -135,8 +148,8 @@ def test_code_search_returns_text_file_and_symbol_results(tmp_path) -> None:
         companion_id, space_id = _create_bound_agent_space(tmp_path)
         port = _FakeFilePort(
             {
-                "app/main.py": "class FocusRunner:\n    def run_focus(self):\n        return 'focus'\n",
-                "web/view.ts": "export function openFocus() {\n  return 'focus';\n}\n",
+                "app/focus_main.py": "class FocusRunner:\n    def run_focus(self):\n        return 'focus'\n",
+                "web/focus_view.ts": "export function openFocus() {\n  return 'focus';\n}\n",
                 "focus_notes.md": "focus guide\n",
             }
         )
@@ -161,6 +174,13 @@ def test_code_search_returns_text_file_and_symbol_results(tmp_path) -> None:
         assert all(not item["path"].startswith("/") for item in payload["results"])
         assert any(item["path"] == "focus_notes.md" for item in payload["results"])
         assert any(item.get("name") == "openFocus" for item in payload["results"])
+        assert payload["groups"] == _group_by_path(payload["results"])
+        grouped_kinds = {
+            group["path"]: {item["kind"] for item in group["results"]}
+            for group in payload["groups"]
+        }
+        assert {"file", "text", "class"}.issubset(grouped_kinds["app/focus_main.py"])
+        assert {"file", "text", "function"}.issubset(grouped_kinds["web/focus_view.ts"])
 
     asyncio.run(_run())
 
