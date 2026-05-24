@@ -21,6 +21,7 @@ import { rust } from '@codemirror/lang-rust';
 import { sql } from '@codemirror/lang-sql';
 import { xml } from '@codemirror/lang-xml';
 import { listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
+import { searchCode, type CodeNavigationBackend, type CodeSearchResult, type CodeSearchResultGroup } from '../api/codeNavigation';
 import {
   cleanString,
   fileReferenceFromTerminalMessage,
@@ -36,6 +37,16 @@ import {
   normalizeAgentSpaceSettings,
   type AgentSpaceSettings,
 } from '../lib/agentSpaceSettings';
+import {
+  codeSearchGroups,
+  codeSearchBackendLabel,
+  codeSearchResultMetaLabel,
+  codeSearchResultPrimaryLabel,
+  flattenCodeSearchGroups,
+  isCompanionOfflineSearchError,
+  moveSearchSelection,
+  openCodeSearchResult,
+} from '../lib/agentSpaceSearch';
 import type { FileEntry } from '../types/openfocus';
 
 type AgentSpaceConfig = {
@@ -107,6 +118,18 @@ type PreviewSelectionState = {
   text: string;
   fromLine?: number;
   toLine?: number;
+};
+
+type SearchEverywhereState = {
+  open: boolean;
+  query: string;
+  loading: boolean;
+  completed: boolean;
+  status: string;
+  error: string;
+  backend: CodeNavigationBackend | '';
+  groups: CodeSearchResultGroup[];
+  selectedIndex: number;
 };
 
 function toast(message: string): void {
@@ -531,6 +554,19 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     error: '',
   }));
   const [settings, setSettings] = useState<AgentSpaceSettings>(() => loadAgentSpaceSettings());
+  const [searchEverywhere, setSearchEverywhere] = useState<SearchEverywhereState>(() => ({
+    open: false,
+    query: '',
+    loading: false,
+    completed: false,
+    status: '',
+    error: '',
+    backend: '',
+    groups: [],
+    selectedIndex: -1,
+  }));
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchRequestIdRef = useRef(0);
 
   const openPreview = useCallback(
     async (relPath: string, name: string, target?: PreviewTarget) => {
@@ -568,6 +604,85 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     },
     [config.spaceId],
   );
+
+  const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
+
+  const openSearchEverywhere = useCallback(() => {
+    setSearchEverywhere((state) => ({ ...state, open: true }));
+    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
+
+  const closeSearchEverywhere = useCallback(() => {
+    searchRequestIdRef.current += 1;
+    setSearchEverywhere((state) => ({ ...state, open: false }));
+  }, []);
+
+  const activateSearchResult = useCallback(
+    async (result: CodeSearchResult | null | undefined, closeAfterOpen: boolean) => {
+      const opened = await openCodeSearchResult(result, openPreview);
+      if (opened && closeAfterOpen) closeSearchEverywhere();
+    },
+    [closeSearchEverywhere, openPreview],
+  );
+
+  useEffect(() => {
+    if (!searchEverywhere.open) return;
+    const query = searchEverywhere.query.trim();
+    if (!query) {
+      searchRequestIdRef.current += 1;
+      setSearchEverywhere((state) => ({
+        ...state,
+        loading: false,
+        completed: false,
+        status: '',
+        error: '',
+        backend: '',
+        groups: [],
+        selectedIndex: -1,
+      }));
+      return;
+    }
+
+    const requestId = searchRequestIdRef.current + 1;
+    searchRequestIdRef.current = requestId;
+    setSearchEverywhere((state) => ({ ...state, loading: true, completed: false, status: 'Searching...', error: '', backend: '' }));
+    const timer = window.setTimeout(() => {
+      searchCode(config.spaceId, { q: query, kind: 'all', limit: 100 })
+        .then((response) => {
+          setSearchEverywhere((state) => {
+            if (searchRequestIdRef.current !== requestId) return state;
+            const groups = codeSearchGroups(response);
+            const total = flattenCodeSearchGroups(groups).length;
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: response.truncated ? 'Partial results' : '',
+              error: '',
+              backend: response.backend || '',
+              groups,
+              selectedIndex: total > 0 ? 0 : -1,
+            };
+          });
+        })
+        .catch((err) => {
+          setSearchEverywhere((state) => {
+            if (searchRequestIdRef.current !== requestId) return state;
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: '',
+              error: isCompanionOfflineSearchError(err) ? 'Companion offline' : `Search failed: ${err instanceof Error ? err.message : String(err)}`,
+              backend: '',
+              groups: [],
+              selectedIndex: -1,
+            };
+          });
+        });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [config.spaceId, searchEverywhere.open, searchEverywhere.query]);
 
   useEffect(() => {
     if (!preview.path || preview.loading || preview.error || preview.imageUrl) return;
@@ -857,6 +972,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     },
     [showSplitters, visiblePanes],
   );
+  const searchBackendText = !searchEverywhere.error && searchEverywhere.completed && !searchEverywhere.loading
+    ? codeSearchBackendLabel(searchEverywhere.backend)
+    : '';
+  const searchStatusText = searchEverywhere.error || searchEverywhere.status || (searchEverywhere.completed && !searchEverywhere.loading && searchResults.length === 0 ? 'No results' : '');
 
   return (
     <>
@@ -897,8 +1016,18 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
           <div className="panel" style={{ height: '100%', padding: 0 }}>
             <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                   <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    title="Search Everywhere"
+                    aria-label="Search Everywhere"
+                    style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 16, lineHeight: 1 }}
+                    onClick={openSearchEverywhere}
+                  >
+                    <span aria-hidden="true">⌕</span>
+                  </button>
                 </div>
               </div>
               <div className="divider" />
@@ -934,6 +1063,142 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         </div>
         <div ref={terminalSideRef} className="agent-space-settings-column" />
       </div>
+      {searchEverywhere.open ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Search Everywhere"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.46)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '8vh 16px 16px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeSearchEverywhere();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeSearchEverywhere();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setSearchEverywhere((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, searchResults.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = searchResults[searchEverywhere.selectedIndex] || null;
+              void activateSearchResult(selected, event.metaKey || event.ctrlKey);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(760px, 100%)',
+              maxHeight: '78vh',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: 10, borderBottom: '1px solid rgba(0, 229, 255, 0.14)' }}>
+              <input
+                ref={searchInputRef}
+                value={searchEverywhere.query}
+                placeholder="Search files, symbols, and text"
+                aria-label="Search query"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  border: '1px solid rgba(0, 229, 255, 0.24)',
+                  borderRadius: 6,
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  color: 'var(--text)',
+                  padding: '9px 10px',
+                  font: 'inherit',
+                  outline: 'none',
+                }}
+                onChange={(event) => setSearchEverywhere((state) => ({ ...state, query: event.target.value }))}
+              />
+            </div>
+            {searchStatusText || searchBackendText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: searchEverywhere.groups.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {searchEverywhere.loading ? <><span className="spin" /> </> : null}
+                  {searchStatusText}
+                </span>
+                {searchBackendText ? (
+                  <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.8 }}>
+                    {searchBackendText}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: searchEverywhere.groups.length ? '6px 0' : 0 }}>
+              {(() => {
+                let resultIndex = 0;
+                return searchEverywhere.groups.map((group) => (
+                  <div key={group.path}>
+                    <div className="muted" style={{ padding: '8px 12px 4px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase' }}>
+                      {group.path}
+                    </div>
+                    {(group.results || []).map((result) => {
+                      const index = resultIndex;
+                      resultIndex += 1;
+                      const selected = index === searchEverywhere.selectedIndex;
+                      return (
+                        <button
+                          key={`${result.path}:${result.line}:${result.column}:${index}`}
+                          type="button"
+                          style={{
+                            width: '100%',
+                            display: 'block',
+                            textAlign: 'left',
+                            border: 0,
+                            borderRadius: 0,
+                            background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                            color: 'var(--text)',
+                            padding: '7px 12px',
+                            cursor: 'pointer',
+                          }}
+                          onMouseEnter={() => setSearchEverywhere((state) => ({ ...state, selectedIndex: index }))}
+                          onClick={() => activateSearchResult(result, false)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {codeSearchResultPrimaryLabel(result)}
+                            </span>
+                            <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                              {result.line ? `L${result.line}` : ''}
+                            </span>
+                          </div>
+                          <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {codeSearchResultMetaLabel(result)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {contextMenu ? (
         <div
           role="menu"
