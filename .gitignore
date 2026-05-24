@@ -26,6 +26,7 @@ node_modules/
 openfocus/static/dist/
 
 .coverage
+.design/
 htmlcov/
 
 .tmp/

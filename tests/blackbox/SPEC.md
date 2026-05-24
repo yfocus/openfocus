@@ -16,6 +16,9 @@ functions.
   pages, redirects, or documented API payloads.
 - External LLM providers and real Companion processes are out of scope for this
   suite; fallback planner behavior and control-plane HTTP flows are in scope.
+- AgentSpace backend black-box coverage may use an in-process Companion
+  command-port fake for the external data-plane dependency, but OpenFocus
+  behavior must still be driven through public HTTP routes and API responses.
 
 ## Invariants Covered
 
@@ -29,3 +32,8 @@ functions.
 - Inspiration publish creates only user-selected Tasks and records unselected
   draft Tasks as deferred in the publish result and Published Summary.
 - Published Inspiration spaces are read-only and can only continue via fork.
+- AgentSpace backend journey creates an AgentSpace through public Task APIs,
+  lists/previews workspace files through the paired Companion, creates a remote
+  terminal, injects command, Prompt Zone, and PREVIEW file-reference payloads,
+  verifies terminal history through public APIs, closes the terminal, and
+  releases the AgentSpace without browser automation.
