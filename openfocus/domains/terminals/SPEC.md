@@ -15,6 +15,8 @@ AgentSpace and InspirationSpace:
 - terminal runtime command dispatch through a small runtime port interface
 - ttyd proxy URL construction, protocol-neutral HTTP proxy forwarding, WebSocket
   target shaping, and HTML bridge injection helpers
+- ttyd bridge behavior that integrates terminal file links and browser-side
+  AgentSpace terminal display settings
 
 ## Boundaries
 
@@ -55,3 +57,8 @@ AgentSpace and InspirationSpace:
   rejected before calling Companion.
 - ttyd proxying requires a non-empty `connect_url`; tests and non-iframe backends
   may create terminal records without one.
+- Browser-side terminal font size updates must be applied through the live
+  xterm instance options, then trigger terminal resize/refresh. The bridge must
+  not resize terminal glyphs by injecting CSS against `.xterm` rows/screens,
+  because that desynchronizes xterm cell measurement from rendered glyph width
+  and can clip mixed-width output at the right edge.

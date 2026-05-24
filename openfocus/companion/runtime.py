@@ -1208,7 +1208,7 @@ class _TerminalManager:
             "--client-option",
             'theme={"background":"#000000"}',
             "--client-option",
-            "rendererType=dom",
+            "fontSize=13",
             "--client-option",
             "macOptionClickForcesSelection=true",
             "--client-option",

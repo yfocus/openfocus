@@ -76,6 +76,76 @@ def test_inspiration_publishing_creates_goal_tasks_and_published_summary():
     assert audit_events[-1]["kind"] == "inspiration.published"
 
 
+def test_inspiration_publishing_records_unselected_tasks_as_deferred():
+    from openfocus.db import session_scope
+    from openfocus.domains.inspirations import publishing, resources
+    from openfocus.models import (
+        InspirationDraft,
+        InspirationPublishRecord,
+        InspirationResource,
+        InspirationSpace,
+        Task,
+    )
+
+    with session_scope() as s:
+        space = InspirationSpace(title="Selective publish idea", status="open")
+        s.add(space)
+        s.flush()
+        space.workspace_path = str(resources.workspace_path(space, int(space.id)))
+        draft = InspirationDraft(
+            space_id=int(space.id),
+            version=1,
+            goal_title="Selective publish goal",
+            goal_description="Goal content",
+            tasks=[
+                {"title": "Publish Task A", "description": "Task A content"},
+                {"title": "Defer Task B", "description": "Task B content"},
+                {"title": "Publish Task C", "content": "Task C content"},
+            ],
+            open_questions=[],
+            rejected_or_deferred_ideas=[],
+        )
+        s.add(draft)
+        s.flush()
+        space_id = int(space.id)
+        draft_id = int(draft.id)
+
+    prepared = publishing.prepare_publish(
+        space_id,
+        draft_id,
+        dt.date(2026, 5, 12),
+        selected_task_indexes=[2, 0, 2],
+    )
+    assert prepared["selected_task_indexes"] == [0, 2]
+
+    publishing.publish_sync(
+        space_id=space_id,
+        draft_id=draft_id,
+        due_date_iso="2026-05-12",
+        previous_status="open",
+        selected_task_indexes=prepared["selected_task_indexes"],
+    )
+
+    with session_scope() as s:
+        tasks = s.query(Task).order_by(Task.id.asc()).all()
+        assert [task.title for task in tasks] == ["Publish Task A", "Publish Task C"]
+        assert [task.content for task in tasks] == ["Task A content", "Task C content"]
+
+        record = s.query(InspirationPublishRecord).one()
+        assert record.deferred_tasks == [
+            {"title": "Defer Task B", "description": "Task B content"}
+        ]
+
+        summary = (
+            s.query(InspirationResource)
+            .filter(InspirationResource.name == "Published Summary")
+            .one()
+        )
+        assert "- Publish Task A" in summary.text_content
+        assert "- Publish Task C" in summary.text_content
+        assert "- Defer Task B" in summary.text_content
+
+
 @pytest.mark.anyio
 async def test_kickoff_publish_records_release_failure_without_stuck_state(
     monkeypatch,

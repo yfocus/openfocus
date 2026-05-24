@@ -298,6 +298,66 @@ def test_hook_spool_drain_converts_spooled_payload_to_runtime_signal(
     asyncio.run(_run())
 
 
+def test_terminal_manager_starts_ttyd_with_xterm_measured_font_options(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("OPENFOCUS_TEST_TERMINAL_ECHO", raising=False)
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+
+    commands: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class FakeProcess:
+        returncode = None
+
+        def terminate(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        commands.append((args, kwargs))
+        return FakeProcess()
+
+    async def fake_ensure_tmux_terminal_session(**_kwargs) -> None:
+        return None
+
+    async def fake_wait_tcp_ready(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(rt.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(rt, "_find_free_port", lambda: 9876)
+    monkeypatch.setattr(
+        rt, "_ensure_tmux_terminal_session", fake_ensure_tmux_terminal_session
+    )
+    monkeypatch.setattr(rt, "_wait_tcp_ready", fake_wait_tcp_ready)
+    monkeypatch.setattr(
+        rt.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def _run() -> None:
+        manager = rt._TerminalManager()
+        await manager.start(
+            terminal_id="term-font",
+            root_path=str(tmp_path),
+            base_path="/api/agent_spaces/1/terminals/term-font/ttyd/",
+            out_q=asyncio.Queue(),
+        )
+
+    asyncio.run(_run())
+
+    assert commands
+    ttyd_cmd = [str(item) for item in commands[0][0]]
+    assert "rendererType=dom" not in ttyd_cmd
+
+    client_options = [
+        ttyd_cmd[index + 1]
+        for index, item in enumerate(ttyd_cmd[:-1])
+        if item == "--client-option"
+    ]
+    assert "fontSize=13" in client_options
+
+
 def test_float_ball_backend_env_is_allowlisted(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", "test")
     rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")

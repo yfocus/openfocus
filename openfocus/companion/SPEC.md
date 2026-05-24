@@ -19,6 +19,15 @@ bridge between OpenFocus Core and machine-local capabilities.
 - Run the system `Inbox` float ball helper as a local UI process when the browser
   session has been bound to a trusted local Companion.
 
+## Remote Terminal Runtime
+
+- The Companion starts remote terminals with ttyd + tmux and returns a local
+  `connect_url` for OpenFocus to proxy/embed.
+- ttyd client options should preserve xterm's own cell measurement. The runtime
+  may set a default xterm `fontSize`, but must not force the DOM renderer merely
+  for link integration; DOM rendering plus CSS glyph resizing can desynchronize
+  mixed-width terminal output and clip the rightmost column.
+
 ## System Float Ball
 
 - The helper must use the OpenFocus web API as the activity source of truth:

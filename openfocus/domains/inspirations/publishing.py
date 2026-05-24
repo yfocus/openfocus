@@ -64,18 +64,71 @@ def space_or_error(s: Session, space_id: int) -> InspirationSpace:
     return space
 
 
+def _public_task(item: dict) -> dict:
+    return {
+        "title": str(item.get("title") or "").strip()[:512],
+        "description": str(item.get("description") or "").strip()[:4000],
+    }
+
+
 def _publishable_tasks(draft: InspirationDraft) -> list[dict]:
     picked_tasks: list[dict] = []
-    for raw in draft.tasks or []:
+    for index, raw in enumerate(draft.tasks or []):
         if not isinstance(raw, dict):
             continue
+        raw_description = (
+            raw.get("content")
+            if raw.get("content") is not None
+            else raw.get("description")
+        )
+        description = str(raw_description or "").strip()
         item = {
             "title": str(raw.get("title") or "").strip()[:512],
-            "description": str(raw.get("description") or "").strip()[:4000],
+            "description": description[:4000],
+            "_draft_index": int(index),
         }
         if item["title"]:
             picked_tasks.append(item)
     return picked_tasks
+
+
+def _normalize_selected_task_indexes(
+    selected_task_indexes: list[int] | None,
+) -> set[int] | None:
+    if selected_task_indexes is None:
+        return None
+    selected: set[int] = set()
+    for item in selected_task_indexes:
+        try:
+            index = int(item)
+        except (TypeError, ValueError):
+            continue
+        if index >= 0:
+            selected.add(index)
+    return selected
+
+
+def _partition_publish_tasks(
+    draft: InspirationDraft, selected_task_indexes: list[int] | None
+) -> tuple[list[dict], list[dict]]:
+    publishable = _publishable_tasks(draft)
+    selected = _normalize_selected_task_indexes(selected_task_indexes)
+    if selected is None:
+        return [_public_task(item) for item in publishable], []
+
+    def draft_index(item: dict) -> int:
+        try:
+            return int(item.get("_draft_index"))
+        except (TypeError, ValueError):
+            return -1
+
+    picked = [
+        _public_task(item) for item in publishable if draft_index(item) in selected
+    ]
+    deferred = [
+        _public_task(item) for item in publishable if draft_index(item) not in selected
+    ]
+    return picked, deferred
 
 
 def build_published_summary(
@@ -131,7 +184,13 @@ def build_published_summary(
     return "\n".join(lines).strip()
 
 
-def prepare_publish(space_id: int, draft_id: int | None, due_date: dt.date) -> dict:
+def prepare_publish(
+    space_id: int,
+    draft_id: int | None,
+    due_date: dt.date,
+    *,
+    selected_task_indexes: list[int] | None = None,
+) -> dict:
     with session_scope() as s:
         space = space_or_error(s, int(space_id))
         current_status = str(space.status or "open")
@@ -148,7 +207,10 @@ def prepare_publish(space_id: int, draft_id: int | None, due_date: dt.date) -> d
                 draft = None
         if draft is None:
             raise PublishUnavailable("No draft is available for publishing")
-        if not _publishable_tasks(draft):
+        picked_tasks, _deferred_tasks = _partition_publish_tasks(
+            draft, selected_task_indexes
+        )
+        if not picked_tasks:
             raise PublishUnavailable("The draft does not contain publishable tasks")
         space.status = "publishing"
         space.last_activity_at = resources.utcnow()
@@ -156,10 +218,20 @@ def prepare_publish(space_id: int, draft_id: int | None, due_date: dt.date) -> d
             "draft_id": int(draft.id),
             "previous_status": current_status,
             "due_date": due_date.isoformat(),
+            "selected_task_indexes": (
+                sorted(_normalize_selected_task_indexes(selected_task_indexes) or [])
+                if selected_task_indexes is not None
+                else None
+            ),
         }
 
 
-def load_publish_snapshot(space_id: int, draft_id: int) -> dict:
+def load_publish_snapshot(
+    space_id: int,
+    draft_id: int,
+    *,
+    selected_task_indexes: list[int] | None = None,
+) -> dict:
     with session_scope() as s:
         space = space_or_error(s, int(space_id))
         if str(space.status or "") != "publishing":
@@ -168,7 +240,9 @@ def load_publish_snapshot(space_id: int, draft_id: int) -> dict:
         if draft is None or int(draft.space_id) != int(space_id):
             raise RuntimeError("Draft not found during publishing")
 
-        picked_tasks = _publishable_tasks(draft)
+        picked_tasks, deferred_tasks = _partition_publish_tasks(
+            draft, selected_task_indexes
+        )
         if not picked_tasks:
             raise RuntimeError("The draft does not contain publishable tasks")
 
@@ -178,6 +252,7 @@ def load_publish_snapshot(space_id: int, draft_id: int) -> dict:
             or space.title,
             "goal_description": str(draft.goal_description or "").strip()[:4000],
             "picked_tasks": picked_tasks,
+            "deferred_tasks": deferred_tasks,
             "draft_payload": presenters.draft_payload(draft),
         }
 
@@ -188,6 +263,7 @@ def publish_sync(
     draft_id: int,
     due_date_iso: str,
     previous_status: str,
+    selected_task_indexes: list[int] | None = None,
     load_snapshot: Callable[[int, int], dict] | None = None,
     audit: Callable[..., None] | None = None,
 ) -> None:
@@ -197,8 +273,16 @@ def publish_sync(
     draft_payload: dict | None = None
     load_snapshot_func = load_snapshot or load_publish_snapshot
     try:
-        publish_snapshot = load_snapshot_func(int(space_id), int(draft_id))
+        if selected_task_indexes is None:
+            publish_snapshot = load_snapshot_func(int(space_id), int(draft_id))
+        else:
+            publish_snapshot = load_snapshot_func(
+                int(space_id),
+                int(draft_id),
+                selected_task_indexes=selected_task_indexes,
+            )
         picked_tasks = list(publish_snapshot.get("picked_tasks") or [])
+        deferred_tasks = list(publish_snapshot.get("deferred_tasks") or [])
         draft_payload = publish_snapshot.get("draft_payload") or None
         goal_title = str(publish_snapshot.get("goal_title") or "").strip()
         goal_content = str(publish_snapshot.get("goal_description") or "").strip()
@@ -244,7 +328,7 @@ def publish_sync(
                 draft=draft,
                 goal=goal,
                 created_tasks=created_tasks,
-                deferred_tasks=[],
+                deferred_tasks=deferred_tasks,
             )
             seq_id = resources.next_resource_seq(s, int(space_id))
             summary_resource = InspirationResource(
@@ -266,7 +350,7 @@ def publish_sync(
                 draft_id=int(draft.id),
                 created_goal_id=int(goal.id),
                 created_task_ids=created_task_ids,
-                deferred_tasks=[],
+                deferred_tasks=deferred_tasks,
                 summary_resource_id=int(summary_resource.id),
             )
             s.add(record)
@@ -284,6 +368,7 @@ def publish_sync(
                         "draft_id": int(draft.id),
                         "created_goal_id": int(goal.id),
                         "created_task_ids": created_task_ids,
+                        "deferred_tasks": deferred_tasks,
                     },
                     draft_version=int(draft.version),
                 )
@@ -323,6 +408,7 @@ def publish_sync(
                     "draft": draft_payload or {},
                     "created_goal_id": created_goal_id,
                     "created_task_ids": created_task_ids,
+                    "deferred_tasks": deferred_tasks,
                 },
                 ensure_ascii=False,
                 indent=2,

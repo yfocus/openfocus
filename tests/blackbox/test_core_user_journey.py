@@ -340,12 +340,17 @@ async def test_inspiration_publish_read_only_and_fork_flow(
         assert draft_messages
         draft = draft_messages[-1]["payload"]["draft"]
         assert draft["goal_title"] == "Blackbox publishable idea"
-        assert len(draft["tasks"]) >= 1
+        assert len(draft["tasks"]) >= 3
+        deferred_task_title = draft["tasks"][1]["title"]
 
         due_date = (dt.date.today() + dt.timedelta(days=14)).isoformat()
         publish = await client.post(
             f"/api/inspirations/{space_id}/publish",
-            json={"draft_id": draft["id"], "due_date": due_date},
+            json={
+                "draft_id": draft["id"],
+                "due_date": due_date,
+                "selected_task_indexes": [0, 2],
+            },
         )
         assert publish.status_code == 200
         assert publish.json()["queued"] is True
@@ -354,6 +359,18 @@ async def test_inspiration_publish_read_only_and_fork_flow(
         goal_id = int(published["item"]["published_goal_id"])
         assert published["item"]["status"] == "published"
         assert published["publish_records"]
+        publish_record = published["publish_records"][-1]
+        assert len(publish_record["created_task_ids"]) == 2
+        assert publish_record["deferred_tasks"]
+        assert publish_record["deferred_tasks"][0]["title"] == deferred_task_title
+        published_summary = next(
+            item
+            for item in published["resources"]
+            if item["name"] == "Published Summary" and item["type"] == "summary"
+        )
+        assert "Published tasks" in published_summary["text_content"]
+        assert "Rejected / deferred ideas" in published_summary["text_content"]
+        assert deferred_task_title in published_summary["text_content"]
         assert any(
             item["name"] == "Published Summary" and item["type"] == "summary"
             for item in published["resources"]
@@ -363,6 +380,10 @@ async def test_inspiration_publish_read_only_and_fork_flow(
         assert goal_page.status_code == 200
         assert "Blackbox publishable idea" in goal_page.text
         assert "Clarify the scope of Blackbox publishable idea" in goal_page.text
+        assert "Review risks and open questions for Blackbox publishable idea" in (
+            goal_page.text
+        )
+        assert deferred_task_title not in goal_page.text
         assert f'href="/inspirations/{space_id}"' in goal_page.text
 
         cannot_add = await client.post(

@@ -473,7 +473,6 @@
       });
       rootEl.querySelectorAll('.rt-ttyd-frame').forEach((frame)=> {
         if(!(frame instanceof HTMLIFrameElement)) return;
-        frame.style.fontSize = `${next.terminalFontSize}px`;
         try{
           frame.contentWindow && frame.contentWindow.postMessage({
             type: 'openfocus:terminal-font-size',

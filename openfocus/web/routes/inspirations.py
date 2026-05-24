@@ -79,6 +79,25 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             metadata=result.audit_metadata,
         )
 
+    def _selected_task_indexes(payload: dict) -> list[int] | None:
+        if "selected_task_indexes" not in payload:
+            return None
+        raw = payload.get("selected_task_indexes")
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="invalid payload")
+        selected: list[int] = []
+        for item in raw:
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="invalid payload") from None
+            if index < 0:
+                raise HTTPException(status_code=400, detail="invalid payload")
+            selected.append(index)
+        return selected
+
     async def _enqueue_turn(space_id: int, content: str) -> dict:
         try:
             return await deps.inspiration_enqueue_turn(int(space_id), content)
@@ -470,6 +489,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             )
             draft_id_raw = payload.get("draft_id")
             draft_id = int(draft_id_raw) if draft_id_raw is not None else None
+            selected_task_indexes = _selected_task_indexes(payload)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="invalid payload")
 
@@ -478,16 +498,20 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
                 int(space_id),
                 draft_id,
                 due_date,
+                selected_task_indexes=selected_task_indexes,
             )
         except inspiration_workspace.InspirationWorkspaceError as exc:
             raise _workspace_http_error(exc) from exc
+        publish_kwargs = {
+            "space_id": int(space_id),
+            "draft_id": int(publish_info.draft_id),
+            "due_date_iso": str(publish_info.due_date),
+            "previous_status": str(publish_info.previous_status),
+        }
+        if publish_info.selected_task_indexes is not None:
+            publish_kwargs["selected_task_indexes"] = publish_info.selected_task_indexes
         asyncio.get_running_loop().create_task(
-            deps.kickoff_inspiration_publish(
-                space_id=int(space_id),
-                draft_id=int(publish_info.draft_id),
-                due_date_iso=str(publish_info.due_date),
-                previous_status=str(publish_info.previous_status),
-            )
+            deps.kickoff_inspiration_publish(**publish_kwargs)
         )
         return {
             "ok": True,
@@ -495,6 +519,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             "space_id": int(space_id),
             "draft_id": int(publish_info.draft_id),
             "status": "publishing",
+            "selected_task_indexes": publish_info.selected_task_indexes,
         }
 
     @router.post("/api/inspirations/{space_id:int}/fork")

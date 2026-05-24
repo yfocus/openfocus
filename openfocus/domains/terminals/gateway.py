@@ -250,18 +250,63 @@ def ttyd_bridge_script() -> str:
     }catch(_){ return ''; }
   }
 
+  let pendingTerminalFontSize = null;
+  let terminalFontSizeTimer = null;
+
+  function refitTerminalRows(term){
+    try{
+      if(term && typeof term.refresh === 'function'){
+        const rows = Number(term.rows || 0);
+        if(rows > 0) term.refresh(0, rows - 1);
+      }
+    }catch(_){ }
+    function fireResize(){ try{ window.dispatchEvent(new Event('resize')); }catch(_){ } }
+    fireResize();
+    try{ window.requestAnimationFrame(fireResize); }catch(_){ try{ setTimeout(fireResize, 0); }catch(__){ } }
+  }
+
+  function applyPendingTerminalFontSize(){
+    if(pendingTerminalFontSize === null) return true;
+    const term = findXterm();
+    if(!term) return false;
+    const size = pendingTerminalFontSize;
+    let applied = false;
+    try{
+      if(term.options){
+        term.options.fontSize = size;
+        applied = true;
+      }
+    }catch(_){ }
+    if(!applied){
+      try{
+        if(typeof term.setOption === 'function'){
+          term.setOption('fontSize', size);
+          applied = true;
+        }
+      }catch(_){ }
+    }
+    if(!applied) return false;
+    refitTerminalRows(term);
+    return true;
+  }
+
+  function scheduleTerminalFontSizeApply(){
+    if(terminalFontSizeTimer) return;
+    let attempts = 0;
+    terminalFontSizeTimer = setInterval(function(){
+      attempts += 1;
+      if(applyPendingTerminalFontSize() || attempts > 40){
+        clearInterval(terminalFontSizeTimer);
+        terminalFontSizeTimer = null;
+      }
+    }, 100);
+  }
+
   function applyTerminalFontSize(raw){
     const n = Number(raw);
     if(!Number.isFinite(n)) return;
-    const size = Math.max(10, Math.min(24, Math.round(n)));
-    let style = document.getElementById('openfocus-terminal-font-style');
-    if(!style){
-      style = document.createElement('style');
-      style.id = 'openfocus-terminal-font-style';
-      document.head.appendChild(style);
-    }
-    style.textContent = '.xterm, .terminal, .xterm-rows, .xterm-screen { font-size: ' + size + 'px !important; }';
-    try{ window.dispatchEvent(new Event('resize')); }catch(_){ }
+    pendingTerminalFontSize = Math.max(10, Math.min(24, Math.round(n)));
+    if(!applyPendingTerminalFontSize()) scheduleTerminalFontSizeApply();
   }
 
   window.addEventListener('message', function(event){
@@ -582,7 +627,9 @@ def ttyd_bridge_script() -> str:
 
   function installXtermLinkProvider(){
     const term = findXterm();
-    if(!term || registeredXterms.has(term)) return false;
+    if(!term) return false;
+    applyPendingTerminalFontSize();
+    if(registeredXterms.has(term)) return true;
     try{
       const disposable = term.registerLinkProvider({
         provideLinks: function(y, callback){

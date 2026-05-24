@@ -126,6 +126,7 @@ class WorkspacePublishPrepareResult:
     draft_id: int
     previous_status: str
     due_date: str
+    selected_task_indexes: list[int] | None
 
 
 @dataclass(frozen=True)
@@ -474,10 +475,19 @@ def prepare_terminal_prompt(space_id: int) -> TerminalPromptContext:
 
 
 def prepare_publish(
-    space_id: int, draft_id: int | None, due_date: dt.date
+    space_id: int,
+    draft_id: int | None,
+    due_date: dt.date,
+    *,
+    selected_task_indexes: list[int] | None = None,
 ) -> WorkspacePublishPrepareResult:
     try:
-        prepared = publishing.prepare_publish(int(space_id), draft_id, due_date)
+        prepared = publishing.prepare_publish(
+            int(space_id),
+            draft_id,
+            due_date,
+            selected_task_indexes=selected_task_indexes,
+        )
     except publishing.PublishConflict as exc:
         raise InspirationWorkspaceConflict(str(exc)) from exc
     except publishing.PublishUnavailable as exc:
@@ -491,6 +501,7 @@ def prepare_publish(
         draft_id=int(prepared["draft_id"]),
         previous_status=str(prepared["previous_status"]),
         due_date=str(prepared["due_date"]),
+        selected_task_indexes=prepared.get("selected_task_indexes"),
     )
 
 

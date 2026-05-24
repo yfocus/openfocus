@@ -63,6 +63,6 @@ export function deleteResource(spaceId: number, resourceId: number): Promise<Rec
   return apiJson(`/api/inspirations/${spaceId}/resources/${resourceId}`, { method: 'DELETE' });
 }
 
-export function publishDraft(spaceId: number, payload: { draft_id: number; due_date: string }): Promise<Record<string, unknown>> {
+export function publishDraft(spaceId: number, payload: { draft_id: number; due_date: string; selected_task_indexes?: number[] }): Promise<Record<string, unknown>> {
   return apiJson(`/api/inspirations/${spaceId}/publish`, { method: 'POST', ...jsonOptions(payload) });
 }

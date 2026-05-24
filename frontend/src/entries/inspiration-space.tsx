@@ -516,9 +516,10 @@ function InspirationSpaceController({ config }: { config: InspirationConfig }) {
       if (stateRef.current.waiting || stateRef.current.publishing || !window.confirm('Publish this draft and lock this Inspiration space?')) return;
       const fd = new FormData(form);
       const btn = form.querySelector<HTMLButtonElement>('.insp-publish-btn');
+      const selectedTaskIndexes = fd.getAll('selected_task_indexes').map((item) => Number(item)).filter((item) => Number.isInteger(item) && item >= 0);
       setPublishingUI(true, btn);
       try {
-        await publishDraft(config.spaceId, { draft_id: Number(fd.get('draft_id') || 0), due_date: String(fd.get('due_date') || '').trim() });
+        await publishDraft(config.spaceId, { draft_id: Number(fd.get('draft_id') || 0), due_date: String(fd.get('due_date') || '').trim(), selected_task_indexes: selectedTaskIndexes });
         scheduleBusyPoll(350);
       } catch (err) {
         setPublishingUI(false, btn);

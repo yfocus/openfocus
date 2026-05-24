@@ -26,4 +26,6 @@ functions.
 - Recent Events, Calendar, and Next Move feedback stay connected to the same
   Task public ID.
 - Inspiration spaces do not create Goals/Tasks before a user-confirmed publish.
+- Inspiration publish creates only user-selected Tasks and records unselected
+  draft Tasks as deferred in the publish result and Published Summary.
 - Published Inspiration spaces are read-only and can only continue via fork.

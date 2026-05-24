@@ -147,18 +147,33 @@ def _inspiration_terminal_conn(companion_id: int | None = None):
     )
 
 
-def _inspiration_load_publish_snapshot(space_id: int, draft_id: int) -> dict:
-    return inspiration_publishing.load_publish_snapshot(int(space_id), int(draft_id))
+def _inspiration_load_publish_snapshot(
+    space_id: int,
+    draft_id: int,
+    *,
+    selected_task_indexes: list[int] | None = None,
+) -> dict:
+    return inspiration_publishing.load_publish_snapshot(
+        int(space_id),
+        int(draft_id),
+        selected_task_indexes=selected_task_indexes,
+    )
 
 
 def _inspiration_publish_sync(
-    *, space_id: int, draft_id: int, due_date_iso: str, previous_status: str
+    *,
+    space_id: int,
+    draft_id: int,
+    due_date_iso: str,
+    previous_status: str,
+    selected_task_indexes: list[int] | None = None,
 ) -> None:
     inspiration_publishing.publish_sync(
         space_id=int(space_id),
         draft_id=int(draft_id),
         due_date_iso=str(due_date_iso),
         previous_status=str(previous_status or "open"),
+        selected_task_indexes=selected_task_indexes,
         load_snapshot=_inspiration_load_publish_snapshot,
         audit=memory_service.try_audit_memory,
     )
@@ -170,6 +185,7 @@ async def _kickoff_inspiration_publish(**kwargs) -> None:
         draft_id=int(kwargs["draft_id"]),
         due_date_iso=str(kwargs["due_date_iso"]),
         previous_status=str(kwargs.get("previous_status") or "open"),
+        selected_task_indexes=kwargs.get("selected_task_indexes"),
         release_terminals=_inspiration_release_terminals,
         publish_func=_inspiration_publish_sync,
     )

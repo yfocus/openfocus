@@ -100,14 +100,18 @@ Companion 不为浏览器暴露 HTTP 服务；系统悬浮球命令仍走白名�
 
 ### 架构分层
 
-- 浏览器：渲染终端（xterm.js），只通过 OpenFocus Web API 通信。
+- 浏览器：渲染终端。当前 ttyd backend 中 xterm.js 运行在 OpenFocus
+  proxy/embed 的 ttyd iframe 内；浏览器不得直连 Companion。
 - OpenFocus（Control Plane）：
   - 负责终端 session 的创建/关闭/鉴权
-  - 将浏览器的输入/resize 转发给 Companion
-  - 将 Companion 的输出通过 WebSocket 复用到浏览器
+  - 代理 ttyd HTTP/WebSocket，或在非 ttyd backend 中将浏览器输入/resize
+    转发给 Companion
+  - 注入 ttyd bridge 以支持文件链接、Prompt Zone 注入与浏览器侧显示设置
 - Companion（Data Plane）：
   - 为每个 terminal session 启动一个 PTY（shell），并持续读取 PTY 输出
   - 接收输入写入 PTY master fd，并支持窗口大小 resize
+  - ttyd backend 由 Companion 启动 ttyd + tmux，并返回 `connect_url` 给
+    OpenFocus 代理
 
 ### 协议与数据格式
 
@@ -116,8 +120,19 @@ Companion 不为浏览器暴露 HTTP 服务；系统悬浮球命令仍走白名�
   - `TerminalOutput(terminal_id, data, closed, error)`
 - 浏览器 ⇄ OpenFocus：
   - HTTP：列出/新建/关闭终端（按 AgentSpace 维度管理）
-  - WebSocket：实时转发输入/输出
+  - ttyd backend：OpenFocus 代理 ttyd 的 HTTP/WebSocket；非 ttyd backend
+    可使用 OpenFocus 自有 WebSocket 实时转发输入/输出
   - 终端数据为二进制，WebSocket 侧采用 `base64` 放入 JSON 字段（`data_b64`）
+
+### ttyd bridge 与字体设置
+
+- AgentSpace/系统设置中的 terminal font size 是每个浏览器的显示偏好。
+- ttyd iframe 内的字体设置必须通过 xterm runtime option（例如
+  `term.options.fontSize`）应用，并触发 resize/refresh，让 xterm 重新测量
+  cell 宽度。
+- 不得通过注入 `.xterm` / `.xterm-rows` / `.xterm-screen` 的 CSS
+  `font-size` 来缩放终端内容；这会让 xterm 的列宽测量与实际字形宽度不一致，
+  在中英文混排、宽字符或右边界附近输出时容易裁剪最右侧字符或露出右侧空白列。
 
 ### 终端生命周期与清理策略
 

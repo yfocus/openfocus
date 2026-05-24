@@ -37,6 +37,17 @@ def test_agent_space_ttyd_bridge_supports_command_click_link_messages():
     assert "applyTerminalFontSize" in script
 
 
+def test_agent_space_ttyd_bridge_applies_font_size_through_xterm_options():
+    from openfocus.web.routes.agent_spaces import _ttyd_bridge_script
+
+    script = _ttyd_bridge_script()
+
+    assert "term.options.fontSize = size" in script
+    assert "scheduleTerminalFontSizeApply" in script
+    assert "font-size: ' + size" not in script
+    assert ".xterm-rows, .xterm-screen" not in script
+
+
 def test_agent_space_ttyd_bridge_injection_is_html_only_and_idempotent():
     from openfocus.web.routes.agent_spaces import _maybe_inject_ttyd_bridge
 

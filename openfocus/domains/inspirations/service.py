@@ -469,18 +469,35 @@ async def enqueue_turn(
     }
 
 
-def prepare_publish(space_id: int, draft_id: int | None, due_date: dt.date) -> dict:
-    return publishing.prepare_publish(int(space_id), draft_id, due_date)
+def prepare_publish(
+    space_id: int,
+    draft_id: int | None,
+    due_date: dt.date,
+    *,
+    selected_task_indexes: list[int] | None = None,
+) -> dict:
+    return publishing.prepare_publish(
+        int(space_id),
+        draft_id,
+        due_date,
+        selected_task_indexes=selected_task_indexes,
+    )
 
 
 def publish_sync(
-    *, space_id: int, draft_id: int, due_date_iso: str, previous_status: str
+    *,
+    space_id: int,
+    draft_id: int,
+    due_date_iso: str,
+    previous_status: str,
+    selected_task_indexes: list[int] | None = None,
 ) -> None:
     publishing.publish_sync(
         space_id=int(space_id),
         draft_id=int(draft_id),
         due_date_iso=str(due_date_iso),
         previous_status=str(previous_status or "open"),
+        selected_task_indexes=selected_task_indexes,
         load_snapshot=publishing.load_publish_snapshot,
         audit=memory_service.try_audit_memory,
     )
@@ -553,6 +570,7 @@ async def kickoff_publish(
     due_date_iso: str,
     previous_status: str,
     release_terminals: Callable[[int], Awaitable[int]],
+    selected_task_indexes: list[int] | None = None,
     publish_func: Callable[..., None] | None = None,
 ) -> None:
     publish_worker = publish_func or publish_sync
@@ -563,6 +581,7 @@ async def kickoff_publish(
             draft_id=int(draft_id),
             due_date_iso=str(due_date_iso),
             previous_status=str(previous_status or "open"),
+            selected_task_indexes=selected_task_indexes,
         )
     except Exception as exc:
         await asyncio.to_thread(

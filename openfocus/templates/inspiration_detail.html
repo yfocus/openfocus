@@ -80,6 +80,7 @@
     .resources-items-scroll{ flex:1; min-height:0; height:100%; overflow-y:auto; overflow-x:hidden; padding-right:4px; display:flex; flex-direction:column; gap:6px; }
     .task-list{ display:flex; flex-direction:column; gap:8px; margin-top:10px; }
     .task-row{ display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.03); }
+    .task-row input[type="checkbox"]{ margin-top:3px; flex:0 0 auto; }
     .task-row .desc{ display:block; margin-top:4px; font-size:12px; color:rgba(215,255,233,0.58); white-space:pre-wrap; }
     .actions{ display:flex; gap:10px; flex-wrap:wrap; }
     .draft-card{ margin-top:10px; border:1px solid rgba(255,255,255,0.12); border-radius:12px; background:rgba(255,255,255,0.03); }
@@ -325,10 +326,11 @@
                             <div class="task-list">
                               {% for task in draft.get('tasks') or [] %}
                                 <div class="task-row">
-                                  <div>{{ loop.index }}.</div>
+                                  <input type="checkbox" name="selected_task_indexes" value="{{ loop.index0 }}" checked form="publish-draft-{{ draft.get('id') }}" />
                                   <div>
                                     <strong>{{ task.get('title') }}</strong>
-                                    {% if task.get('description') %}<span class="desc">{{ task.get('description') }}</span>{% endif %}
+                                    {% set task_content = task.get('description') or task.get('content') %}
+                                    {% if task_content %}<span class="desc">{{ task_content }}</span>{% endif %}
                                   </div>
                                 </div>
                               {% endfor %}
@@ -344,7 +346,7 @@
 {% endfor %}</div>
                             {% endif %}
                             {% if space.status in ['open', 'closed'] and not is_busy %}
-                              <form class="insp-publish-form" style="margin-top:12px;">
+                              <form class="insp-publish-form" id="publish-draft-{{ draft.get('id') }}" style="margin-top:12px;">
                                 <input type="hidden" name="draft_id" value="{{ draft.get('id') }}" />
                                 <div>
                                   <label for="draft-due-{{ draft.get('id') }}">Goal DDL</label>
@@ -410,16 +412,17 @@
                                 <div class="task-list">
                                   {% for task in draft.get('tasks') or [] %}
                                     <div class="task-row">
-                                      <div>{{ loop.index }}.</div>
+                                      <input type="checkbox" name="selected_task_indexes" value="{{ loop.index0 }}" checked form="terminal-publish-draft-{{ draft.get('id') }}" />
                                       <div>
                                         <strong>{{ task.get('title') }}</strong>
-                                        {% if task.get('description') %}<span class="desc">{{ task.get('description') }}</span>{% endif %}
+                                        {% set task_content = task.get('description') or task.get('content') %}
+                                        {% if task_content %}<span class="desc">{{ task_content }}</span>{% endif %}
                                       </div>
                                     </div>
                                   {% endfor %}
                                 </div>
                                 {% if space.status in ['open', 'closed'] and not is_busy %}
-                                  <form class="insp-publish-form" style="margin-top:12px;">
+                                  <form class="insp-publish-form" id="terminal-publish-draft-{{ draft.get('id') }}" style="margin-top:12px;">
                                     <input type="hidden" name="draft_id" value="{{ draft.get('id') }}" />
                                     <div>
                                       <label for="terminal-draft-due-{{ draft.get('id') }}">Goal DDL</label>
