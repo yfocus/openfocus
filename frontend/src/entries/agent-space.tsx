@@ -40,12 +40,14 @@ import {
 import {
   codeSearchGroups,
   codeSearchBackendLabel,
+  codeSearchOverlayStatusText,
   codeSearchResultMetaLabel,
   codeSearchResultPrimaryLabel,
   flattenCodeSearchGroups,
   isCompanionOfflineSearchError,
   moveSearchSelection,
   openCodeSearchResult,
+  shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
 import type { FileEntry } from '../types/openfocus';
 
@@ -130,6 +132,13 @@ type SearchEverywhereState = {
   backend: CodeNavigationBackend | '';
   groups: CodeSearchResultGroup[];
   selectedIndex: number;
+};
+
+type FindInFilesState = SearchEverywhereState & {
+  include: string;
+  exclude: string;
+  caseSensitive: boolean;
+  regex: boolean;
 };
 
 function toast(message: string): void {
@@ -565,8 +574,25 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     groups: [],
     selectedIndex: -1,
   }));
+  const [findInFiles, setFindInFiles] = useState<FindInFilesState>(() => ({
+    open: false,
+    query: '',
+    include: '',
+    exclude: '',
+    caseSensitive: false,
+    regex: false,
+    loading: false,
+    completed: false,
+    status: '',
+    error: '',
+    backend: '',
+    groups: [],
+    selectedIndex: -1,
+  }));
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdRef = useRef(0);
+  const findRequestIdRef = useRef(0);
 
   const openPreview = useCallback(
     async (relPath: string, name: string, target?: PreviewTarget) => {
@@ -606,6 +632,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   );
 
   const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
+  const findResults = useMemo(() => flattenCodeSearchGroups(findInFiles.groups), [findInFiles.groups]);
 
   const openSearchEverywhere = useCallback(() => {
     setSearchEverywhere((state) => ({ ...state, open: true }));
@@ -617,6 +644,16 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     setSearchEverywhere((state) => ({ ...state, open: false }));
   }, []);
 
+  const openFindInFiles = useCallback(() => {
+    setFindInFiles((state) => ({ ...state, open: true }));
+    window.setTimeout(() => findInputRef.current?.focus(), 0);
+  }, []);
+
+  const closeFindInFiles = useCallback(() => {
+    findRequestIdRef.current += 1;
+    setFindInFiles((state) => ({ ...state, open: false }));
+  }, []);
+
   const activateSearchResult = useCallback(
     async (result: CodeSearchResult | null | undefined, closeAfterOpen: boolean) => {
       const opened = await openCodeSearchResult(result, openPreview);
@@ -625,10 +662,18 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     [closeSearchEverywhere, openPreview],
   );
 
+  const activateFindResult = useCallback(
+    async (result: CodeSearchResult | null | undefined, closeAfterOpen: boolean) => {
+      const opened = await openCodeSearchResult(result, openPreview);
+      if (opened && closeAfterOpen) closeFindInFiles();
+    },
+    [closeFindInFiles, openPreview],
+  );
+
   useEffect(() => {
     if (!searchEverywhere.open) return;
     const query = searchEverywhere.query.trim();
-    if (!query) {
+    if (!shouldRunCodeSearchQuery(query)) {
       searchRequestIdRef.current += 1;
       setSearchEverywhere((state) => ({
         ...state,
@@ -683,6 +728,82 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     }, 200);
     return () => window.clearTimeout(timer);
   }, [config.spaceId, searchEverywhere.open, searchEverywhere.query]);
+
+  useEffect(() => {
+    if (!findInFiles.open) return;
+    const query = findInFiles.query.trim();
+    if (!shouldRunCodeSearchQuery(query)) {
+      findRequestIdRef.current += 1;
+      setFindInFiles((state) => ({
+        ...state,
+        loading: false,
+        completed: false,
+        status: '',
+        error: '',
+        backend: '',
+        groups: [],
+        selectedIndex: -1,
+      }));
+      return;
+    }
+
+    const requestId = findRequestIdRef.current + 1;
+    findRequestIdRef.current = requestId;
+    setFindInFiles((state) => ({ ...state, loading: true, completed: false, status: 'Searching...', error: '', backend: '' }));
+    const timer = window.setTimeout(() => {
+      searchCode(config.spaceId, {
+        q: query,
+        kind: 'text',
+        include: findInFiles.include.trim(),
+        exclude: findInFiles.exclude.trim(),
+        caseSensitive: findInFiles.caseSensitive,
+        regex: findInFiles.regex,
+        limit: 100,
+      })
+        .then((response) => {
+          setFindInFiles((state) => {
+            if (findRequestIdRef.current !== requestId) return state;
+            const groups = codeSearchGroups(response);
+            const total = flattenCodeSearchGroups(groups).length;
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: response.truncated ? 'Partial results' : '',
+              error: '',
+              backend: response.backend || '',
+              groups,
+              selectedIndex: total > 0 ? 0 : -1,
+            };
+          });
+        })
+        .catch((err) => {
+          setFindInFiles((state) => {
+            if (findRequestIdRef.current !== requestId) return state;
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: '',
+              error: isCompanionOfflineSearchError(err) ? 'Companion offline' : `Find failed: ${message}`,
+              backend: '',
+              groups: [],
+              selectedIndex: -1,
+            };
+          });
+        });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [
+    config.spaceId,
+    findInFiles.caseSensitive,
+    findInFiles.exclude,
+    findInFiles.include,
+    findInFiles.open,
+    findInFiles.query,
+    findInFiles.regex,
+  ]);
 
   useEffect(() => {
     if (!preview.path || preview.loading || preview.error || preview.imageUrl) return;
@@ -975,7 +1096,23 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const searchBackendText = !searchEverywhere.error && searchEverywhere.completed && !searchEverywhere.loading
     ? codeSearchBackendLabel(searchEverywhere.backend)
     : '';
-  const searchStatusText = searchEverywhere.error || searchEverywhere.status || (searchEverywhere.completed && !searchEverywhere.loading && searchResults.length === 0 ? 'No results' : '');
+  const searchStatusText = codeSearchOverlayStatusText({
+    error: searchEverywhere.error,
+    status: searchEverywhere.status,
+    completed: searchEverywhere.completed,
+    loading: searchEverywhere.loading,
+    resultCount: searchResults.length,
+  });
+  const findBackendText = !findInFiles.error && findInFiles.completed && !findInFiles.loading
+    ? codeSearchBackendLabel(findInFiles.backend)
+    : '';
+  const findStatusText = codeSearchOverlayStatusText({
+    error: findInFiles.error,
+    status: findInFiles.status,
+    completed: findInFiles.completed,
+    loading: findInFiles.loading,
+    resultCount: findResults.length,
+  });
 
   return (
     <>
@@ -1018,16 +1155,28 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
               <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                   <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    title="Search Everywhere"
-                    aria-label="Search Everywhere"
-                    style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 16, lineHeight: 1 }}
-                    onClick={openSearchEverywhere}
-                  >
-                    <span aria-hidden="true">⌕</span>
-                  </button>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flex: '0 0 auto' }}>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      title="Search Everywhere"
+                      aria-label="Search Everywhere"
+                      style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 16, lineHeight: 1 }}
+                      onClick={openSearchEverywhere}
+                    >
+                      <span aria-hidden="true">⌕</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      title="Find in Files"
+                      aria-label="Find in Files"
+                      style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 15, lineHeight: 1 }}
+                      onClick={openFindInFiles}
+                    >
+                      <span aria-hidden="true">▤</span>
+                    </button>
+                  </div>
                 </div>
               </div>
               <div className="divider" />
@@ -1177,6 +1326,194 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                           }}
                           onMouseEnter={() => setSearchEverywhere((state) => ({ ...state, selectedIndex: index }))}
                           onClick={() => activateSearchResult(result, false)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {codeSearchResultPrimaryLabel(result)}
+                            </span>
+                            <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                              {result.line ? `L${result.line}` : ''}
+                            </span>
+                          </div>
+                          <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {codeSearchResultMetaLabel(result)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {findInFiles.open ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Find in Files"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.46)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '8vh 16px 16px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeFindInFiles();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeFindInFiles();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setFindInFiles((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, findResults.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = findResults[findInFiles.selectedIndex] || null;
+              void activateFindResult(selected, event.metaKey || event.ctrlKey);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(820px, 100%)',
+              maxHeight: '78vh',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: 10, borderBottom: '1px solid rgba(0, 229, 255, 0.14)', display: 'grid', gap: 8 }}>
+              <input
+                ref={findInputRef}
+                value={findInFiles.query}
+                placeholder="Find in files"
+                aria-label="Find query"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  border: '1px solid rgba(0, 229, 255, 0.24)',
+                  borderRadius: 6,
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  color: 'var(--text)',
+                  padding: '9px 10px',
+                  font: 'inherit',
+                  outline: 'none',
+                }}
+                onChange={(event) => setFindInFiles((state) => ({ ...state, query: event.target.value }))}
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) auto auto', gap: 8, alignItems: 'center' }}>
+                <input
+                  value={findInFiles.include}
+                  placeholder="Include"
+                  aria-label="Include files"
+                  style={{
+                    minWidth: 0,
+                    boxSizing: 'border-box',
+                    border: '1px solid rgba(0, 229, 255, 0.18)',
+                    borderRadius: 6,
+                    background: 'rgba(255, 255, 255, 0.035)',
+                    color: 'var(--text)',
+                    padding: '7px 8px',
+                    font: 'inherit',
+                    outline: 'none',
+                  }}
+                  onChange={(event) => setFindInFiles((state) => ({ ...state, include: event.target.value }))}
+                />
+                <input
+                  value={findInFiles.exclude}
+                  placeholder="Exclude"
+                  aria-label="Exclude files"
+                  style={{
+                    minWidth: 0,
+                    boxSizing: 'border-box',
+                    border: '1px solid rgba(0, 229, 255, 0.18)',
+                    borderRadius: 6,
+                    background: 'rgba(255, 255, 255, 0.035)',
+                    color: 'var(--text)',
+                    padding: '7px 8px',
+                    font: 'inherit',
+                    outline: 'none',
+                  }}
+                  onChange={(event) => setFindInFiles((state) => ({ ...state, exclude: event.target.value }))}
+                />
+                <label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={findInFiles.caseSensitive}
+                    onChange={(event) => setFindInFiles((state) => ({ ...state, caseSensitive: event.target.checked }))}
+                  />
+                  Case
+                </label>
+                <label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={findInFiles.regex}
+                    onChange={(event) => setFindInFiles((state) => ({ ...state, regex: event.target.checked }))}
+                  />
+                  Regex
+                </label>
+              </div>
+            </div>
+            {findStatusText || findBackendText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: findInFiles.groups.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {findInFiles.loading ? <><span className="spin" /> </> : null}
+                  {findStatusText}
+                </span>
+                {findBackendText ? (
+                  <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.8 }}>
+                    {findBackendText}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: findInFiles.groups.length ? '6px 0' : 0 }}>
+              {(() => {
+                let resultIndex = 0;
+                return findInFiles.groups.map((group) => (
+                  <div key={group.path}>
+                    <div className="muted" style={{ padding: '8px 12px 4px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase' }}>
+                      {group.path}
+                    </div>
+                    {(group.results || []).map((result) => {
+                      const index = resultIndex;
+                      resultIndex += 1;
+                      const selected = index === findInFiles.selectedIndex;
+                      return (
+                        <button
+                          key={`${result.path}:${result.line}:${result.column}:${index}`}
+                          type="button"
+                          style={{
+                            width: '100%',
+                            display: 'block',
+                            textAlign: 'left',
+                            border: 0,
+                            borderRadius: 0,
+                            background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                            color: 'var(--text)',
+                            padding: '7px 12px',
+                            cursor: 'pointer',
+                          }}
+                          onMouseEnter={() => setFindInFiles((state) => ({ ...state, selectedIndex: index }))}
+                          onClick={() => activateFindResult(result, false)}
                         >
                           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
                             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

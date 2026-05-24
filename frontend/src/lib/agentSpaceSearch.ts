@@ -78,6 +78,25 @@ export function codeSearchBackendLabel(backend: CodeNavigationBackend | string |
   }
 }
 
+export function shouldRunCodeSearchQuery(query: string | null | undefined): boolean {
+  return String(query || '').trim().length > 0;
+}
+
+export function codeSearchOverlayStatusText(options: {
+  error?: string;
+  status?: string;
+  completed?: boolean;
+  loading?: boolean;
+  resultCount?: number;
+}): string {
+  const error = String(options.error || '');
+  if (error) return error;
+  const status = String(options.status || '');
+  if (status) return status;
+  if (options.completed && !options.loading && Number(options.resultCount || 0) <= 0) return 'No results';
+  return '';
+}
+
 export async function openCodeSearchResult(result: CodeSearchResult | null | undefined, openPreview: SearchPreviewOpener): Promise<boolean> {
   if (!result?.path) return false;
   const line = positiveInt(result.line);

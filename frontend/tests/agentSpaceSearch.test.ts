@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 import {
   codeSearchBackendLabel,
+  codeSearchOverlayStatusText,
   codeSearchGroups,
   codeSearchResultMetaLabel,
   codeSearchResultPrimaryLabel,
@@ -9,6 +10,7 @@ import {
   moveSearchSelection,
   openCodeSearchResult,
   searchResultFileName,
+  shouldRunCodeSearchQuery,
 } from '../src/lib/agentSpaceSearch.js';
 import type { CodeSearchResult } from '../src/api/codeNavigation.js';
 
@@ -152,6 +154,26 @@ const tests: TestCase[] = [
       assertEqual(codeSearchBackendLabel('reference_fallback'), 'Reference fallback');
       assertEqual(codeSearchBackendLabel('unknown'), '');
       assertEqual(codeSearchBackendLabel(undefined), '');
+    },
+  },
+  {
+    name: 'empty search queries are not runnable',
+    run: () => {
+      assertEqual(shouldRunCodeSearchQuery(''), false);
+      assertEqual(shouldRunCodeSearchQuery('   '), false);
+      assertEqual(shouldRunCodeSearchQuery('\n\t'), false);
+      assertEqual(shouldRunCodeSearchQuery('task'), true);
+    },
+  },
+  {
+    name: 'overlay status waits for completed requests before no results',
+    run: () => {
+      assertEqual(codeSearchOverlayStatusText({ completed: false, loading: false, resultCount: 0 }), '');
+      assertEqual(codeSearchOverlayStatusText({ completed: true, loading: true, resultCount: 0 }), '');
+      assertEqual(codeSearchOverlayStatusText({ completed: true, loading: false, resultCount: 0 }), 'No results');
+      assertEqual(codeSearchOverlayStatusText({ completed: true, loading: false, resultCount: 3 }), '');
+      assertEqual(codeSearchOverlayStatusText({ error: 'Companion offline', completed: true, loading: false, resultCount: 0 }), 'Companion offline');
+      assertEqual(codeSearchOverlayStatusText({ status: 'Partial results', completed: true, loading: false, resultCount: 2 }), 'Partial results');
     },
   },
   {
