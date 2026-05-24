@@ -50,6 +50,9 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
         "openfocus/templates/agent_space.html", encoding="utf-8"
     ).read()
     base_template = open("openfocus/templates/base.html", encoding="utf-8").read()
+    agent_space_react = Path("frontend/src/entries/agent-space.tsx").read_text(
+        encoding="utf-8"
+    )
 
     assert 'id="rt-task-show"' in source
     assert 'id="rt-task-details-modal"' in source
@@ -113,9 +116,11 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert ".rt-pane-toggles" in css
     assert '.rt-side[data-terminal-open="0"] .rt-prompt-zone' in css
     assert "space-copy-task" not in agent_space_template
-    assert "agent-space-settings-column" in Path(
-        "frontend/src/entries/agent-space.tsx"
-    ).read_text(encoding="utf-8")
+    assert "agent-space-settings-column" in agent_space_react
+    assert "renderMarkdownToHtml" in agent_space_react
+    assert "Show Markdown source" in agent_space_react
+    assert "Render Markdown" in agent_space_react
+    assert ".markdown-preview" in agent_space_template
     assert 'id="nav-system"' in base_template
     assert 'id="system-dialog"' in base_template
     assert "system-files-font-size" in base_template

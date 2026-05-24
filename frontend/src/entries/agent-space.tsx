@@ -31,6 +31,11 @@ import {
   type TerminalLinkOpenMessage,
 } from '../lib/fileReferences';
 import {
+  isMarkdownPreviewFile,
+  renderMarkdownToHtml,
+  shouldRenderMarkdownPreview,
+} from '../lib/markdownPreview';
+import {
   AGENT_SPACE_SETTINGS_EVENT,
   AGENT_SPACE_SETTINGS_KEY,
   loadAgentSpaceSettings,
@@ -576,6 +581,17 @@ function CodeMirrorPreview({
   return <div ref={hostRef} className="codebox cm-preview" />;
 }
 
+function MarkdownPreview({ content, fontSize }: { content: string; fontSize: number }) {
+  const html = useMemo(() => renderMarkdownToHtml(content), [content]);
+  return (
+    <div
+      className="markdown-preview"
+      style={{ fontSize: `${fontSize}px` }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const splitRef = useRef<HTMLDivElement | null>(null);
   const filesPaneRef = useRef<HTMLDivElement | null>(null);
@@ -596,6 +612,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: false,
     error: '',
   }));
+  const [markdownSourceMode, setMarkdownSourceMode] = useState(false);
   const [settings, setSettings] = useState<AgentSpaceSettings>(() => loadAgentSpaceSettings());
   const [shortcuts, setShortcuts] = useState<AgentSpaceShortcutSettings>(() => loadAgentSpaceShortcuts());
   const [searchEverywhere, setSearchEverywhere] = useState<SearchEverywhereState>(() => ({
@@ -647,6 +664,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         ts: Date.now(),
       });
       const displayName = name || guessNameFromPath(relPath);
+      setMarkdownSourceMode(Boolean(targetLine && isMarkdownPreviewFile(displayName)));
       setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: true, error: '', targetLine, targetColumn, targetNonce });
       try {
         if (isLikelyImage(displayName)) {
@@ -1248,6 +1266,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: findInFiles.loading,
     resultCount: findResults.length,
   });
+  const previewIdentity = preview.name || preview.path;
+  const previewIsMarkdown = isMarkdownPreviewFile(previewIdentity);
+  const renderMarkdownPreview = shouldRenderMarkdownPreview(previewIdentity, markdownSourceMode);
+
+  useEffect(() => {
+    if (renderMarkdownPreview) updatePreviewSelection({ text: '' });
+  }, [preview.content, renderMarkdownPreview, updatePreviewSelection]);
 
   return (
     <>
@@ -1291,6 +1316,19 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                   <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flex: '0 0 auto' }}>
+                    {previewIsMarkdown && preview.path ? (
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        title={markdownSourceMode ? 'Render Markdown' : 'Show Markdown source'}
+                        aria-label={markdownSourceMode ? 'Render Markdown' : 'Show Markdown source'}
+                        aria-pressed={!markdownSourceMode}
+                        style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 13, lineHeight: 1 }}
+                        onClick={() => setMarkdownSourceMode((value) => !value)}
+                      >
+                        <span aria-hidden="true">{markdownSourceMode ? '#' : '</>'}</span>
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn-ghost"
@@ -1315,12 +1353,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                 </div>
               </div>
               <div className="divider" />
-              <div ref={previewScrollRef} className="col-scroll pad" tabIndex={-1} style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: preview.content ? 'hidden' : 'auto', fontSize: `${settings.previewFontSize}px` }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
+              <div ref={previewScrollRef} className="col-scroll pad" tabIndex={-1} style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, overflow: renderMarkdownPreview ? 'auto' : preview.content ? 'hidden' : 'auto', fontSize: `${settings.previewFontSize}px` }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: true })}>
                 <div ref={previewContentRef} className={preview.path ? 'agent-preview-content' : 'muted'}>
                   {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
                   {preview.error ? preview.error : null}
                   {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
-                  {!preview.loading && !preview.error && preview.content ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.loading && !preview.error && preview.content && renderMarkdownPreview ? <MarkdownPreview content={preview.content} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
                   {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
                 </div>
               </div>
