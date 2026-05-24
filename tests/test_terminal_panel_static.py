@@ -76,6 +76,13 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert "Navigate Back" in source
     assert "navigation_forward" in source
     assert "Navigate Forward" in source
+    assert "AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS" in source
+    assert (
+        "['go_to_definition', 'find_usages', 'navigation_back', 'navigation_forward']"
+        in source
+    )
+    assert "Not available yet" in source
+    assert 'disabled aria-disabled="true" title="Not available yet"' in source
     assert "focus_files" in source
     assert "Focus Files" in source
     assert "focus_preview" in source
@@ -84,6 +91,10 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert "Focus Terminal" in source
     assert "Double Shift" in source
     assert "Press shortcut" in source
+    assert "recordingCurrent" in source
+    assert "formatShortcutBinding(recordingCapturedBinding, platform)" in source
+    assert "if(!confirmShortcutRecording({ saving: true })) return ''" in source
+    assert "Press shortcut or Escape to cancel recording before saving." in source
     assert "Browser-reserved shortcut" in source
     assert ".rt-settings-tabs" in css
     assert ".rt-shortcut-row" in css

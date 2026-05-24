@@ -9,7 +9,7 @@ import {
   type ShortcutPlatform,
 } from './agentSpaceShortcuts.js';
 
-export const AGENT_SPACE_DISPATCHABLE_COMMANDS: AgentSpaceShortcutCommandId[] = [
+export const AGENT_SPACE_IMPLEMENTED_COMMANDS: AgentSpaceShortcutCommandId[] = [
   'search_everywhere',
   'find_in_files',
   'focus_files',
@@ -202,12 +202,16 @@ export function shortcutEventMatchesBinding(event: ShortcutKeyEventLike, binding
   return shortcutSignaturesMatch(normalizeShortcutKeyEvent(event), binding);
 }
 
+export function isAgentSpaceShortcutCommandImplemented(command: AgentSpaceShortcutCommandId): boolean {
+  return AGENT_SPACE_IMPLEMENTED_COMMANDS.includes(command);
+}
+
 export function commandFromShortcutEvent(
   event: ShortcutKeyEventLike,
   settings: AgentSpaceShortcutSettings,
   platform: ShortcutPlatform,
   doubleShift: DoubleShiftDetector,
-  commandIds: AgentSpaceShortcutCommandId[] = AGENT_SPACE_DISPATCHABLE_COMMANDS,
+  commandIds: AgentSpaceShortcutCommandId[] = AGENT_SPACE_IMPLEMENTED_COMMANDS,
   now?: number,
 ): AgentSpaceShortcutCommandId | null {
   const doubleShiftTriggered = doubleShift.keydown(event, now);

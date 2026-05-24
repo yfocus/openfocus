@@ -958,6 +958,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       }
       if (command === 'focus_terminal') {
         focusAgentSpacePane('terminal');
+        return;
       }
     },
     [focusAgentSpacePane, openFindInFiles, openSearchEverywhere],

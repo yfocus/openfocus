@@ -6,6 +6,7 @@ import {
   detectShortcutPlatform,
   findActiveTerminalIframe,
   isEditableShortcutTarget,
+  isAgentSpaceShortcutCommandImplemented,
   isTerminalShortcutTarget,
   shouldIgnoreAgentSpaceShortcut,
   shortcutEventMatchesBinding,
@@ -177,7 +178,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: 'dispatches only implemented AgentSpace commands',
+    name: 'dispatches only implemented AgentSpace commands by default',
     run: () => {
       const detector = createDoubleShiftDetector(500);
 
@@ -197,6 +198,20 @@ const tests: TestCase[] = [
         commandFromShortcutEvent(keyEvent('B', { code: 'KeyB', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1600),
         null,
       );
+      assertEqual(
+        commandFromShortcutEvent(keyEvent('F7', { code: 'F7', altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1700),
+        null,
+      );
+      assertEqual(
+        commandFromShortcutEvent(keyEvent('[', { code: 'BracketLeft', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1800),
+        null,
+      );
+      assertEqual(
+        commandFromShortcutEvent(keyEvent('ArrowRight', { code: 'ArrowRight', ctrlKey: true, altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1900),
+        null,
+      );
+      assertEqual(isAgentSpaceShortcutCommandImplemented('find_in_files'), true);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), false);
     },
   },
 ];

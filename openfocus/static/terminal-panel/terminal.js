@@ -65,6 +65,7 @@
     { id: 'focus_terminal', label: 'Focus Terminal', scope: 'AgentSpace', defaults: [{ keys: ['Alt', '3'], platform: 'all' }] },
   ];
   const AGENT_SPACE_SHORTCUT_COMMAND_BY_ID = new Map(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd]));
+  const AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS = new Set(['go_to_definition', 'find_usages', 'navigation_back', 'navigation_forward']);
   const AGENT_SPACE_SHORTCUT_DEFAULTS = {
     version: 1,
     bindings: Object.fromEntries(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd.defaults.map((binding)=> ({ keys: binding.keys.slice(), platform: binding.platform }))])),
@@ -201,6 +202,10 @@
       if(key === 'ArrowDown') return 'Down';
       return key;
     }).join('+');
+  }
+
+  function isShortcutCommandUnavailable(commandId){
+    return AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS.has(String(commandId || ''));
   }
 
   function normalizeShortcutKeyEvent(event){
@@ -716,20 +721,24 @@
         const current = resolveShortcutBinding(shortcutDraftSettings, cmd.id, platform);
         const def = resolveShortcutBinding(AGENT_SPACE_SHORTCUT_DEFAULTS, cmd.id, platform);
         const recording = recordingShortcutId === cmd.id;
+        const recordingCurrent = recording && recordingCapturedBinding ? formatShortcutBinding(recordingCapturedBinding, platform) : 'Press shortcut';
+        const unavailable = isShortcutCommandUnavailable(cmd.id);
+        const scopeLabel = unavailable ? `${cmd.scope} - Not available yet` : cmd.scope;
+        const disabledAttr = unavailable ? ' disabled aria-disabled="true" title="Not available yet"' : '';
         return `
-          <div class="rt-shortcut-row" data-shortcut-command="${esc(cmd.id)}">
+          <div class="rt-shortcut-row${unavailable ? ' rt-shortcut-row-unavailable' : ''}" data-shortcut-command="${esc(cmd.id)}">
             <div class="rt-shortcut-main">
               <div class="rt-shortcut-label">${esc(cmd.label)}</div>
-              <div class="rt-shortcut-scope">${esc(cmd.scope)}</div>
+              <div class="rt-shortcut-scope">${esc(scopeLabel)}</div>
             </div>
             <div class="rt-shortcut-bindings">
-              <div><span>Current</span><strong>${esc(recording ? 'Press shortcut' : formatShortcutBinding(current, platform))}</strong></div>
+              <div><span>Current</span><strong>${esc(recording ? recordingCurrent : formatShortcutBinding(current, platform))}</strong></div>
               <div><span>Default</span><strong>${esc(formatShortcutBinding(def, platform))}</strong></div>
             </div>
             <div class="rt-shortcut-actions">
-              <button type="button" class="btn-ghost" data-shortcut-action="record" data-shortcut-command="${esc(cmd.id)}">${recording ? 'Recording' : 'Record'}</button>
-              <button type="button" class="btn-ghost" data-shortcut-action="reset" data-shortcut-command="${esc(cmd.id)}">Reset</button>
-              <button type="button" class="btn-ghost" data-shortcut-action="clear" data-shortcut-command="${esc(cmd.id)}">Clear</button>
+              <button type="button" class="btn-ghost" data-shortcut-action="record" data-shortcut-command="${esc(cmd.id)}"${disabledAttr}>${recording ? 'Recording' : 'Record'}</button>
+              <button type="button" class="btn-ghost" data-shortcut-action="reset" data-shortcut-command="${esc(cmd.id)}"${disabledAttr}>Reset</button>
+              <button type="button" class="btn-ghost" data-shortcut-action="clear" data-shortcut-command="${esc(cmd.id)}"${disabledAttr}>Clear</button>
             </div>
           </div>`;
       }).join('');
@@ -760,6 +769,10 @@
 
     function startShortcutRecording(commandId){
       if(!AGENT_SPACE_SHORTCUT_COMMAND_BY_ID.has(commandId)) return;
+      if(isShortcutCommandUnavailable(commandId)){
+        shortcutStatus('Not available yet.', true);
+        return;
+      }
       recordingShortcutId = commandId;
       recordingCapturedBinding = null;
       recordingLastShiftAt = 0;
@@ -776,17 +789,32 @@
       renderShortcutSettings();
     }
 
-    function confirmShortcutRecording(){
-      if(!recordingShortcutId || !recordingCapturedBinding) return;
+    function shortcutValidationMessage(validation, fullConflict){
+      if(validation.reason === 'conflict' && validation.conflict){
+        return fullConflict
+          ? `Conflict with ${validation.conflict.label}. Clear or replace that shortcut first.`
+          : `Conflict with ${validation.conflict.label}.`;
+      }
+      return validation.reason === 'reserved_browser_shortcut' ? 'Browser-reserved shortcut.' : 'Shortcut needs a modifier, function key, or Double Shift.';
+    }
+
+    function confirmShortcutRecording(opts){
+      if(!recordingShortcutId){
+        return true;
+      }
+      if(!recordingCapturedBinding){
+        const saving = !!(opts && opts.saving);
+        shortcutStatus(saving ? 'Press shortcut or Escape to cancel recording before saving.' : 'Press shortcut before confirming, or Escape to cancel.', true);
+        renderShortcutSettings();
+        return false;
+      }
       const platform = currentShortcutPlatform();
       const binding = { keys: recordingCapturedBinding.keys, platform };
       const validation = validateShortcutBinding(binding, shortcutDraftSettings, recordingShortcutId);
       if(!validation.ok){
-        const message = validation.reason === 'conflict' && validation.conflict
-          ? `Conflict with ${validation.conflict.label}. Clear or replace that shortcut first.`
-          : (validation.reason === 'reserved_browser_shortcut' ? 'Browser-reserved shortcut.' : 'Shortcut needs a modifier, function key, or Double Shift.');
-        shortcutStatus(message, true);
-        return;
+        shortcutStatus(shortcutValidationMessage(validation, true), true);
+        renderShortcutSettings();
+        return false;
       }
       shortcutDraftSettings = replaceShortcutBinding(shortcutDraftSettings, recordingShortcutId, validation.binding, platform);
       recordingShortcutId = '';
@@ -794,6 +822,7 @@
       recordingLastShiftAt = 0;
       shortcutStatus('Shortcut updated. Save to persist.', false);
       renderShortcutSettings();
+      return true;
     }
 
     function captureShortcutRecording(event){
@@ -832,10 +861,7 @@
       recordingCapturedBinding = binding;
       const validation = validateShortcutBinding({ keys: binding.keys, platform: currentShortcutPlatform() }, shortcutDraftSettings, recordingShortcutId);
       if(!validation.ok){
-        const message = validation.reason === 'conflict' && validation.conflict
-          ? `Conflict with ${validation.conflict.label}.`
-          : (validation.reason === 'reserved_browser_shortcut' ? 'Browser-reserved shortcut.' : 'Shortcut needs a modifier, function key, or Double Shift.');
-        shortcutStatus(message, true);
+        shortcutStatus(shortcutValidationMessage(validation, false), true);
       }else{
         shortcutStatus(`${formatShortcutBinding(binding, currentShortcutPlatform())} captured. Press Enter to confirm.`, false);
       }
@@ -882,6 +908,7 @@
     }
 
     async function saveStartSettingsModal(){
+      if(!confirmShortcutRecording({ saving: true })) return '';
       const command = String(startCommandInput && 'value' in startCommandInput ? startCommandInput.value : '').trim();
       const savedCommand = await saveStartAgentCommand(command);
       const settings = saveAgentSpaceSettings(currentSettingsForInputs(), 'terminal');
@@ -1345,6 +1372,10 @@
       const commandId = String(target.getAttribute('data-shortcut-command') || '');
       const action = String(target.getAttribute('data-shortcut-action') || '');
       if(!AGENT_SPACE_SHORTCUT_COMMAND_BY_ID.has(commandId)) return;
+      if(isShortcutCommandUnavailable(commandId)){
+        shortcutStatus('Not available yet.', true);
+        return;
+      }
       if(action === 'record'){
         startShortcutRecording(commandId);
       }else if(action === 'reset'){
