@@ -146,6 +146,14 @@ Companion 不为浏览器暴露 HTTP 服务；系统悬浮球命令仍走白名�
 - 列表：OpenFocus 返回 terminal 列表前必须通过 `TerminalListSessions` 与 Companion
   runtime reconcile；只有 Companion 确认 live 的 terminal 才能返回给浏览器。reconcile 成功后，
   OpenFocus 可以清理 DB 中对应 owner 下已不 live 的 stale terminal metadata。
+- 代理：OpenFocus 的 ttyd HTTP/WebSocket proxy 不得只依赖 DB 中的
+  `RemoteTerminalSession.connect_url`。每次代理前必须确认绑定 Companion 当前在线，
+  并通过 `TerminalListSessions` 确认 `terminal_id` 仍在 Companion runtime 中 live；
+  若无法确认，OpenFocus 必须删除 stale terminal metadata/output，并向客户端返回稳定的
+  stale/unavailable 结果（HTTP 推荐 `410 Gone`），让浏览器停止重试旧 iframe/WebSocket。
+- 日志约束：Companion 主动停止、崩溃或断线后，Core 只能完成一次连接/registry 清理；
+  不得因为 stale terminal proxy、ping/outgoing loop、前端 iframe/WebSocket 重连或 hook
+  spool 形成 tight retry 或 WARN/ERROR 日志风暴。重复请求应被稳定映射为 410/404 或限流日志。
 - 交互：浏览器通过 `WS /api/agent_spaces/{space_id}/terminals/{terminal_id}/ws` 发送：
   - `{"type":"input","data_b64":"..."}`
   - `{"type":"resize","cols":..,"rows":..}`

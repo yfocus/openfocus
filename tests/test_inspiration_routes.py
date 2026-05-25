@@ -11,7 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from starlette.websockets import WebSocketDisconnect
 
 
 @pytest.mark.anyio
@@ -899,6 +901,120 @@ async def test_inspiration_terminal_inject_cleans_stale_runtime_record(monkeypat
                 .count()
                 == 0
             )
+
+
+def test_inspiration_ttyd_proxy_and_ws_clean_stale_runtime_record(
+    tmp_path, monkeypatch
+):
+    import openfocus.app as app_mod
+    from openfocus.db import session_scope
+    from openfocus.domains.agent_spaces import terminals as terminal_service
+    from openfocus.models import (
+        Companion,
+        InspirationSpace,
+        RemoteTerminalOutput,
+        RemoteTerminalSession,
+    )
+
+    class FakeConn:
+        async def request_terminal_list_sessions(self, **_kwargs):
+            return SimpleNamespace(sessions=[])
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr(
+        app_mod,
+        "_select_online_companion",
+        lambda companion_id=None: (SimpleNamespace(id=companion_id or 0), fake_conn),
+    )
+    monkeypatch.setattr(app_mod, "_has_online_companion", lambda: True)
+
+    with session_scope() as s:
+        companion = Companion(
+            device_id="stale-insp-proxy-device",
+            name="stale-insp-proxy",
+            base_url="grpc://",
+            status="active",
+            auth_token="token",
+        )
+        s.add(companion)
+        s.flush()
+        companion_id = int(companion.id)
+        space = InspirationSpace(
+            title="Stale proxy",
+            status="open",
+            mode="terminal",
+            workspace_path=str(tmp_path),
+        )
+        s.add(space)
+        s.flush()
+        space_id = int(space.id)
+        owner = terminal_service.owner_for_inspiration_space(space_id)
+        for tid in ("stale-insp-http", "stale-insp-ws"):
+            terminal_service.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="",
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+                terminal_id=tid,
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id=tid,
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+    app = app_mod.app
+    client = TestClient(app)
+    try:
+        stale_http = client.get(
+            f"/api/inspirations/{space_id}/terminals/stale-insp-http/ttyd/"
+        )
+        assert stale_http.status_code == 410
+        assert stale_http.json()["detail"] == "terminal runtime not found"
+
+        missing_http = client.get(
+            f"/api/inspirations/{space_id}/terminals/stale-insp-http/ttyd/"
+        )
+        assert missing_http.status_code == 404
+
+        try:
+            with client.websocket_connect(
+                f"/api/inspirations/{space_id}/terminals/stale-insp-ws/ttyd/"
+            ):
+                raise AssertionError("stale terminal WebSocket should close")
+        except WebSocketDisconnect as exc:
+            assert exc.code == 1008
+            assert exc.reason == "terminal runtime not found"
+    finally:
+        client.close()
+
+    with session_scope() as s:
+        assert (
+            s.query(RemoteTerminalSession)
+            .filter(
+                RemoteTerminalSession.terminal_id.in_(
+                    ["stale-insp-http", "stale-insp-ws"]
+                )
+            )
+            .count()
+            == 0
+        )
+        assert (
+            s.query(RemoteTerminalOutput)
+            .filter(
+                RemoteTerminalOutput.terminal_id.in_(
+                    ["stale-insp-http", "stale-insp-ws"]
+                )
+            )
+            .count()
+            == 0
+        )
 
 
 async def _wait_until_not_waiting(

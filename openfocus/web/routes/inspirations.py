@@ -126,16 +126,18 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
         except inspiration_service.InspirationTerminalError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    def _load_inspiration_ttyd_terminal(
+    async def _load_inspiration_ttyd_terminal(
         space_id: int, terminal_id: str
     ) -> tuple[inspiration_workspace.TerminalOperationContext, str]:
         try:
             terminal_context = inspiration_workspace.prepare_terminal_operation(
                 int(space_id)
             )
-            connect_url = terminal_ops.load_ttyd_connect_url(
+            connect_url = await terminal_ops.load_live_ttyd_connect_url(
                 owner=terminal_context.owner,
                 terminal_id=terminal_id,
+                runtime_resolver=_terminal_conn,
+                timeout_seconds=3.0,
             )
         except inspiration_workspace.InspirationWorkspaceError as exc:
             raise _workspace_http_error(exc) from exc
@@ -143,8 +145,8 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(e))
         except terminal_service.TerminalNotFound:
             raise HTTPException(status_code=404, detail="Terminal not found")
-        except terminal_gateway.TerminalUnavailable:
-            raise HTTPException(status_code=404, detail="ttyd terminal not found")
+        except terminal_gateway.TerminalUnavailable as e:
+            raise HTTPException(status_code=410, detail=str(e))
         return terminal_context, connect_url.rstrip("/")
 
     @router.get("/api/inspirations")
@@ -809,7 +811,7 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
     async def inspiration_terminals_ttyd_proxy(
         request: Request, space_id: int, terminal_id: str, path: str = ""
     ) -> Response:
-        _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
+        _, connect_url = await _load_inspiration_ttyd_terminal(space_id, terminal_id)
         target = terminal_gateway.ttyd_proxy_target(
             connect_url=connect_url,
             route_prefix="/api/inspirations",
@@ -846,9 +848,20 @@ def create_router(*, templates: Jinja2Templates, deps) -> APIRouter:
             for x in websocket.headers.get("sec-websocket-protocol", "").split(",")
             if str(x).strip()
         ]
+        try:
+            _, connect_url = await _load_inspiration_ttyd_terminal(
+                space_id, terminal_id
+            )
+        except HTTPException as exc:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1008, reason=str(exc.detail or ""))
+            return
+        except Exception:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1011)
+            return
         await websocket.accept(subprotocol=subprotocols[0] if subprotocols else None)
         try:
-            _, connect_url = _load_inspiration_ttyd_terminal(space_id, terminal_id)
             target_info = terminal_gateway.ttyd_proxy_target(
                 connect_url=connect_url,
                 route_prefix="/api/inspirations",

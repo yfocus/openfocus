@@ -1195,3 +1195,46 @@ class RemoteTerminalGateway:
         if info.backend != "ttyd" or not info.connect_url:
             raise TerminalUnavailable("ttyd terminal not found")
         return info.connect_url.rstrip("/")
+
+    async def load_live_ttyd_connect_url(
+        self,
+        *,
+        owner: terminal_records.TerminalOwner,
+        terminal_id: str,
+        runtime: TerminalRuntimePort | None = None,
+        runtime_resolver: Callable[[int], TerminalRuntimePort] | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> str:
+        tid = _clean_terminal_id(terminal_id)
+        info = self.terminal_info(owner=owner, terminal_id=tid)
+        if info.backend != "ttyd" or not info.connect_url:
+            raise TerminalUnavailable("ttyd terminal not found")
+
+        try:
+            resolved_runtime = _resolve_runtime(
+                runtime=runtime,
+                runtime_resolver=runtime_resolver,
+                companion_id=info.companion_id,
+            )
+        except Exception as e:
+            self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+            raise TerminalUnavailable("terminal runtime unavailable") from e
+
+        if resolved_runtime is None:
+            self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+            raise TerminalUnavailable("terminal runtime unavailable")
+
+        try:
+            response = await resolved_runtime.request_terminal_list_sessions(
+                timeout_seconds=timeout_seconds
+            )
+        except Exception as e:
+            self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+            raise TerminalUnavailable("terminal runtime unavailable") from e
+
+        live_ids = _terminal_ids_from_list_response(response)
+        if tid not in live_ids:
+            self.delete_terminal_metadata(owner=owner, terminal_id=tid)
+            raise TerminalUnavailable("terminal runtime not found")
+
+        return info.connect_url.rstrip("/")

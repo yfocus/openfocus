@@ -57,6 +57,16 @@ AgentSpace and InspirationSpace:
   rejected before calling Companion.
 - ttyd proxying requires a non-empty `connect_url`; tests and non-iframe backends
   may create terminal records without one.
+- ttyd HTTP/WebSocket proxying must also reconcile with Companion runtime before
+  forwarding. A stale DB `connect_url` is not enough: when the Companion is
+  offline, the runtime resolver is unavailable, or `TerminalListSessions` no
+  longer contains the terminal id, the gateway must delete local terminal
+  metadata/output rows and raise `TerminalUnavailable` so routes can return a
+  stable stale/unavailable response instead of repeatedly proxying to dead ttyd
+  ports.
+- Stopping or disconnecting Companion must not cause Core log storms. Terminal
+  routes should convert stale runtime state to bounded 410/404 responses rather
+  than issuing tight proxy retries or repeatedly logging WARN/ERROR failures.
 - Browser-side terminal font size updates must be applied through the live
   xterm instance options, then trigger terminal resize/refresh. The bridge must
   not resize terminal glyphs by injecting CSS against `.xterm` rows/screens,

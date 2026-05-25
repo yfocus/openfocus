@@ -397,6 +397,93 @@ def test_terminal_gateway_cleans_stale_terminal_when_runtime_mouse_mode_is_missi
     asyncio.run(_run())
 
 
+def test_terminal_gateway_loads_live_ttyd_connect_url_only_after_runtime_reconcile():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(21)
+        with session_scope() as s:
+            terminal_records.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="TASK-21",
+                companion_id=3,
+                root_path="/tmp/ws",
+                terminal_id="live-proxy",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+
+        conn = FakeTerminalConn(live_terminal_ids=["live-proxy"])
+        connect_url = await gateway.load_live_ttyd_connect_url(
+            owner=owner, terminal_id="live-proxy", runtime=conn
+        )
+
+        assert connect_url == "http://127.0.0.1:7681"
+        assert len(conn.list_sessions) == 1
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_cleans_stale_ttyd_proxy_metadata_when_runtime_is_missing():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(23)
+        with session_scope() as s:
+            terminal_records.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="TASK-23",
+                companion_id=3,
+                root_path="/tmp/ws",
+                terminal_id="stale-proxy",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stale-proxy",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        conn = FakeTerminalConn(live_terminal_ids=[])
+        try:
+            await gateway.load_live_ttyd_connect_url(
+                owner=owner, terminal_id="stale-proxy", runtime=conn
+            )
+        except terminal_gateway.TerminalUnavailable as exc:
+            assert "terminal runtime not found" in str(exc)
+        else:
+            raise AssertionError("stale ttyd proxy metadata must be unavailable")
+
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stale-proxy")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "stale-proxy")
+                .count()
+                == 0
+            )
+
+    asyncio.run(_run())
+
+
 def test_terminal_gateway_loads_owner_scoped_history_with_sync_slicing():
     from openfocus.db import session_scope
     from openfocus.domains.agent_spaces import terminals as terminal_records

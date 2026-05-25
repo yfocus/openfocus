@@ -8,7 +8,9 @@ import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from starlette.websockets import WebSocketDisconnect
 
 
 def test_agent_space_ttyd_bridge_supports_command_click_link_messages():
@@ -266,6 +268,217 @@ def test_agent_space_terminal_inject_cleans_stale_runtime_record(tmp_path):
             await COMPANION_GRPC.registry.set_disconnected(companion_id, conn)
 
     asyncio.run(_run())
+
+
+def test_agent_space_ttyd_proxy_cleans_stale_runtime_record(tmp_path):
+    async def _run() -> None:
+        from openfocus.app import COMPANION_GRPC, app
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.models import (
+            AgentSpace,
+            Companion,
+            Goal,
+            RemoteTerminalOutput,
+            RemoteTerminalSession,
+            Task,
+        )
+
+        with session_scope() as s:
+            companion = Companion(
+                device_id="stale-proxy-device",
+                name="stale-proxy",
+                base_url="grpc://",
+                status="active",
+                auth_token="token",
+            )
+            s.add(companion)
+            s.flush()
+            companion_id = int(companion.id)
+
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_pid = str(task.public_id)
+            space = AgentSpace(
+                task_public_id=task_pid,
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            owner = terminal_service.owner_for_agent_space(space_id)
+            terminal_service.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id=task_pid,
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+                terminal_id="stale-proxy",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stale-proxy",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        class FakeConn:
+            async def request_terminal_list_sessions(self, **_kwargs):
+                return SimpleNamespace(sessions=[])
+
+            def close(self):
+                pass
+
+        conn = FakeConn()
+        await COMPANION_GRPC.registry.set_connected(companion_id, conn)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/terminals/stale-proxy/ttyd/"
+                )
+                assert r.status_code == 410
+                assert r.json()["detail"] == "terminal runtime not found"
+
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/terminals/stale-proxy/ttyd/"
+                )
+                assert r.status_code == 404
+
+            with session_scope() as s:
+                assert (
+                    s.query(RemoteTerminalSession)
+                    .filter(RemoteTerminalSession.terminal_id == "stale-proxy")
+                    .one_or_none()
+                    is None
+                )
+                assert (
+                    s.query(RemoteTerminalOutput)
+                    .filter(RemoteTerminalOutput.terminal_id == "stale-proxy")
+                    .count()
+                    == 0
+                )
+        finally:
+            await COMPANION_GRPC.registry.set_disconnected(companion_id, conn)
+
+    asyncio.run(_run())
+
+
+def test_agent_space_ttyd_ws_closes_stale_runtime_before_accept(tmp_path):
+    async def _setup():
+        from openfocus.app import COMPANION_GRPC, app
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_service
+        from openfocus.models import (
+            AgentSpace,
+            Companion,
+            Goal,
+            RemoteTerminalOutput,
+            Task,
+        )
+
+        with session_scope() as s:
+            companion = Companion(
+                device_id="stale-ws-device",
+                name="stale-ws",
+                base_url="grpc://",
+                status="active",
+                auth_token="token",
+            )
+            s.add(companion)
+            s.flush()
+            companion_id = int(companion.id)
+
+            goal = Goal(title="g", content="d", due_date=dt.date.today())
+            s.add(goal)
+            s.flush()
+            task = Task(goal_id=goal.id, title="t", content="d", status="todo")
+            s.add(task)
+            s.flush()
+            task_pid = str(task.public_id)
+            space = AgentSpace(
+                task_public_id=task_pid,
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+            )
+            s.add(space)
+            s.flush()
+            space_id = int(space.id)
+            owner = terminal_service.owner_for_agent_space(space_id)
+            terminal_service.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id=task_pid,
+                companion_id=companion_id,
+                root_path=str(tmp_path),
+                terminal_id="stale-ws",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stale-ws",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        class FakeConn:
+            async def request_terminal_list_sessions(self, **_kwargs):
+                return SimpleNamespace(sessions=[])
+
+            def close(self):
+                pass
+
+        conn = FakeConn()
+        await COMPANION_GRPC.registry.set_connected(companion_id, conn)
+        return app, COMPANION_GRPC.registry, companion_id, conn, space_id
+
+    app, registry, companion_id, conn, space_id = asyncio.run(_setup())
+    try:
+        client = TestClient(app)
+        try:
+            try:
+                with client.websocket_connect(
+                    f"/api/agent_spaces/{space_id}/terminals/stale-ws/ttyd/"
+                ):
+                    raise AssertionError("stale terminal WebSocket should close")
+            except WebSocketDisconnect as exc:
+                assert exc.code == 1008
+                assert exc.reason == "terminal runtime not found"
+        finally:
+            client.close()
+
+        from openfocus.db import session_scope
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stale-ws")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "stale-ws")
+                .count()
+                == 0
+            )
+    finally:
+        asyncio.run(registry.set_disconnected(companion_id, conn))
 
 
 async def _wait_until_companion_ready(
