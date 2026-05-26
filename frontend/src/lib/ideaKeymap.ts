@@ -13,6 +13,7 @@ export const AGENT_SPACE_IMPLEMENTED_COMMANDS: AgentSpaceShortcutCommandId[] = [
   'search_everywhere',
   'find_in_files',
   'go_to_definition',
+  'find_usages',
   'focus_files',
   'focus_preview',
   'focus_terminal',
@@ -160,6 +161,8 @@ export function shouldRunPreviewGoToDefinitionShortcut(options: PreviewShortcutG
   if (asElementLike(options.target)) return isPreviewGoToDefinitionShortcutTarget(options.target, options.previewRoot);
   return isPreviewGoToDefinitionShortcutTarget(options.activeElement, options.previewRoot);
 }
+
+export const shouldRunPreviewCodeShortcut = shouldRunPreviewGoToDefinitionShortcut;
 
 export function findActiveTerminalIframe<T>(root: QueryRootLike<T> | null | undefined): T | null {
   if (!root) return null;

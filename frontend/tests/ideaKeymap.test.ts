@@ -10,6 +10,7 @@ import {
   isPreviewGoToDefinitionShortcutTarget,
   isTerminalShortcutTarget,
   shouldIgnoreAgentSpaceShortcut,
+  shouldRunPreviewCodeShortcut,
   shouldRunPreviewGoToDefinitionShortcut,
   shortcutEventMatchesCommand,
   shortcutEventMatchesBinding,
@@ -147,6 +148,15 @@ const tests: TestCase[] = [
         true,
       );
       assertEqual(
+        shortcutEventMatchesCommand(
+          keyEvent('F7', { code: 'F7', altKey: true }),
+          DEFAULT_AGENT_SPACE_SHORTCUTS,
+          'mac',
+          'find_usages',
+        ),
+        true,
+      );
+      assertEqual(
         shouldRunPreviewGoToDefinitionShortcut({
           target: cmLine as unknown as EventTarget,
           activeElement: cmLine as unknown as EventTarget,
@@ -188,6 +198,46 @@ const tests: TestCase[] = [
       );
       assertEqual(
         shouldRunPreviewGoToDefinitionShortcut({
+          target: filesPane as unknown as EventTarget,
+          activeElement: settingsColumn as unknown as EventTarget,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewCodeShortcut({
+          target: cmLine as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        true,
+      );
+      assertEqual(
+        shouldRunPreviewCodeShortcut({
+          target: outsideTextbox as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewCodeShortcut({
+          target: terminalChild as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+          terminalRoot: {
+            contains(node: unknown): boolean {
+              return node === terminalRoot || node === terminalChild;
+            },
+          },
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewCodeShortcut({
+          target: filesPane as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewCodeShortcut({
           target: filesPane as unknown as EventTarget,
           activeElement: settingsColumn as unknown as EventTarget,
         }),
@@ -289,7 +339,7 @@ const tests: TestCase[] = [
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('F7', { code: 'F7', altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1700),
-        null,
+        'find_usages',
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('[', { code: 'BracketLeft', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1800),
@@ -301,7 +351,7 @@ const tests: TestCase[] = [
       );
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_in_files'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), true);
-      assertEqual(isAgentSpaceShortcutCommandImplemented('find_usages'), false);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('find_usages'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_back'), false);
       assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_forward'), false);
     },

@@ -23,8 +23,10 @@ import { xml } from '@codemirror/lang-xml';
 import { listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
 import {
   findCodeDefinition,
+  findCodeReferences,
   searchCode,
   type CodeNavigationBackend,
+  type CodeReferenceResult,
   type CodeSearchResult,
   type CodeSearchResultGroup,
   type CodeSymbolResult,
@@ -70,6 +72,17 @@ import {
   shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
 import {
+  codeReferenceBackendLabel,
+  codeReferenceDrawerTitle,
+  codeReferenceNoResultsMessage,
+  codeReferenceResultLocationLabel,
+  codeReferenceResultPreview,
+  flattenCodeReferenceGroups,
+  groupCodeReferenceResults,
+  openCodeReferenceResult,
+  type CodeReferenceResultGroup,
+} from '../lib/agentSpaceReferences';
+import {
   createEmptyPreviewSymbolContext,
   createPreviewSymbolContext,
   type PreviewSymbolContext,
@@ -80,6 +93,7 @@ import {
   currentShortcutPlatform,
   findActiveTerminalIframe,
   shouldIgnoreAgentSpaceShortcut,
+  shouldRunPreviewCodeShortcut,
   shouldRunPreviewGoToDefinitionShortcut,
   shortcutEventMatchesCommand,
 } from '../lib/ideaKeymap';
@@ -176,6 +190,16 @@ type DefinitionFallbackState = {
   backend: CodeNavigationBackend | '';
   symbol: string;
   results: CodeSymbolResult[];
+  selectedIndex: number;
+};
+
+type ReferencesDrawerState = {
+  open: boolean;
+  loading: boolean;
+  error: string;
+  backend: CodeNavigationBackend | '';
+  symbol: string;
+  groups: CodeReferenceResultGroup[];
   selectedIndex: number;
 };
 
@@ -709,12 +733,23 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     results: [],
     selectedIndex: -1,
   }));
+  const [referencesDrawer, setReferencesDrawer] = useState<ReferencesDrawerState>(() => ({
+    open: false,
+    loading: false,
+    error: '',
+    backend: '',
+    symbol: '',
+    groups: [],
+    selectedIndex: -1,
+  }));
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const definitionDialogRef = useRef<HTMLDivElement | null>(null);
+  const referencesDialogRef = useRef<HTMLDivElement | null>(null);
   const searchRequestIdRef = useRef(0);
   const findRequestIdRef = useRef(0);
   const definitionRequestIdRef = useRef(0);
+  const referencesRequestIdRef = useRef(0);
 
   const openPreview = useCallback(
     async (relPath: string, name: string, target?: PreviewTarget) => {
@@ -756,6 +791,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
   const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
   const findResults = useMemo(() => flattenCodeSearchGroups(findInFiles.groups), [findInFiles.groups]);
+  const referenceResults = useMemo(() => flattenCodeReferenceGroups(referencesDrawer.groups), [referencesDrawer.groups]);
 
   const openSearchEverywhere = useCallback(() => {
     setSearchEverywhere((state) => ({ ...state, open: true }));
@@ -798,6 +834,11 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     setDefinitionFallback((state) => ({ ...state, open: false, loading: false }));
   }, []);
 
+  const closeReferencesDrawer = useCallback(() => {
+    referencesRequestIdRef.current += 1;
+    setReferencesDrawer((state) => ({ ...state, open: false, loading: false }));
+  }, []);
+
   const activateDefinitionResult = useCallback(
     async (result: CodeSymbolResult | null | undefined, closeAfterOpen = true) => {
       if (!result?.path) return false;
@@ -809,6 +850,15 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       return true;
     },
     [closeDefinitionFallback, openPreview],
+  );
+
+  const activateReferenceResult = useCallback(
+    async (result: CodeReferenceResult | null | undefined, closeAfterOpen = true) => {
+      const opened = await openCodeReferenceResult(result, openPreview);
+      if (opened && closeAfterOpen) closeReferencesDrawer();
+      return opened;
+    },
+    [closeReferencesDrawer, openPreview],
   );
 
   const runGoToDefinition = useCallback(
@@ -875,6 +925,67 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         });
     },
     [activateDefinitionResult, config.spaceId],
+  );
+
+  const runFindUsages = useCallback(
+    (context: PreviewSymbolContext = previewSymbolContextRef.current) => {
+      const symbol = String(context.symbol || '').trim();
+      const path = String(context.relPath || context.path || '').trim();
+      if (!symbol || !path) {
+        toast('No symbol selected');
+        return;
+      }
+
+      const requestId = referencesRequestIdRef.current + 1;
+      referencesRequestIdRef.current = requestId;
+      setReferencesDrawer({
+        open: true,
+        loading: true,
+        error: '',
+        backend: '',
+        symbol,
+        groups: [],
+        selectedIndex: -1,
+      });
+      findCodeReferences(config.spaceId, {
+        path,
+        line: positiveInt(context.line) || 1,
+        column: positiveInt(context.column) || 1,
+        symbol,
+      })
+        .then((response) => {
+          if (referencesRequestIdRef.current !== requestId) return;
+          const results = Array.isArray(response.results) ? response.results : [];
+          if (results.length === 0) {
+            setReferencesDrawer((state) => ({ ...state, open: false, loading: false, backend: response.backend || '', groups: [] }));
+            toast(codeReferenceNoResultsMessage(response.backend));
+            return;
+          }
+          setReferencesDrawer({
+            open: true,
+            loading: false,
+            error: '',
+            backend: response.backend || '',
+            symbol: response.symbol || symbol,
+            groups: groupCodeReferenceResults(results),
+            selectedIndex: 0,
+          });
+        })
+        .catch((err) => {
+          if (referencesRequestIdRef.current !== requestId) return;
+          const message = err instanceof Error ? err.message : String(err);
+          setReferencesDrawer({
+            open: true,
+            loading: false,
+            error: `Find usages failed: ${message}`,
+            backend: '',
+            symbol,
+            groups: [],
+            selectedIndex: -1,
+          });
+        });
+    },
+    [config.spaceId],
   );
 
   useEffect(() => {
@@ -1124,6 +1235,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         runGoToDefinition();
         return;
       }
+      if (command === 'find_usages') {
+        runFindUsages();
+        return;
+      }
       if (command === 'focus_files') {
         focusAgentSpacePane('files');
         return;
@@ -1137,7 +1252,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         return;
       }
     },
-    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere, runGoToDefinition],
+    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere, runFindUsages, runGoToDefinition],
   );
 
   useEffect(() => {
@@ -1145,6 +1260,12 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const timer = window.setTimeout(() => definitionDialogRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
   }, [definitionFallback.loading, definitionFallback.open]);
+
+  useEffect(() => {
+    if (!referencesDrawer.open) return;
+    const timer = window.setTimeout(() => referencesDialogRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [referencesDrawer.loading, referencesDrawer.open]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1158,12 +1279,21 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         terminalRoot: terminalRef.current,
       };
       const isGoToDefinitionShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_definition');
+      const isFindUsagesShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'find_usages');
 
       if (isGoToDefinitionShortcut) {
         if (!shouldRunPreviewGoToDefinitionShortcut(guardOptions)) return;
         event.preventDefault();
         event.stopPropagation();
         runShortcutCommand('go_to_definition');
+        return;
+      }
+
+      if (isFindUsagesShortcut) {
+        if (!shouldRunPreviewCodeShortcut(guardOptions)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        runShortcutCommand('find_usages');
         return;
       }
 
@@ -1450,6 +1580,12 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     : '';
   const definitionStatusText = definitionFallback.error
     || (definitionFallback.loading ? 'Finding definitions...' : `${definitionFallback.results.length} possible definitions`);
+  const referencesBackendText = !referencesDrawer.error && !referencesDrawer.loading
+    ? codeReferenceBackendLabel(referencesDrawer.backend)
+    : '';
+  const referencesStatusText = referencesDrawer.error
+    || (referencesDrawer.loading ? 'Finding usages...' : `${referenceResults.length} ${referenceResults.length === 1 ? 'result' : 'results'}`);
+  const referencesTitle = codeReferenceDrawerTitle(referencesDrawer.backend);
   const previewIdentity = preview.name || preview.path;
   const previewIsMarkdown = isMarkdownPreviewFile(previewIdentity);
   const renderMarkdownPreview = shouldRenderMarkdownPreview(previewIdentity, markdownSourceMode);
@@ -2017,6 +2153,132 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                   </button>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {referencesDrawer.open ? (
+        <div
+          ref={referencesDialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={referencesTitle}
+          tabIndex={-1}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.42)',
+            display: 'flex',
+            alignItems: 'stretch',
+            justifyContent: 'flex-end',
+            padding: '12px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeReferencesDrawer();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeReferencesDrawer();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setReferencesDrawer((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, referenceResults.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = referenceResults[referencesDrawer.selectedIndex] || null;
+              void activateReferenceResult(selected);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(520px, 100%)',
+              height: '100%',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(0, 229, 255, 0.14)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>{referencesTitle}</div>
+                <div className="muted" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {referencesDrawer.symbol}
+                </div>
+              </div>
+              <button type="button" className="btn-ghost" style={{ flex: '0 0 auto', margin: 0 }} onClick={closeReferencesDrawer}>
+                Close
+              </button>
+            </div>
+            {referencesStatusText || referencesBackendText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: referenceResults.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {referencesDrawer.loading ? <><span className="spin" /> </> : null}
+                  {referencesStatusText}
+                </span>
+                {referencesBackendText ? (
+                  <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.8 }}>
+                    {referencesBackendText}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: referencesDrawer.groups.length ? '6px 0' : 0 }}>
+              {(() => {
+                let resultIndex = 0;
+                return referencesDrawer.groups.map((group) => (
+                  <div key={group.path}>
+                    <div className="muted" style={{ padding: '8px 12px 4px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase' }}>
+                      {group.path}
+                    </div>
+                    {(group.results || []).map((result) => {
+                      const index = resultIndex;
+                      resultIndex += 1;
+                      const selected = index === referencesDrawer.selectedIndex;
+                      return (
+                        <button
+                          key={`${result.path}:${result.line}:${result.column}:${index}`}
+                          type="button"
+                          style={{
+                            width: '100%',
+                            display: 'block',
+                            textAlign: 'left',
+                            border: 0,
+                            borderRadius: 0,
+                            background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                            color: 'var(--text)',
+                            padding: '7px 12px',
+                            cursor: 'pointer',
+                          }}
+                          onMouseEnter={() => setReferencesDrawer((state) => ({ ...state, selectedIndex: index }))}
+                          onClick={() => activateReferenceResult(result)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {codeReferenceResultPreview(result)}
+                            </span>
+                            <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                              {codeReferenceResultLocationLabel(result)}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ));
+              })()}
             </div>
           </div>
         </div>
