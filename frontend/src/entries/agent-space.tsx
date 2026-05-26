@@ -63,6 +63,11 @@ import {
   shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
 import {
+  createEmptyPreviewSymbolContext,
+  createPreviewSymbolContext,
+  type PreviewSymbolContext,
+} from '../lib/agentSpacePreviewSymbol';
+import {
   commandFromShortcutEvent,
   createDoubleShiftDetector,
   currentShortcutPlatform,
@@ -135,12 +140,6 @@ type AgentContextMenuState = {
   items: AgentContextMenuItem[];
 };
 
-
-type PreviewSelectionState = {
-  text: string;
-  fromLine?: number;
-  toLine?: number;
-};
 
 type SearchEverywhereState = {
   open: boolean;
@@ -432,23 +431,35 @@ const targetLineField = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
-function selectedTextFromEditor(view: EditorView): PreviewSelectionState {
-  const ranges = view.state.selection.ranges.filter((range) => !range.empty);
-  if (!ranges.length) return { text: '' };
-  const from = Math.min(...ranges.map((range) => range.from));
-  const to = Math.max(...ranges.map((range) => range.to));
-  return {
-    text: ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n'),
-    fromLine: view.state.doc.lineAt(from).number,
-    toLine: view.state.doc.lineAt(to).number,
-  };
+function previewSymbolContextFromEditor(view: EditorView, path: string): PreviewSymbolContext {
+  const ranges = view.state.selection.ranges;
+  const selectedRanges = ranges.filter((range) => !range.empty);
+  const mainRange = view.state.selection.main;
+  const selection = selectedRanges.length
+    ? {
+        from: Math.min(...selectedRanges.map((range) => range.from)),
+        to: Math.max(...selectedRanges.map((range) => range.to)),
+        head: mainRange.head,
+        selectedText: selectedRanges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n'),
+      }
+    : {
+        from: mainRange.from,
+        to: mainRange.to,
+        head: mainRange.head,
+      };
+  return createPreviewSymbolContext({
+    path,
+    content: view.state.doc.toString(),
+    selection,
+  });
 }
 
 function CodeMirrorPreview({
   content,
   name,
+  path,
   onScroll,
-  onSelectionChange,
+  onSymbolContextChange,
   targetLine,
   targetColumn,
   targetNonce,
@@ -456,8 +467,9 @@ function CodeMirrorPreview({
 }: {
   content: string;
   name: string;
+  path: string;
   onScroll: (scrollTop: number, topLine: number) => void;
-  onSelectionChange: (selection: PreviewSelectionState) => void;
+  onSymbolContextChange: (context: PreviewSymbolContext) => void;
   targetLine?: number;
   targetColumn?: number;
   targetNonce?: number;
@@ -471,7 +483,7 @@ function CodeMirrorPreview({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    onSelectionChange({ text: '' });
+    onSymbolContextChange(createEmptyPreviewSymbolContext(path));
 
     const view = new EditorView({
       state: EditorState.create({
@@ -538,7 +550,9 @@ function CodeMirrorPreview({
             },
           }),
           EditorView.updateListener.of((update) => {
-            if (update.selectionSet || update.docChanged) onSelectionChange(selectedTextFromEditor(update.view));
+            if (update.selectionSet || update.docChanged) {
+              onSymbolContextChange(previewSymbolContextFromEditor(update.view, path));
+            }
           }),
         ],
       }),
@@ -549,11 +563,11 @@ function CodeMirrorPreview({
     return () => {
       if (scrollTimerRef.current) window.clearTimeout(scrollTimerRef.current);
       if (targetClearTimerRef.current) window.clearTimeout(targetClearTimerRef.current);
-      onSelectionChange({ text: '' });
+      onSymbolContextChange(createEmptyPreviewSymbolContext(path));
       view.destroy();
       viewRef.current = null;
     };
-  }, [content, fontSize, name, onScroll, onSelectionChange]);
+  }, [content, fontSize, name, onScroll, onSymbolContextChange, path]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -589,7 +603,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const terminalRef = useRef<HTMLDivElement | null>(null);
   const terminalSideRef = useRef<HTMLDivElement | null>(null);
   const terminalApiRef = useRef<TerminalApi | null>(null);
-  const previewSelectionRef = useRef<PreviewSelectionState>({ text: '' });
+  const previewSymbolContextRef = useRef<PreviewSymbolContext>(createEmptyPreviewSymbolContext());
   const doubleShiftRef = useRef(createDoubleShiftDetector());
   const shortcutPlatform = useMemo(() => currentShortcutPlatform(), []);
   const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
@@ -1008,8 +1022,8 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     [config.spaceId],
   );
 
-  const updatePreviewSelection = useCallback((selection: PreviewSelectionState) => {
-    previewSelectionRef.current = selection || { text: '' };
+  const updatePreviewSymbolContext = useCallback((context: PreviewSymbolContext) => {
+    previewSymbolContextRef.current = context || createEmptyPreviewSymbolContext();
   }, []);
 
   const selectedPreviewReference = useCallback((): string => {
@@ -1021,13 +1035,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       if ((anchor && host.contains(anchor)) || (focus && host.contains(focus))) {
         const selected = domSelection.toString();
         if (selected.trim()) {
-          const trackedLine = positiveInt(previewSelectionRef.current.fromLine);
+          const trackedLine = positiveInt(previewSymbolContextRef.current.line);
           return formatAgentFileReference(preview.path, trackedLine);
         }
       }
     }
-    const editorSelection = previewSelectionRef.current;
-    return editorSelection.text.trim() ? formatAgentFileReference(preview.path, editorSelection.fromLine) : '';
+    const editorContext = previewSymbolContextRef.current;
+    return editorContext.selectedText.trim() ? formatAgentFileReference(preview.path, editorContext.line) : '';
   }, [preview.path]);
 
   const showContextMenu = useCallback((event: React.MouseEvent<HTMLElement>, items: AgentContextMenuItem[]) => {
@@ -1260,8 +1274,8 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const renderMarkdownPreview = shouldRenderMarkdownPreview(previewIdentity, markdownSourceMode);
 
   useEffect(() => {
-    if (renderMarkdownPreview) updatePreviewSelection({ text: '' });
-  }, [preview.content, renderMarkdownPreview, updatePreviewSelection]);
+    if (renderMarkdownPreview) updatePreviewSymbolContext(createEmptyPreviewSymbolContext(preview.path));
+  }, [preview.content, preview.path, renderMarkdownPreview, updatePreviewSymbolContext]);
 
   return (
     <>
@@ -1358,7 +1372,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                       }}
                     />
                   ) : null}
-                  {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} path={preview.path} onScroll={savePreviewScroll} onSymbolContextChange={updatePreviewSymbolContext} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
                   {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
                 </div>
               </div>
