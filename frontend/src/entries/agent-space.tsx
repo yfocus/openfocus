@@ -21,7 +21,14 @@ import { rust } from '@codemirror/lang-rust';
 import { sql } from '@codemirror/lang-sql';
 import { xml } from '@codemirror/lang-xml';
 import { listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
-import { searchCode, type CodeNavigationBackend, type CodeSearchResult, type CodeSearchResultGroup } from '../api/codeNavigation';
+import {
+  findCodeDefinition,
+  searchCode,
+  type CodeNavigationBackend,
+  type CodeSearchResult,
+  type CodeSearchResultGroup,
+  type CodeSymbolResult,
+} from '../api/codeNavigation';
 import {
   cleanString,
   fileReferenceFromTerminalMessage,
@@ -73,6 +80,8 @@ import {
   currentShortcutPlatform,
   findActiveTerminalIframe,
   shouldIgnoreAgentSpaceShortcut,
+  shouldRunPreviewGoToDefinitionShortcut,
+  shortcutEventMatchesCommand,
 } from '../lib/ideaKeymap';
 import type { FileEntry } from '../types/openfocus';
 
@@ -160,6 +169,16 @@ type FindInFilesState = SearchEverywhereState & {
   regex: boolean;
 };
 
+type DefinitionFallbackState = {
+  open: boolean;
+  loading: boolean;
+  error: string;
+  backend: CodeNavigationBackend | '';
+  symbol: string;
+  results: CodeSymbolResult[];
+  selectedIndex: number;
+};
+
 function toast(message: string): void {
   if (typeof window.toast === 'function') window.toast(message);
 }
@@ -219,6 +238,22 @@ function currentPxVar(el: HTMLElement, name: string, fallback: number): number {
 function guessNameFromPath(relPath: string): string {
   const idx = relPath.lastIndexOf('/');
   return idx >= 0 ? relPath.slice(idx + 1) : relPath;
+}
+
+function definitionResultPrimaryLabel(result: CodeSymbolResult): string {
+  const name = String(result.name || '').trim();
+  if (name) return name;
+  return guessNameFromPath(String(result.path || ''));
+}
+
+function definitionResultMetaLabel(result: CodeSymbolResult): string {
+  const path = String(result.path || '');
+  const line = positiveInt(result.line);
+  const column = positiveInt(result.column);
+  const location = line ? `${path}:${line}${column ? `:${column}` : ''}` : path;
+  const kind = String(result.kind || 'definition');
+  const container = String(result.container || '').trim();
+  return container ? `${kind} in ${container} - ${location}` : `${kind} - ${location}`;
 }
 
 function isLikelyImage(name: string): boolean {
@@ -460,20 +495,24 @@ function CodeMirrorPreview({
   path,
   onScroll,
   onSymbolContextChange,
+  onGoToDefinition,
   targetLine,
   targetColumn,
   targetNonce,
   fontSize,
+  shortcutPlatform,
 }: {
   content: string;
   name: string;
   path: string;
   onScroll: (scrollTop: number, topLine: number) => void;
   onSymbolContextChange: (context: PreviewSymbolContext) => void;
+  onGoToDefinition: (context: PreviewSymbolContext) => void;
   targetLine?: number;
   targetColumn?: number;
   targetNonce?: number;
   fontSize: number;
+  shortcutPlatform: 'mac' | 'other';
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -537,6 +576,23 @@ function CodeMirrorPreview({
             },
           }),
           EditorView.domEventHandlers({
+            mousedown: (event, currentView) => {
+              const isDefinitionClick = shortcutPlatform === 'mac' ? event.metaKey : event.ctrlKey;
+              if (!isDefinitionClick || event.button !== 0) return false;
+              const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
+              if (pos === null) return false;
+              const context = createPreviewSymbolContext({
+                path,
+                content: currentView.state.doc.toString(),
+                selection: { from: pos, to: pos, head: pos },
+              });
+              if (!context.symbol) return false;
+              event.preventDefault();
+              event.stopPropagation();
+              onSymbolContextChange(context);
+              onGoToDefinition(context);
+              return true;
+            },
             scroll: (_event, currentView) => {
               if (scrollTimerRef.current) return;
               scrollTimerRef.current = window.setTimeout(() => {
@@ -567,7 +623,7 @@ function CodeMirrorPreview({
       view.destroy();
       viewRef.current = null;
     };
-  }, [content, fontSize, name, onScroll, onSymbolContextChange, path]);
+  }, [content, fontSize, name, onGoToDefinition, onScroll, onSymbolContextChange, path, shortcutPlatform]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -592,7 +648,7 @@ function CodeMirrorPreview({
     }, 1800);
   }, [content, targetColumn, targetLine, targetNonce]);
 
-  return <div ref={hostRef} className="codebox cm-preview" />;
+  return <div ref={hostRef} className="codebox cm-preview" data-agent-space-preview-code="true" />;
 }
 
 function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
@@ -644,10 +700,21 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     groups: [],
     selectedIndex: -1,
   }));
+  const [definitionFallback, setDefinitionFallback] = useState<DefinitionFallbackState>(() => ({
+    open: false,
+    loading: false,
+    error: '',
+    backend: '',
+    symbol: '',
+    results: [],
+    selectedIndex: -1,
+  }));
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
+  const definitionDialogRef = useRef<HTMLDivElement | null>(null);
   const searchRequestIdRef = useRef(0);
   const findRequestIdRef = useRef(0);
+  const definitionRequestIdRef = useRef(0);
 
   const openPreview = useCallback(
     async (relPath: string, name: string, target?: PreviewTarget) => {
@@ -724,6 +791,90 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       if (opened && closeAfterOpen) closeFindInFiles();
     },
     [closeFindInFiles, openPreview],
+  );
+
+  const closeDefinitionFallback = useCallback(() => {
+    definitionRequestIdRef.current += 1;
+    setDefinitionFallback((state) => ({ ...state, open: false, loading: false }));
+  }, []);
+
+  const activateDefinitionResult = useCallback(
+    async (result: CodeSymbolResult | null | undefined, closeAfterOpen = true) => {
+      if (!result?.path) return false;
+      await openPreview(result.path, definitionResultPrimaryLabel(result), {
+        line: positiveInt(result.line) || undefined,
+        column: positiveInt(result.column) || undefined,
+      });
+      if (closeAfterOpen) closeDefinitionFallback();
+      return true;
+    },
+    [closeDefinitionFallback, openPreview],
+  );
+
+  const runGoToDefinition = useCallback(
+    (context: PreviewSymbolContext = previewSymbolContextRef.current) => {
+      const symbol = String(context.symbol || '').trim();
+      const path = String(context.relPath || context.path || '').trim();
+      if (!symbol || !path) {
+        toast('No symbol selected');
+        return;
+      }
+
+      const requestId = definitionRequestIdRef.current + 1;
+      definitionRequestIdRef.current = requestId;
+      setDefinitionFallback({
+        open: true,
+        loading: true,
+        error: '',
+        backend: '',
+        symbol,
+        results: [],
+        selectedIndex: -1,
+      });
+      findCodeDefinition(config.spaceId, {
+        path,
+        line: positiveInt(context.line) || 1,
+        column: positiveInt(context.column) || 1,
+        symbol,
+      })
+        .then((response) => {
+          if (definitionRequestIdRef.current !== requestId) return;
+          const results = Array.isArray(response.results) ? response.results : [];
+          if (results.length === 0) {
+            setDefinitionFallback((state) => ({ ...state, open: false, loading: false, backend: response.backend || '', results: [] }));
+            toast('No definition found');
+            return;
+          }
+          if (results.length === 1) {
+            setDefinitionFallback((state) => ({ ...state, open: false, loading: false, backend: response.backend || '', results }));
+            void activateDefinitionResult(results[0]);
+            return;
+          }
+          setDefinitionFallback({
+            open: true,
+            loading: false,
+            error: '',
+            backend: response.backend || '',
+            symbol: response.symbol || symbol,
+            results,
+            selectedIndex: 0,
+          });
+        })
+        .catch((err) => {
+          if (definitionRequestIdRef.current !== requestId) return;
+          const message = err instanceof Error ? err.message : String(err);
+          setDefinitionFallback({
+            open: true,
+            loading: false,
+            error: `Definition failed: ${message}`,
+            backend: '',
+            symbol,
+            results: [],
+            selectedIndex: -1,
+          });
+        });
+    },
+    [activateDefinitionResult, config.spaceId],
   );
 
   useEffect(() => {
@@ -969,6 +1120,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         openFindInFiles();
         return;
       }
+      if (command === 'go_to_definition') {
+        runGoToDefinition();
+        return;
+      }
       if (command === 'focus_files') {
         focusAgentSpacePane('files');
         return;
@@ -982,16 +1137,37 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         return;
       }
     },
-    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere],
+    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere, runGoToDefinition],
   );
 
   useEffect(() => {
+    if (!definitionFallback.open) return;
+    const timer = window.setTimeout(() => definitionDialogRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [definitionFallback.loading, definitionFallback.open]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (shouldIgnoreAgentSpaceShortcut(event, {
+      if (event.defaultPrevented) {
+        doubleShiftRef.current.reset();
+        return;
+      }
+      const guardOptions = {
         target: event.target,
         activeElement: document.activeElement,
         terminalRoot: terminalRef.current,
-      })) {
+      };
+      const isGoToDefinitionShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_definition');
+
+      if (isGoToDefinitionShortcut) {
+        if (!shouldRunPreviewGoToDefinitionShortcut(guardOptions)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        runShortcutCommand('go_to_definition');
+        return;
+      }
+
+      if (shouldIgnoreAgentSpaceShortcut(event, guardOptions)) {
         doubleShiftRef.current.reset();
         return;
       }
@@ -1269,6 +1445,11 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: findInFiles.loading,
     resultCount: findResults.length,
   });
+  const definitionBackendText = !definitionFallback.error && !definitionFallback.loading
+    ? codeSearchBackendLabel(definitionFallback.backend)
+    : '';
+  const definitionStatusText = definitionFallback.error
+    || (definitionFallback.loading ? 'Finding definitions...' : `${definitionFallback.results.length} possible definitions`);
   const previewIdentity = preview.name || preview.path;
   const previewIsMarkdown = isMarkdownPreviewFile(previewIdentity);
   const renderMarkdownPreview = shouldRenderMarkdownPreview(previewIdentity, markdownSourceMode);
@@ -1372,7 +1553,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                       }}
                     />
                   ) : null}
-                  {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} path={preview.path} onScroll={savePreviewScroll} onSymbolContextChange={updatePreviewSymbolContext} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} path={preview.path} onScroll={savePreviewScroll} onSymbolContextChange={updatePreviewSymbolContext} onGoToDefinition={runGoToDefinition} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} shortcutPlatform={shortcutPlatform === 'mac' ? 'mac' : 'other'} /> : null}
                   {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
                 </div>
               </div>
@@ -1719,6 +1900,123 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                   </div>
                 ));
               })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {definitionFallback.open ? (
+        <div
+          ref={definitionDialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Possible definitions"
+          tabIndex={-1}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.42)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '10vh 16px 16px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeDefinitionFallback();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeDefinitionFallback();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setDefinitionFallback((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, state.results.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = definitionFallback.results[definitionFallback.selectedIndex] || null;
+              void activateDefinitionResult(selected);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(680px, 100%)',
+              maxHeight: '72vh',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(0, 229, 255, 0.14)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>Possible definitions</div>
+                <div className="muted" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {definitionFallback.symbol}
+                </div>
+              </div>
+              <button type="button" className="btn-ghost" style={{ flex: '0 0 auto', margin: 0 }} onClick={closeDefinitionFallback}>
+                Close
+              </button>
+            </div>
+            {definitionStatusText || definitionBackendText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: definitionFallback.results.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {definitionFallback.loading ? <><span className="spin" /> </> : null}
+                  {definitionStatusText}
+                </span>
+                {definitionBackendText ? (
+                  <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.8 }}>
+                    {definitionBackendText}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: definitionFallback.results.length ? '6px 0' : 0 }}>
+              {definitionFallback.results.map((result, index) => {
+                const selected = index === definitionFallback.selectedIndex;
+                return (
+                  <button
+                    key={`${result.path}:${result.line}:${result.column}:${index}`}
+                    type="button"
+                    style={{
+                      width: '100%',
+                      display: 'block',
+                      textAlign: 'left',
+                      border: 0,
+                      borderRadius: 0,
+                      background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                      color: 'var(--text)',
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={() => setDefinitionFallback((state) => ({ ...state, selectedIndex: index }))}
+                    onClick={() => activateDefinitionResult(result)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {definitionResultPrimaryLabel(result)}
+                      </span>
+                      <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                        {result.line ? `L${result.line}` : ''}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {definitionResultMetaLabel(result)}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

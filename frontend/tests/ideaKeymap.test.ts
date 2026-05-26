@@ -7,8 +7,11 @@ import {
   findActiveTerminalIframe,
   isEditableShortcutTarget,
   isAgentSpaceShortcutCommandImplemented,
+  isPreviewGoToDefinitionShortcutTarget,
   isTerminalShortcutTarget,
   shouldIgnoreAgentSpaceShortcut,
+  shouldRunPreviewGoToDefinitionShortcut,
+  shortcutEventMatchesCommand,
   shortcutEventMatchesBinding,
 } from '../src/lib/ideaKeymap.js';
 import {
@@ -111,6 +114,88 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: 'guards Go to Definition shortcut to preview code targets',
+    run: () => {
+      const previewHost = fakeElement('div', { 'data-agent-space-preview-code': 'true', role: 'textbox' });
+      const cmLine = fakeElement('div', { class: 'cm-line' }, previewHost);
+      const outsideTextbox = fakeElement('div', { role: 'textbox' });
+      const filesPane = fakeElement('div', { 'data-agent-space-pane': 'files' });
+      const settingsColumn = fakeElement('div', { class: 'agent-space-settings-column' });
+      const terminalRoot = fakeElement('div', { 'data-agent-space-terminal': 'true' });
+      const terminalChild = fakeElement('div', {}, terminalRoot);
+      const rootGuard = {
+        contains(node: unknown): boolean {
+          return node === previewHost || node === cmLine;
+        },
+      };
+
+      assertEqual(isEditableShortcutTarget(cmLine as unknown as EventTarget), true);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(cmLine as unknown as EventTarget), true);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(previewHost as unknown as EventTarget), true);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(outsideTextbox as unknown as EventTarget), false);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(filesPane as unknown as EventTarget), false);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(settingsColumn as unknown as EventTarget), false);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(terminalRoot as unknown as EventTarget), false);
+      assertEqual(isPreviewGoToDefinitionShortcutTarget(cmLine as unknown as EventTarget, rootGuard), true);
+      assertEqual(
+        shortcutEventMatchesCommand(
+          keyEvent('B', { code: 'KeyB', metaKey: true }),
+          DEFAULT_AGENT_SPACE_SHORTCUTS,
+          'mac',
+          'go_to_definition',
+        ),
+        true,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: cmLine as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        true,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: outsideTextbox as unknown as EventTarget,
+          activeElement: outsideTextbox as unknown as EventTarget,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: terminalChild as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+          terminalRoot: {
+            contains(node: unknown): boolean {
+              return node === terminalRoot || node === terminalChild;
+            },
+          },
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: filesPane as unknown as EventTarget,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: null,
+          activeElement: cmLine as unknown as EventTarget,
+        }),
+        true,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: filesPane as unknown as EventTarget,
+          activeElement: settingsColumn as unknown as EventTarget,
+        }),
+        false,
+      );
+    },
+  },
+  {
     name: 'selects active terminal iframe using terminal panel DOM classes',
     run: () => {
       const activeFrame = { id: 'active' };
@@ -196,7 +281,11 @@ const tests: TestCase[] = [
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('B', { code: 'KeyB', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1600),
-        null,
+        'go_to_definition',
+      );
+      assertEqual(
+        commandFromShortcutEvent(keyEvent('B', { code: 'KeyB', ctrlKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1650),
+        'go_to_definition',
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('F7', { code: 'F7', altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1700),
@@ -211,7 +300,10 @@ const tests: TestCase[] = [
         null,
       );
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_in_files'), true);
-      assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), false);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), true);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('find_usages'), false);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_back'), false);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_forward'), false);
     },
   },
 ];

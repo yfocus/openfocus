@@ -80,10 +80,16 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert "navigation_forward" in source
     assert "Navigate Forward" in source
     assert "AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS" in source
-    assert (
-        "['go_to_definition', 'find_usages', 'navigation_back', 'navigation_forward']"
-        in source
+    assert "['find_usages', 'navigation_back', 'navigation_forward']" in source
+    unavailable_line = next(
+        line
+        for line in source.splitlines()
+        if "AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS" in line
     )
+    assert "go_to_definition" not in unavailable_line
+    assert "find_usages" in unavailable_line
+    assert "navigation_back" in unavailable_line
+    assert "navigation_forward" in unavailable_line
     assert "Not available yet" in source
     assert 'disabled aria-disabled="true" title="Not available yet"' in source
     assert "focus_files" in source

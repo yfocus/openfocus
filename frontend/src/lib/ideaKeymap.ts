@@ -12,6 +12,7 @@ import {
 export const AGENT_SPACE_IMPLEMENTED_COMMANDS: AgentSpaceShortcutCommandId[] = [
   'search_everywhere',
   'find_in_files',
+  'go_to_definition',
   'focus_files',
   'focus_preview',
   'focus_terminal',
@@ -38,6 +39,13 @@ type QueryRootLike<T> = {
 export type ShortcutGuardOptions = {
   target?: EventTarget | null;
   activeElement?: EventTarget | null;
+  terminalRoot?: NodeLike | null;
+};
+
+export type PreviewShortcutGuardOptions = {
+  target?: EventTarget | null;
+  activeElement?: EventTarget | null;
+  previewRoot?: NodeLike | null;
   terminalRoot?: NodeLike | null;
 };
 
@@ -87,6 +95,10 @@ function isTerminalElement(element: ElementLike): boolean {
   return String(element.getAttribute?.('data-agent-space-terminal') || '').toLowerCase() === 'true';
 }
 
+function isPreviewCodeElement(element: ElementLike): boolean {
+  return String(element.getAttribute?.('data-agent-space-preview-code') || '').toLowerCase() === 'true';
+}
+
 function eventKeyName(event: ShortcutKeyEventLike): string {
   if (event.key === 'Shift') return 'Shift';
   if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') return 'Shift';
@@ -130,6 +142,23 @@ export function isTerminalShortcutTarget(target: EventTarget | null | undefined,
   if (terminalRoot?.contains?.(target as Node | null)) return true;
   const element = asElementLike(target);
   return !!element && !!closestElement(element, isTerminalElement);
+}
+
+export function isPreviewGoToDefinitionShortcutTarget(
+  target: EventTarget | null | undefined,
+  previewRoot?: NodeLike | null,
+): boolean {
+  if (!target) return false;
+  if (previewRoot?.contains?.(target as Node | null)) return true;
+  const element = asElementLike(target);
+  return !!element && !!closestElement(element, isPreviewCodeElement);
+}
+
+export function shouldRunPreviewGoToDefinitionShortcut(options: PreviewShortcutGuardOptions = {}): boolean {
+  if (isTerminalShortcutTarget(options.target, options.terminalRoot)) return false;
+  if (isTerminalShortcutTarget(options.activeElement, options.terminalRoot)) return false;
+  if (asElementLike(options.target)) return isPreviewGoToDefinitionShortcutTarget(options.target, options.previewRoot);
+  return isPreviewGoToDefinitionShortcutTarget(options.activeElement, options.previewRoot);
 }
 
 export function findActiveTerminalIframe<T>(root: QueryRootLike<T> | null | undefined): T | null {
@@ -204,6 +233,15 @@ export function shortcutEventMatchesBinding(event: ShortcutKeyEventLike, binding
 
 export function isAgentSpaceShortcutCommandImplemented(command: AgentSpaceShortcutCommandId): boolean {
   return AGENT_SPACE_IMPLEMENTED_COMMANDS.includes(command);
+}
+
+export function shortcutEventMatchesCommand(
+  event: ShortcutKeyEventLike,
+  settings: AgentSpaceShortcutSettings,
+  platform: ShortcutPlatform,
+  commandId: AgentSpaceShortcutCommandId,
+): boolean {
+  return shortcutEventMatchesBinding(event, resolveShortcutBinding(settings, commandId, platform));
 }
 
 export function commandFromShortcutEvent(
