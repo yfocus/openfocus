@@ -5,6 +5,7 @@ import './agentSpaceShortcuts.test.js';
 import './ideaKeymap.test.js';
 import './agentSpaceSearch.test.js';
 import './agentSpaceReferences.test.js';
+import './agentSpaceNavigationHistory.test.js';
 import './agentSpacePreviewSymbol.test.js';
 import './markdownPreview.test.js';
 import './inspirationBusyPolling.test.js';

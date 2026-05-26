@@ -8,7 +8,7 @@ import {
   type CodeSearchResultGroup,
 } from '../api/codeNavigation.js';
 
-export type SearchPreviewOpener = (relPath: string, name: string, target?: { line?: number; column?: number }) => void | Promise<void>;
+export type SearchPreviewOpener = (relPath: string, name: string, target?: { line?: number; column?: number; source?: string }) => void | Promise<void>;
 
 export function searchResultFileName(path: string): string {
   const value = String(path || '').trim();
@@ -97,13 +97,18 @@ export function codeSearchOverlayStatusText(options: {
   return '';
 }
 
-export async function openCodeSearchResult(result: CodeSearchResult | null | undefined, openPreview: SearchPreviewOpener): Promise<boolean> {
+export async function openCodeSearchResult(
+  result: CodeSearchResult | null | undefined,
+  openPreview: SearchPreviewOpener,
+  source = 'search_everywhere',
+): Promise<boolean> {
   if (!result?.path) return false;
   const line = positiveInt(result.line);
   const column = positiveInt(result.column);
   await openPreview(result.path, searchResultFileName(result.path), {
     line: line || undefined,
     column: column || undefined,
+    source,
   });
   return true;
 }

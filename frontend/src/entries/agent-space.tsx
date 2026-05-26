@@ -88,6 +88,16 @@ import {
   type PreviewSymbolContext,
 } from '../lib/agentSpacePreviewSymbol';
 import {
+  EMPTY_AGENT_SPACE_NAVIGATION_HISTORY,
+  createNavigationHistoryEntry,
+  navigateBack,
+  navigateForward,
+  navigationHistoryEntryToPreviewReplay,
+  recordNavigationOpen,
+  type AgentSpaceNavigationHistoryEntry,
+  type AgentSpaceNavigationHistoryState,
+} from '../lib/agentSpaceNavigationHistory';
+import {
   commandFromShortcutEvent,
   createDoubleShiftDetector,
   currentShortcutPlatform,
@@ -127,6 +137,7 @@ type AgentSpacePane = 'files' | 'preview' | 'terminal';
 type PreviewState = {
   path?: string;
   name?: string;
+  source?: string;
   scrollTop?: number;
   topLine?: number;
   targetLine?: number;
@@ -138,6 +149,14 @@ type PreviewState = {
 type PreviewTarget = {
   line?: number;
   column?: number;
+};
+
+type PreviewOpenOptions = PreviewTarget & {
+  scrollTop?: number;
+  topLine?: number;
+  restoreScroll?: boolean;
+  recordHistory?: boolean;
+  source?: string;
 };
 
 type PreviewViewState = {
@@ -228,6 +247,11 @@ function clamp(value: number, minValue: number, maxValue: number): number {
   if (value < minValue) return minValue;
   if (value > maxValue) return maxValue;
   return value;
+}
+
+function nonNegativeInt(value: unknown): number | undefined {
+  const parsed = Math.floor(Number(value || 0));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function paneGridColumn(pane: AgentSpacePane, visiblePanes: AgentSpacePane[], index: number): string {
@@ -684,6 +708,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const terminalSideRef = useRef<HTMLDivElement | null>(null);
   const terminalApiRef = useRef<TerminalApi | null>(null);
   const previewSymbolContextRef = useRef<PreviewSymbolContext>(createEmptyPreviewSymbolContext());
+  const navigationHistoryRef = useRef<AgentSpaceNavigationHistoryState>(EMPTY_AGENT_SPACE_NAVIGATION_HISTORY);
   const doubleShiftRef = useRef(createDoubleShiftDetector());
   const shortcutPlatform = useMemo(() => currentShortcutPlatform(), []);
   const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
@@ -751,24 +776,70 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const definitionRequestIdRef = useRef(0);
   const referencesRequestIdRef = useRef(0);
 
+  const currentNavigationEntry = useCallback(
+    (fallback?: AgentSpaceNavigationHistoryEntry | null): AgentSpaceNavigationHistoryEntry | null => {
+      const state = loadPreviewState(config.spaceId);
+      const path = String(state?.path || fallback?.path || preview.path || '').trim();
+      if (!path) return null;
+      return createNavigationHistoryEntry({
+        path,
+        name: String(state?.name || fallback?.name || preview.name || '') || guessNameFromPath(path),
+        line: positiveInt(state?.targetLine) || fallback?.line,
+        column: positiveInt(state?.targetColumn) || fallback?.column,
+        scrollTop: state?.scrollTop ?? fallback?.scrollTop,
+        topLine: state?.topLine ?? fallback?.topLine,
+        source: String(state?.source || fallback?.source || 'current'),
+        ts: Date.now(),
+      });
+    },
+    [config.spaceId, preview.name, preview.path],
+  );
+
   const openPreview = useCallback(
-    async (relPath: string, name: string, target?: PreviewTarget) => {
-      const targetLine = positiveInt(target?.line);
-      const targetColumn = positiveInt(target?.column);
+    async (relPath: string, name: string, options?: PreviewOpenOptions) => {
+      const restoreScroll = options?.restoreScroll === true;
+      const historyLine = positiveInt(options?.line);
+      const historyColumn = positiveInt(options?.column);
+      const targetLine = restoreScroll ? undefined : historyLine;
+      const targetColumn = restoreScroll ? undefined : historyColumn;
       const targetNonce = targetLine ? Date.now() : undefined;
+      const source = String(options?.source || 'files');
+      const recordHistory = options?.recordHistory !== false;
       const previous = loadPreviewState(config.spaceId);
       const same = previous && String(previous.path || '') === String(relPath || '');
+      const displayName = name || guessNameFromPath(relPath);
+      const optionScrollTop = nonNegativeInt(options?.scrollTop);
+      const optionTopLine = positiveInt(options?.topLine);
+      const nextScrollTop = targetLine ? 0 : optionScrollTop ?? (same ? Number(previous?.scrollTop || 0) : 0);
+      const nextTopLine = targetLine || optionTopLine || (same ? Number(previous?.topLine || 1) : 1);
+      if (recordHistory) {
+        navigationHistoryRef.current = {
+          ...navigationHistoryRef.current,
+          current: currentNavigationEntry(navigationHistoryRef.current.current),
+        };
+        const entry = createNavigationHistoryEntry({
+          path: relPath,
+          name: displayName,
+          line: historyLine,
+          column: historyColumn,
+          scrollTop: nextScrollTop,
+          topLine: nextTopLine,
+          source,
+          ts: Date.now(),
+        });
+        navigationHistoryRef.current = recordNavigationOpen(navigationHistoryRef.current, entry);
+      }
       savePreviewState(config.spaceId, {
         path: relPath,
-        name,
-        scrollTop: targetLine ? 0 : same ? Number(previous?.scrollTop || 0) : 0,
-        topLine: targetLine || (same ? Number(previous?.topLine || 1) : 1),
+        name: displayName,
+        source,
+        scrollTop: nextScrollTop,
+        topLine: nextTopLine,
         targetLine,
         targetColumn,
         targetNonce,
         ts: Date.now(),
       });
-      const displayName = name || guessNameFromPath(relPath);
       setMarkdownSourceMode(Boolean(targetLine && isMarkdownPreviewFile(displayName)));
       setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: true, error: '', targetLine, targetColumn, targetNonce });
       try {
@@ -786,7 +857,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         setPreview({ path: relPath, name: displayName, content: '', imageUrl: '', loading: false, error: `Preview failed: ${err instanceof Error ? err.message : String(err)}`, targetLine, targetColumn, targetNonce });
       }
     },
-    [config.spaceId],
+    [config.spaceId, currentNavigationEntry],
   );
 
   const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
@@ -815,7 +886,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
   const activateSearchResult = useCallback(
     async (result: CodeSearchResult | null | undefined, closeAfterOpen: boolean) => {
-      const opened = await openCodeSearchResult(result, openPreview);
+      const opened = await openCodeSearchResult(result, openPreview, 'search_everywhere');
       if (opened && closeAfterOpen) closeSearchEverywhere();
     },
     [closeSearchEverywhere, openPreview],
@@ -823,7 +894,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
 
   const activateFindResult = useCallback(
     async (result: CodeSearchResult | null | undefined, closeAfterOpen: boolean) => {
-      const opened = await openCodeSearchResult(result, openPreview);
+      const opened = await openCodeSearchResult(result, openPreview, 'find_in_files');
       if (opened && closeAfterOpen) closeFindInFiles();
     },
     [closeFindInFiles, openPreview],
@@ -845,6 +916,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       await openPreview(result.path, definitionResultPrimaryLabel(result), {
         line: positiveInt(result.line) || undefined,
         column: positiveInt(result.column) || undefined,
+        source: 'go_to_definition',
       });
       if (closeAfterOpen) closeDefinitionFallback();
       return true;
@@ -1146,10 +1218,25 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     const state = loadPreviewState(config.spaceId);
     if (!state?.path) return;
     const targetLine = positiveInt(state.targetLine);
+    navigationHistoryRef.current = recordNavigationOpen(navigationHistoryRef.current, createNavigationHistoryEntry({
+      path: String(state.path || ''),
+      name: String(state.name || '') || guessNameFromPath(String(state.path || '')),
+      line: targetLine,
+      column: positiveInt(state.targetColumn),
+      scrollTop: state.scrollTop,
+      topLine: state.topLine,
+      source: String(state.source || 'restore'),
+      ts: Date.now(),
+    }));
     void openPreview(
       String(state.path || ''),
       String(state.name || '') || guessNameFromPath(String(state.path || '')),
-      targetLine ? { line: targetLine, column: positiveInt(state.targetColumn) } : undefined,
+      {
+        line: targetLine || undefined,
+        column: targetLine ? positiveInt(state.targetColumn) : undefined,
+        recordHistory: false,
+        source: String(state.source || 'restore'),
+      },
     );
   }, [config.spaceId, openPreview]);
 
@@ -1221,6 +1308,35 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     [settings.showFiles, settings.showPreview, settings.showTerminal],
   );
 
+  const openNavigationHistoryEntry = useCallback(
+    (entry: AgentSpaceNavigationHistoryEntry) => {
+      const replay = navigationHistoryEntryToPreviewReplay(entry);
+      if (!replay) return;
+      void openPreview(replay.path, replay.name, replay.options);
+    },
+    [openPreview],
+  );
+
+  const navigatePreviewBack = useCallback(() => {
+    const result = navigateBack(navigationHistoryRef.current, currentNavigationEntry(navigationHistoryRef.current.current));
+    navigationHistoryRef.current = result.state;
+    if (!result.entry) {
+      toast('No previous location');
+      return;
+    }
+    openNavigationHistoryEntry(result.entry);
+  }, [currentNavigationEntry, openNavigationHistoryEntry]);
+
+  const navigatePreviewForward = useCallback(() => {
+    const result = navigateForward(navigationHistoryRef.current, currentNavigationEntry(navigationHistoryRef.current.current));
+    navigationHistoryRef.current = result.state;
+    if (!result.entry) {
+      toast('No next location');
+      return;
+    }
+    openNavigationHistoryEntry(result.entry);
+  }, [currentNavigationEntry, openNavigationHistoryEntry]);
+
   const runShortcutCommand = useCallback(
     (command: AgentSpaceShortcutCommandId) => {
       if (command === 'search_everywhere') {
@@ -1239,6 +1355,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         runFindUsages();
         return;
       }
+      if (command === 'navigation_back') {
+        navigatePreviewBack();
+        return;
+      }
+      if (command === 'navigation_forward') {
+        navigatePreviewForward();
+        return;
+      }
       if (command === 'focus_files') {
         focusAgentSpacePane('files');
         return;
@@ -1252,7 +1376,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         return;
       }
     },
-    [focusAgentSpacePane, openFindInFiles, openSearchEverywhere, runFindUsages, runGoToDefinition],
+    [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openSearchEverywhere, runFindUsages, runGoToDefinition],
   );
 
   useEffect(() => {
@@ -1323,7 +1447,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       const state = loadPreviewState(config.spaceId) || {};
       const path = String(state.path || '');
       if (!path) return;
-      savePreviewState(config.spaceId, { path, name: String(state.name || ''), scrollTop: Number(scrollTop || 0), topLine: Number(topLine || 1), ts: Date.now() });
+      savePreviewState(config.spaceId, {
+        path,
+        name: String(state.name || ''),
+        source: String(state.source || ''),
+        scrollTop: Number(scrollTop || 0),
+        topLine: Number(topLine || 1),
+        ts: Date.now(),
+      });
     },
     [config.spaceId],
   );
@@ -1441,7 +1572,11 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         toast('File not found in workspace');
         return;
       }
-      void openPreview(fileReference.relPath, guessNameFromPath(fileReference.relPath), { line: fileReference.line, column: fileReference.column });
+      void openPreview(fileReference.relPath, guessNameFromPath(fileReference.relPath), {
+        line: fileReference.line,
+        column: fileReference.column,
+        source: 'terminal_link',
+      });
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
@@ -1685,7 +1820,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                       path={preview.path}
                       imageSrcForPath={(workspacePath) => rawFileUrl(config.spaceId, workspacePath)}
                       onOpenWorkspacePath={(workspacePath) => {
-                        void openPreview(workspacePath, guessNameFromPath(workspacePath));
+                        void openPreview(workspacePath, guessNameFromPath(workspacePath), { source: 'markdown_link' });
                       }}
                     />
                   ) : null}

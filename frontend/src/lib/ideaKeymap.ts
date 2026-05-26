@@ -14,6 +14,8 @@ export const AGENT_SPACE_IMPLEMENTED_COMMANDS: AgentSpaceShortcutCommandId[] = [
   'find_in_files',
   'go_to_definition',
   'find_usages',
+  'navigation_back',
+  'navigation_forward',
   'focus_files',
   'focus_preview',
   'focus_terminal',

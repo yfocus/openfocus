@@ -17,6 +17,7 @@ import {
 } from '../src/lib/ideaKeymap.js';
 import {
   DEFAULT_AGENT_SPACE_SHORTCUTS,
+  AGENT_SPACE_SHORTCUT_COMMANDS,
   type ShortcutKeyEventLike,
 } from '../src/lib/agentSpaceShortcuts.js';
 
@@ -343,17 +344,20 @@ const tests: TestCase[] = [
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('[', { code: 'BracketLeft', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1800),
-        null,
+        'navigation_back',
       );
       assertEqual(
         commandFromShortcutEvent(keyEvent('ArrowRight', { code: 'ArrowRight', ctrlKey: true, altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1900),
-        null,
+        'navigation_forward',
       );
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_in_files'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_usages'), true);
-      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_back'), false);
-      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_forward'), false);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_back'), true);
+      assertEqual(isAgentSpaceShortcutCommandImplemented('navigation_forward'), true);
+      for (const command of AGENT_SPACE_SHORTCUT_COMMANDS) {
+        assertEqual(isAgentSpaceShortcutCommandImplemented(command.id), true, `${command.id} implemented`);
+      }
     },
   },
 ];

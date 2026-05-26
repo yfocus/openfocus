@@ -65,7 +65,7 @@
     { id: 'focus_terminal', label: 'Focus Terminal', scope: 'AgentSpace', defaults: [{ keys: ['Alt', '3'], platform: 'all' }] },
   ];
   const AGENT_SPACE_SHORTCUT_COMMAND_BY_ID = new Map(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd]));
-  const AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS = new Set(['navigation_back', 'navigation_forward']);
+  const AGENT_SPACE_UNAVAILABLE_SHORTCUT_COMMAND_IDS = new Set([]);
   const AGENT_SPACE_SHORTCUT_DEFAULTS = {
     version: 1,
     bindings: Object.fromEntries(AGENT_SPACE_SHORTCUT_COMMANDS.map((cmd)=> [cmd.id, cmd.defaults.map((binding)=> ({ keys: binding.keys.slice(), platform: binding.platform }))])),

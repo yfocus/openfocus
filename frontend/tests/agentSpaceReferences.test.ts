@@ -100,7 +100,7 @@ const tests: TestCase[] = [
   {
     name: 'opens references in preview at result location',
     run: async () => {
-      const calls: Array<{ path: string; name: string; target?: { line?: number; column?: number } }> = [];
+      const calls: Array<{ path: string; name: string; target?: { line?: number; column?: number; source?: string } }> = [];
       const opened = await openCodeReferenceResult(
         { kind: 'reference', path: 'frontend/src/app.tsx', line: 24, column: 7, preview: 'AgentSpaceApp' },
         (path, name, target) => {
@@ -113,7 +113,7 @@ const tests: TestCase[] = [
         {
           path: 'frontend/src/app.tsx',
           name: 'app.tsx',
-          target: { line: 24, column: 7 },
+          target: { line: 24, column: 7, source: 'find_usages' },
         },
       ]);
     },

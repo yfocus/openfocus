@@ -37,7 +37,7 @@ const tests: TestCase[] = [
   {
     name: 'selection opens preview with result path line and column',
     run: async () => {
-      const calls: Array<{ path: string; name: string; target?: { line?: number; column?: number } }> = [];
+      const calls: Array<{ path: string; name: string; target?: { line?: number; column?: number; source?: string } }> = [];
       const opened = await openCodeSearchResult(
         { kind: 'function', path: 'frontend/src/app.tsx', line: 24, column: 7, name: 'AgentSpaceApp' },
         (path, name, target) => {
@@ -50,7 +50,7 @@ const tests: TestCase[] = [
         {
           path: 'frontend/src/app.tsx',
           name: 'app.tsx',
-          target: { line: 24, column: 7 },
+          target: { line: 24, column: 7, source: 'search_everywhere' },
         },
       ]);
     },

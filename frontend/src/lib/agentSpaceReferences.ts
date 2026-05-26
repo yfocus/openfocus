@@ -11,7 +11,7 @@ export type CodeReferenceResultGroup = {
   results: CodeReferenceResult[];
 };
 
-export type ReferencePreviewOpener = (relPath: string, name: string, target?: { line?: number; column?: number }) => void | Promise<void>;
+export type ReferencePreviewOpener = (relPath: string, name: string, target?: { line?: number; column?: number; source?: string }) => void | Promise<void>;
 
 export function groupCodeReferenceResults(results: CodeReferenceResult[]): CodeReferenceResultGroup[] {
   const groups: CodeReferenceResultGroup[] = [];
@@ -80,6 +80,7 @@ export async function openCodeReferenceResult(result: CodeReferenceResult | null
   await openPreview(result.path, searchResultFileName(result.path), {
     line: line || undefined,
     column: column || undefined,
+    source: 'find_usages',
   });
   return true;
 }
