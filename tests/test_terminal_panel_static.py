@@ -117,10 +117,22 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert '.rt-side[data-terminal-open="0"] .rt-prompt-zone' in css
     assert "space-copy-task" not in agent_space_template
     assert "agent-space-settings-column" in agent_space_react
-    assert "renderMarkdownToHtml" in agent_space_react
+    assert "MarkdownPreview" in agent_space_react
+    assert "imageSrcForPath" in agent_space_react
+    assert "onOpenWorkspacePath" in agent_space_react
     assert "Show Markdown source" in agent_space_react
     assert "Render Markdown" in agent_space_react
     assert ".markdown-preview" in agent_space_template
+    assert "/static/dist/assets/agent-space.js" in agent_space_template
+    assert "asset=4" in agent_space_template
+    assert ".markdown-preview a { color: #67e8f9;" in agent_space_template
+    assert ".markdown-preview code" in agent_space_template
+    assert (
+        ".markdown-preview code { font-family: var(--mono); font-size: 0.92em; color: var(--accent);"
+        not in agent_space_template
+    )
+    assert ".markdown-preview table" in agent_space_template
+    assert ".markdown-preview img" in agent_space_template
     assert 'id="nav-system"' in base_template
     assert 'id="system-dialog"' in base_template
     assert "system-files-font-size" in base_template

@@ -32,7 +32,7 @@ import {
 } from '../lib/fileReferences';
 import {
   isMarkdownPreviewFile,
-  renderMarkdownToHtml,
+  MarkdownPreview,
   shouldRenderMarkdownPreview,
 } from '../lib/markdownPreview';
 import {
@@ -579,17 +579,6 @@ function CodeMirrorPreview({
   }, [content, targetColumn, targetLine, targetNonce]);
 
   return <div ref={hostRef} className="codebox cm-preview" />;
-}
-
-function MarkdownPreview({ content, fontSize }: { content: string; fontSize: number }) {
-  const html = useMemo(() => renderMarkdownToHtml(content), [content]);
-  return (
-    <div
-      className="markdown-preview"
-      style={{ fontSize: `${fontSize}px` }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
 }
 
 function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
@@ -1358,7 +1347,17 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                   {preview.loading ? <><span className="spin" /> <span className="muted">Loading…</span></> : null}
                   {preview.error ? preview.error : null}
                   {!preview.loading && !preview.error && preview.imageUrl ? <img src={preview.imageUrl} style={{ maxWidth: '100%', height: 'auto' }} /> : null}
-                  {!preview.loading && !preview.error && preview.content && renderMarkdownPreview ? <MarkdownPreview content={preview.content} fontSize={settings.previewFontSize} /> : null}
+                  {!preview.loading && !preview.error && preview.content && renderMarkdownPreview ? (
+                    <MarkdownPreview
+                      content={preview.content}
+                      fontSize={settings.previewFontSize}
+                      path={preview.path}
+                      imageSrcForPath={(workspacePath) => rawFileUrl(config.spaceId, workspacePath)}
+                      onOpenWorkspacePath={(workspacePath) => {
+                        void openPreview(workspacePath, guessNameFromPath(workspacePath));
+                      }}
+                    />
+                  ) : null}
                   {!preview.loading && !preview.error && preview.content && !renderMarkdownPreview ? <CodeMirrorPreview content={preview.content} name={preview.name} onScroll={savePreviewScroll} onSelectionChange={updatePreviewSelection} targetLine={preview.targetLine} targetColumn={preview.targetColumn} targetNonce={preview.targetNonce} fontSize={settings.previewFontSize} /> : null}
                   {!preview.path ? 'Select a file to preview (code / Markdown / image).' : null}
                 </div>
