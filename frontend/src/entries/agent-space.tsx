@@ -537,6 +537,32 @@ function previewSymbolContextFromEditor(view: EditorView, path: string): Preview
   });
 }
 
+function previewSymbolContextFromDomSelection(view: EditorView, path: string): PreviewSymbolContext | null {
+  const root = view.root as DocumentOrShadowRoot & { getSelection?: () => Selection | null };
+  const selection = root.getSelection?.() || window.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.toString().trim()) return null;
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  if (!anchor || !focus || !view.dom.contains(anchor) || !view.dom.contains(focus)) return null;
+  try {
+    const anchorPos = view.posAtDOM(anchor, selection.anchorOffset);
+    const focusPos = view.posAtDOM(focus, selection.focusOffset);
+    if (anchorPos === focusPos) return null;
+    return createPreviewSymbolContext({
+      path,
+      content: view.state.doc.toString(),
+      selection: {
+        from: Math.min(anchorPos, focusPos),
+        to: Math.max(anchorPos, focusPos),
+        head: focusPos,
+        selectedText: selection.toString(),
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
 function CodeMirrorPreview({
   content,
   name,
@@ -664,9 +690,16 @@ function CodeMirrorPreview({
     });
 
     viewRef.current = view;
+    const syncDomSelectionContext = () => {
+      const context = previewSymbolContextFromDomSelection(view, path);
+      if (context) onSymbolContextChange(context);
+    };
+    host.ownerDocument.addEventListener('selectionchange', syncDomSelectionContext);
+
     return () => {
       if (scrollTimerRef.current) window.clearTimeout(scrollTimerRef.current);
       if (targetClearTimerRef.current) window.clearTimeout(targetClearTimerRef.current);
+      host.ownerDocument.removeEventListener('selectionchange', syncDomSelectionContext);
       onSymbolContextChange(createEmptyPreviewSymbolContext(path));
       view.destroy();
       viewRef.current = null;
@@ -1379,6 +1412,18 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openSearchEverywhere, runFindUsages, runGoToDefinition],
   );
 
+  const hasPreviewTextSelection = useCallback((): boolean => {
+    const host = previewContentRef.current;
+    const selection = window.getSelection?.();
+    if (!host || !selection || selection.isCollapsed || !selection.toString().trim()) return false;
+    const isCodePreviewSelectionNode = (node: Node | null): boolean => {
+      if (!node || !host.contains(node)) return false;
+      const element = node instanceof Element ? node : node.parentElement;
+      return !!element?.closest('[data-agent-space-preview-code="true"]');
+    };
+    return isCodePreviewSelectionNode(selection.anchorNode) || isCodePreviewSelectionNode(selection.focusNode);
+  }, []);
+
   useEffect(() => {
     if (!definitionFallback.open) return;
     const timer = window.setTimeout(() => definitionDialogRef.current?.focus(), 0);
@@ -1401,6 +1446,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         target: event.target,
         activeElement: document.activeElement,
         terminalRoot: terminalRef.current,
+        hasPreviewSelection: hasPreviewTextSelection(),
       };
       const isGoToDefinitionShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_definition');
       const isFindUsagesShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'find_usages');
@@ -1440,7 +1486,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [runShortcutCommand, shortcutPlatform, shortcuts]);
+  }, [hasPreviewTextSelection, runShortcutCommand, shortcutPlatform, shortcuts]);
 
   const savePreviewScroll = useCallback(
     (scrollTop: number, topLine: number) => {

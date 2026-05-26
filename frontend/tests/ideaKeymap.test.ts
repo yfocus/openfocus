@@ -205,6 +205,35 @@ const tests: TestCase[] = [
         false,
       );
       assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: fakeElement('body') as unknown as EventTarget,
+          activeElement: fakeElement('body') as unknown as EventTarget,
+          hasPreviewSelection: true,
+        }),
+        true,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: filesPane as unknown as EventTarget,
+          activeElement: fakeElement('body') as unknown as EventTarget,
+          hasPreviewSelection: true,
+        }),
+        false,
+      );
+      assertEqual(
+        shouldRunPreviewGoToDefinitionShortcut({
+          target: fakeElement('body') as unknown as EventTarget,
+          activeElement: terminalChild as unknown as EventTarget,
+          terminalRoot: {
+            contains(node: unknown): boolean {
+              return node === terminalRoot || node === terminalChild;
+            },
+          },
+          hasPreviewSelection: true,
+        }),
+        false,
+      );
+      assertEqual(
         shouldRunPreviewCodeShortcut({
           target: cmLine as unknown as EventTarget,
           activeElement: cmLine as unknown as EventTarget,

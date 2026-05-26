@@ -416,6 +416,7 @@ export function formatShortcutBinding(binding: ShortcutBinding | null | undefine
   if (isDoubleShift(normalized)) return 'Double Shift';
   return normalized.keys.map((key) => {
     if (key === 'Meta') return platform === 'mac' ? 'Cmd' : 'Meta';
+    if (key === 'Alt') return platform === 'mac' ? 'Option' : 'Alt';
     if (key === 'ArrowLeft') return 'Left';
     if (key === 'ArrowRight') return 'Right';
     if (key === 'ArrowUp') return 'Up';

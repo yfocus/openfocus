@@ -99,6 +99,7 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert "focus_terminal" in source
     assert "Focus Terminal" in source
     assert "Double Shift" in source
+    assert "if(key === 'Alt') return platform === 'mac' ? 'Option' : 'Alt';" in source
     assert "Press shortcut" in source
     assert "recordingCurrent" in source
     assert "formatShortcutBinding(recordingCapturedBinding, platform)" in source

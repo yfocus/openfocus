@@ -196,6 +196,7 @@
     if(normalized.keys.length === 2 && normalized.keys[0] === 'Shift' && normalized.keys[1] === 'Shift') return 'Double Shift';
     return normalized.keys.map((key)=> {
       if(key === 'Meta') return platform === 'mac' ? 'Cmd' : 'Meta';
+      if(key === 'Alt') return platform === 'mac' ? 'Option' : 'Alt';
       if(key === 'ArrowLeft') return 'Left';
       if(key === 'ArrowRight') return 'Right';
       if(key === 'ArrowUp') return 'Up';

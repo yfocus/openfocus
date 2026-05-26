@@ -50,6 +50,7 @@ export type PreviewShortcutGuardOptions = {
   activeElement?: EventTarget | null;
   previewRoot?: NodeLike | null;
   terminalRoot?: NodeLike | null;
+  hasPreviewSelection?: boolean;
 };
 
 export type ShortcutEventWithDefault = ShortcutKeyEventLike & {
@@ -67,6 +68,16 @@ function asElementLike(value: unknown): ElementLike | null {
   if (typeof Element !== 'undefined' && value instanceof Element) return value as ElementLike;
   const candidate = value as ElementLike;
   return candidate.tagName || candidate.closest || candidate.getAttribute || candidate.parentElement ? candidate : null;
+}
+
+function rootContains(root: NodeLike | null | undefined, target: EventTarget | null | undefined): boolean {
+  if (!root?.contains || !target) return false;
+  if (typeof Node !== 'undefined' && !(target instanceof Node)) return false;
+  try {
+    return root.contains(target as Node | null);
+  } catch {
+    return false;
+  }
 }
 
 function closestElement(target: ElementLike, predicate: (element: ElementLike) => boolean): ElementLike | null {
@@ -100,6 +111,11 @@ function isTerminalElement(element: ElementLike): boolean {
 
 function isPreviewCodeElement(element: ElementLike): boolean {
   return String(element.getAttribute?.('data-agent-space-preview-code') || '').toLowerCase() === 'true';
+}
+
+function isDocumentKeyboardTarget(element: ElementLike): boolean {
+  const tagName = String(element.tagName || '').toLowerCase();
+  return tagName === 'body' || tagName === 'html';
 }
 
 function eventKeyName(event: ShortcutKeyEventLike): string {
@@ -142,7 +158,7 @@ export function isEditableShortcutTarget(target: EventTarget | null | undefined)
 
 export function isTerminalShortcutTarget(target: EventTarget | null | undefined, terminalRoot?: NodeLike | null): boolean {
   if (!target) return false;
-  if (terminalRoot?.contains?.(target as Node | null)) return true;
+  if (rootContains(terminalRoot, target)) return true;
   const element = asElementLike(target);
   return !!element && !!closestElement(element, isTerminalElement);
 }
@@ -152,7 +168,7 @@ export function isPreviewGoToDefinitionShortcutTarget(
   previewRoot?: NodeLike | null,
 ): boolean {
   if (!target) return false;
-  if (previewRoot?.contains?.(target as Node | null)) return true;
+  if (rootContains(previewRoot, target)) return true;
   const element = asElementLike(target);
   return !!element && !!closestElement(element, isPreviewCodeElement);
 }
@@ -160,8 +176,13 @@ export function isPreviewGoToDefinitionShortcutTarget(
 export function shouldRunPreviewGoToDefinitionShortcut(options: PreviewShortcutGuardOptions = {}): boolean {
   if (isTerminalShortcutTarget(options.target, options.terminalRoot)) return false;
   if (isTerminalShortcutTarget(options.activeElement, options.terminalRoot)) return false;
-  if (asElementLike(options.target)) return isPreviewGoToDefinitionShortcutTarget(options.target, options.previewRoot);
-  return isPreviewGoToDefinitionShortcutTarget(options.activeElement, options.previewRoot);
+  if (isPreviewGoToDefinitionShortcutTarget(options.target, options.previewRoot)) return true;
+  const targetElement = asElementLike(options.target);
+  if (targetElement && !isDocumentKeyboardTarget(targetElement)) return false;
+  if (isPreviewGoToDefinitionShortcutTarget(options.activeElement, options.previewRoot)) return true;
+  if (!options.hasPreviewSelection) return false;
+  const activeElement = asElementLike(options.activeElement);
+  return !activeElement || isDocumentKeyboardTarget(activeElement);
 }
 
 export const shouldRunPreviewCodeShortcut = shouldRunPreviewGoToDefinitionShortcut;

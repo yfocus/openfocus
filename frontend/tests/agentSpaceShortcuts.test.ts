@@ -140,6 +140,9 @@ const tests: TestCase[] = [
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'search_everywhere', 'mac'), 'mac'), 'Double Shift');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_in_files', 'mac'), 'mac'), 'Cmd+Shift+F');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_in_files', 'other'), 'other'), 'Ctrl+Shift+F');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_usages', 'mac'), 'mac'), 'Option+F7');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'focus_files', 'mac'), 'mac'), 'Option+1');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'focus_files', 'other'), 'other'), 'Alt+1');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'navigation_back', 'mac'), 'mac'), 'Cmd+[');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'navigation_back', 'other'), 'other'), 'Ctrl+Alt+Left');
     },
@@ -185,14 +188,14 @@ const tests: TestCase[] = [
     name: 'sets, resets, clears, and detects conflicts by effective platform',
     run: () => {
       const custom = setShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'focus_files', { keys: ['Alt', '5'], platform: 'all' });
-      assertEqual(formatShortcutBinding(resolveShortcutBinding(custom, 'focus_files', 'mac'), 'mac'), 'Alt+5');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(custom, 'focus_files', 'mac'), 'mac'), 'Option+5');
       assertDeepEqual(findShortcutConflict(custom, 'focus_preview', { keys: ['Alt', '5'], platform: 'all' })?.commandId, 'focus_files');
 
       const cleared = clearShortcutBinding(custom, 'focus_files', 'mac');
       assertEqual(resolveShortcutBinding(cleared, 'focus_files', 'mac'), null);
 
       const reset = resetShortcutBinding(cleared, 'focus_files', 'mac');
-      assertEqual(formatShortcutBinding(resolveShortcutBinding(reset, 'focus_files', 'mac'), 'mac'), 'Alt+1');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(reset, 'focus_files', 'mac'), 'mac'), 'Option+1');
 
       const macOnly = setShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_in_files', { keys: ['Meta', 'P'], platform: 'mac' }, 'mac');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(macOnly, 'find_in_files', 'mac'), 'mac'), 'Cmd+P');
