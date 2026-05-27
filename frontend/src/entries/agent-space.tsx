@@ -84,6 +84,11 @@ import {
   type CodeReferenceResultGroup,
 } from '../lib/agentSpaceReferences';
 import {
+  definitionResultMetaLabel,
+  definitionResultPreviewName,
+  definitionResultPrimaryLabel,
+} from '../lib/agentSpaceDefinitionResults';
+import {
   createEmptyPreviewSymbolContext,
   createPreviewSymbolContext,
   type PreviewSymbolContext,
@@ -296,22 +301,6 @@ function currentPxVar(el: HTMLElement, name: string, fallback: number): number {
 function guessNameFromPath(relPath: string): string {
   const idx = relPath.lastIndexOf('/');
   return idx >= 0 ? relPath.slice(idx + 1) : relPath;
-}
-
-function definitionResultPrimaryLabel(result: CodeSymbolResult): string {
-  const name = String(result.name || '').trim();
-  if (name) return name;
-  return guessNameFromPath(String(result.path || ''));
-}
-
-function definitionResultMetaLabel(result: CodeSymbolResult): string {
-  const path = String(result.path || '');
-  const line = positiveInt(result.line);
-  const column = positiveInt(result.column);
-  const location = line ? `${path}:${line}${column ? `:${column}` : ''}` : path;
-  const kind = String(result.kind || 'definition');
-  const container = String(result.container || '').trim();
-  return container ? `${kind} in ${container} - ${location}` : `${kind} - ${location}`;
 }
 
 function isLikelyImage(name: string): boolean {
@@ -1047,7 +1036,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const activateDefinitionResult = useCallback(
     async (result: CodeSymbolResult | null | undefined, closeAfterOpen = true) => {
       if (!result?.path) return false;
-      await openPreview(result.path, definitionResultPrimaryLabel(result), {
+      await openPreview(result.path, definitionResultPreviewName(result), {
         line: positiveInt(result.line) || undefined,
         column: positiveInt(result.column) || undefined,
         source: 'go_to_definition',
