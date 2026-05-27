@@ -49,6 +49,7 @@ import {
   AGENT_SPACE_SETTINGS_KEY,
   loadAgentSpaceSettings,
   normalizeAgentSpaceSettings,
+  saveAgentSpaceSettings,
   type AgentSpaceSettings,
 } from '../lib/agentSpaceSettings';
 import {
@@ -97,6 +98,10 @@ import {
   type AgentSpaceNavigationHistoryEntry,
   type AgentSpaceNavigationHistoryState,
 } from '../lib/agentSpaceNavigationHistory';
+import {
+  createAgentSpaceFileRevealPlan,
+  normalizeAgentSpaceFilePath,
+} from '../lib/agentSpaceFileReveal';
 import {
   commandFromShortcutEvent,
   createDoubleShiftDetector,
@@ -169,6 +174,11 @@ type PreviewViewState = {
   targetLine?: number;
   targetColumn?: number;
   targetNonce?: number;
+};
+
+type FileTreeRevealRequest = {
+  path: string;
+  nonce: number;
 };
 
 type AgentContextMenuItem = {
@@ -407,18 +417,35 @@ function FileTreeNode({
   depth,
   onOpenFile,
   onFileContextMenu,
+  currentPath,
+  revealTargetPath,
+  revealAncestorPaths,
+  revealNonce,
 }: {
   entry: FileEntry;
   spaceId: number;
   depth: number;
   onOpenFile: (path: string, name: string) => void;
   onFileContextMenu: (event: React.MouseEvent<HTMLElement>, entry: FileEntry) => void;
+  currentPath: string;
+  revealTargetPath: string;
+  revealAncestorPaths: ReadonlySet<string>;
+  revealNonce: number;
 }) {
   const [open, setOpen] = useState(depth === 0);
   const [loaded, setLoaded] = useState(false);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const fileRef = useRef<HTMLAnchorElement | null>(null);
+  const entryPath = normalizeAgentSpaceFilePath(entry.rel_path || '');
+  const isCurrentFile = entry.kind !== 'dir' && !!currentPath && entryPath === currentPath;
+  const shouldExpandForReveal = entry.kind === 'dir' && !!revealTargetPath && revealAncestorPaths.has(entryPath);
+  const shouldScrollToReveal = entry.kind !== 'dir' && !!revealTargetPath && entryPath === revealTargetPath;
+
+  useEffect(() => {
+    if (shouldExpandForReveal) setOpen(true);
+  }, [revealNonce, shouldExpandForReveal]);
 
   useEffect(() => {
     if (entry.kind !== 'dir' || !open || loaded) return;
@@ -443,6 +470,17 @@ function FileTreeNode({
     };
   }, [entry.kind, entry.rel_path, loaded, open, spaceId]);
 
+  useEffect(() => {
+    if (!shouldScrollToReveal || !fileRef.current) return;
+    const scroll = () => fileRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const frame = window.requestAnimationFrame(scroll);
+    const timeout = window.setTimeout(scroll, 80);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [revealNonce, shouldScrollToReveal]);
+
   const marginLeft = `${Math.max(0, Math.min(depth, 16)) * 12}px`;
   if (entry.kind === 'dir') {
     return (
@@ -452,15 +490,42 @@ function FileTreeNode({
         {error ? <div className="muted">{error}</div> : null}
         {loaded && !entries.length ? <div className="muted">—</div> : null}
         {entries.map((child) => (
-          <FileTreeNode key={`${child.kind}:${child.rel_path}`} entry={child} spaceId={spaceId} depth={depth + 1} onOpenFile={onOpenFile} onFileContextMenu={onFileContextMenu} />
+          <FileTreeNode
+            key={`${child.kind}:${child.rel_path}`}
+            entry={child}
+            spaceId={spaceId}
+            depth={depth + 1}
+            onOpenFile={onOpenFile}
+            onFileContextMenu={onFileContextMenu}
+            currentPath={currentPath}
+            revealTargetPath={revealTargetPath}
+            revealAncestorPaths={revealAncestorPaths}
+            revealNonce={revealNonce}
+          />
         ))}
       </details>
     );
   }
   return (
     <a
+      ref={fileRef}
       href="#"
-      style={{ display: 'block', padding: '2px 0', marginLeft }}
+      aria-current={isCurrentFile ? 'true' : undefined}
+      data-agent-space-file-path={entryPath}
+      style={{
+        display: 'block',
+        padding: '2px 6px',
+        marginLeft,
+        borderRadius: 6,
+        color: 'inherit',
+        textDecoration: 'none',
+        overflowWrap: 'anywhere',
+        ...(isCurrentFile ? {
+          background: 'color-mix(in srgb, var(--ring) 18%, transparent)',
+          boxShadow: 'inset 2px 0 0 var(--ring)',
+          color: 'var(--foreground)',
+        } : {}),
+      }}
       onClick={(event) => {
         event.preventDefault();
         onOpenFile(entry.rel_path || '', entry.name || '');
@@ -476,19 +541,39 @@ function FileTree({
   spaceId,
   onOpenFile,
   onFileContextMenu,
+  currentPath,
+  revealRequest,
 }: {
   spaceId: number;
   onOpenFile: (path: string, name: string) => void;
   onFileContextMenu: (event: React.MouseEvent<HTMLElement>, entry: FileEntry) => void;
+  currentPath: string;
+  revealRequest: FileTreeRevealRequest | null;
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const rootEntry = useMemo<FileEntry>(() => ({ name: 'workspace', rel_path: '', kind: 'dir' }), [reloadKey]);
+  const currentFilePath = useMemo(() => normalizeAgentSpaceFilePath(currentPath), [currentPath]);
+  const revealPlan = useMemo(() => createAgentSpaceFileRevealPlan(revealRequest?.path || ''), [revealRequest?.path]);
+  const revealAncestorPaths = useMemo(() => new Set(revealPlan?.ancestorPaths || []), [revealPlan]);
+  const revealTargetPath = revealPlan?.targetPath || '';
+  const revealNonce = revealRequest?.nonce || 0;
   return (
     <div>
       <button type="button" className="btn-ghost" style={{ marginBottom: 8 }} onClick={() => setReloadKey((value) => value + 1)}>
         Refresh
       </button>
-      <FileTreeNode key={reloadKey} entry={rootEntry} spaceId={spaceId} depth={0} onOpenFile={onOpenFile} onFileContextMenu={onFileContextMenu} />
+      <FileTreeNode
+        key={reloadKey}
+        entry={rootEntry}
+        spaceId={spaceId}
+        depth={0}
+        onOpenFile={onOpenFile}
+        onFileContextMenu={onFileContextMenu}
+        currentPath={currentFilePath}
+        revealTargetPath={revealTargetPath}
+        revealAncestorPaths={revealAncestorPaths}
+        revealNonce={revealNonce}
+      />
     </div>
   );
 }
@@ -742,6 +827,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const terminalApiRef = useRef<TerminalApi | null>(null);
   const previewSymbolContextRef = useRef<PreviewSymbolContext>(createEmptyPreviewSymbolContext());
   const navigationHistoryRef = useRef<AgentSpaceNavigationHistoryState>(EMPTY_AGENT_SPACE_NAVIGATION_HISTORY);
+  const fileRevealNonceRef = useRef(0);
   const doubleShiftRef = useRef(createDoubleShiftDetector());
   const shortcutPlatform = useMemo(() => currentShortcutPlatform(), []);
   const [contextMenu, setContextMenu] = useState<AgentContextMenuState | null>(null);
@@ -753,6 +839,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: false,
     error: '',
   }));
+  const [fileRevealRequest, setFileRevealRequest] = useState<FileTreeRevealRequest | null>(null);
   const [markdownSourceMode, setMarkdownSourceMode] = useState(false);
   const [settings, setSettings] = useState<AgentSpaceSettings>(() => loadAgentSpaceSettings());
   const [shortcuts, setShortcuts] = useState<AgentSpaceShortcutSettings>(() => loadAgentSpaceShortcuts());
@@ -892,6 +979,20 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     },
     [config.spaceId, currentNavigationEntry],
   );
+
+  const revealPreviewInFiles = useCallback(() => {
+    const path = normalizeAgentSpaceFilePath(preview.path);
+    if (!path) return;
+
+    fileRevealNonceRef.current += 1;
+    setFileRevealRequest({ path, nonce: fileRevealNonceRef.current });
+
+    if (!settings.showFiles) {
+      const next = saveAgentSpaceSettings({ ...settings, showFiles: true }, 'agent-space-preview-reveal');
+      setSettings(next);
+      terminalApiRef.current?.applyAgentSpaceSettings?.(next);
+    }
+  }, [preview.path, settings]);
 
   const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
   const findResults = useMemo(() => flattenCodeSearchGroups(findInFiles.groups), [findInFiles.groups]);
@@ -1794,7 +1895,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
               </div>
               <div className="divider" />
               <div ref={filesPaneRef} className="col-scroll pad" tabIndex={-1} style={{ flex: '1 1 auto', minHeight: 0, height: 'auto', padding: 12, fontSize: `${settings.filesFontSize}px` }}>
-                <FileTree spaceId={config.spaceId} onOpenFile={openPreview} onFileContextMenu={handleFileContextMenu} />
+                <FileTree
+                  spaceId={config.spaceId}
+                  onOpenFile={openPreview}
+                  onFileContextMenu={handleFileContextMenu}
+                  currentPath={preview.path}
+                  revealRequest={fileRevealRequest}
+                />
               </div>
             </div>
           </div>
@@ -1815,7 +1922,27 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
             <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               <div className="pad" style={{ padding: 14, flex: '0 0 auto' }} onContextMenu={(event) => handlePreviewContextMenu(event, { allowSelection: false })}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                  <div className="muted" style={{ fontSize: 12 }}>{preview.name || '—'}</div>
+                  <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+                    {preview.path ? (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className="muted"
+                        title="Double-click to reveal in FILES"
+                        style={{ display: 'block', fontSize: 12, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderRadius: 4, outlineOffset: 2 }}
+                        onDoubleClick={revealPreviewInFiles}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Enter' && event.key !== ' ') return;
+                          event.preventDefault();
+                          revealPreviewInFiles();
+                        }}
+                      >
+                        {preview.name || preview.path}
+                      </span>
+                    ) : (
+                      <div className="muted" style={{ fontSize: 12 }}>—</div>
+                    )}
+                  </div>
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flex: '0 0 auto' }}>
                     {previewIsMarkdown && preview.path ? (
                       <button
