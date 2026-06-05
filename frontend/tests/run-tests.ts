@@ -3,6 +3,7 @@ import './fileReferences.test.js';
 import './agentSpaceSettings.test.js';
 import './agentSpaceShortcuts.test.js';
 import './ideaKeymap.test.js';
+import './agentSpaceOpenFile.test.js';
 import './agentSpaceSearch.test.js';
 import './agentSpaceReferences.test.js';
 import './agentSpaceDefinitionResults.test.js';

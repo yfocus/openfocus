@@ -356,6 +356,14 @@ const tests: TestCase[] = [
         'find_in_files',
       );
       assertEqual(
+        commandFromShortcutEvent(keyEvent('o', { code: 'KeyO', metaKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'mac', detector, undefined, 1450),
+        'open_file',
+      );
+      assertEqual(
+        commandFromShortcutEvent(keyEvent('o', { code: 'KeyO', ctrlKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1475),
+        'open_file',
+      );
+      assertEqual(
         commandFromShortcutEvent(keyEvent('1', { code: 'Digit1', altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1500),
         'focus_files',
       );
@@ -379,6 +387,7 @@ const tests: TestCase[] = [
         commandFromShortcutEvent(keyEvent('ArrowRight', { code: 'ArrowRight', ctrlKey: true, altKey: true }), DEFAULT_AGENT_SPACE_SHORTCUTS, 'other', detector, undefined, 1900),
         'navigation_forward',
       );
+      assertEqual(isAgentSpaceShortcutCommandImplemented('open_file'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_in_files'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('go_to_definition'), true);
       assertEqual(isAgentSpaceShortcutCommandImplemented('find_usages'), true);

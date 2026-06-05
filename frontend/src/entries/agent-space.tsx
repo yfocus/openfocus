@@ -20,7 +20,7 @@ import { python } from '@codemirror/lang-python';
 import { rust } from '@codemirror/lang-rust';
 import { sql } from '@codemirror/lang-sql';
 import { xml } from '@codemirror/lang-xml';
-import { listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
+import { listFilePaths, listFiles, rawFileUrl, readFile } from '../api/agentSpaces';
 import {
   findCodeDefinition,
   findCodeReferences,
@@ -73,6 +73,13 @@ import {
   shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
 import {
+  filterOpenFileEntries,
+  normalizeOpenFileEntries,
+  openAgentSpaceFileMatch,
+  openFileOverlayStatusText,
+  type AgentSpaceOpenFileEntry,
+} from '../lib/agentSpaceOpenFile';
+import {
   codeReferenceBackendLabel,
   codeReferenceDrawerTitle,
   codeReferenceNoResultsMessage,
@@ -112,6 +119,7 @@ import {
   createDoubleShiftDetector,
   currentShortcutPlatform,
   findActiveTerminalIframe,
+  isTerminalShortcutTarget,
   shouldIgnoreAgentSpaceShortcut,
   shouldRunPreviewCodeShortcut,
   shouldRunPreviewGoToDefinitionShortcut,
@@ -207,6 +215,19 @@ type SearchEverywhereState = {
   error: string;
   backend: CodeNavigationBackend | '';
   groups: CodeSearchResultGroup[];
+  selectedIndex: number;
+};
+
+type OpenFileState = {
+  open: boolean;
+  query: string;
+  loading: boolean;
+  loaded: boolean;
+  error: string;
+  files: AgentSpaceOpenFileEntry[];
+  total: number;
+  truncated: boolean;
+  cacheHit: boolean;
   selectedIndex: number;
 };
 
@@ -843,6 +864,18 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     groups: [],
     selectedIndex: -1,
   }));
+  const [openFile, setOpenFile] = useState<OpenFileState>(() => ({
+    open: false,
+    query: '',
+    loading: false,
+    loaded: false,
+    error: '',
+    files: [],
+    total: 0,
+    truncated: false,
+    cacheHit: false,
+    selectedIndex: -1,
+  }));
   const [findInFiles, setFindInFiles] = useState<FindInFilesState>(() => ({
     open: false,
     query: '',
@@ -877,10 +910,12 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     selectedIndex: -1,
   }));
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const openFileInputRef = useRef<HTMLInputElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const definitionDialogRef = useRef<HTMLDivElement | null>(null);
   const referencesDialogRef = useRef<HTMLDivElement | null>(null);
   const searchRequestIdRef = useRef(0);
+  const openFileRequestIdRef = useRef(0);
   const findRequestIdRef = useRef(0);
   const definitionRequestIdRef = useRef(0);
   const referencesRequestIdRef = useRef(0);
@@ -984,6 +1019,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   }, [preview.path, settings]);
 
   const searchResults = useMemo(() => flattenCodeSearchGroups(searchEverywhere.groups), [searchEverywhere.groups]);
+  const openFileResults = useMemo(
+    () => filterOpenFileEntries(openFile.files, openFile.query, 100),
+    [openFile.files, openFile.query],
+  );
   const findResults = useMemo(() => flattenCodeSearchGroups(findInFiles.groups), [findInFiles.groups]);
   const referenceResults = useMemo(() => flattenCodeReferenceGroups(referencesDrawer.groups), [referencesDrawer.groups]);
 
@@ -995,6 +1034,56 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   const closeSearchEverywhere = useCallback(() => {
     searchRequestIdRef.current += 1;
     setSearchEverywhere((state) => ({ ...state, open: false }));
+  }, []);
+
+  const fetchOpenFileList = useCallback(
+    (refresh = false) => {
+      const requestId = openFileRequestIdRef.current + 1;
+      openFileRequestIdRef.current = requestId;
+      setOpenFile((state) => ({ ...state, loading: true, error: '' }));
+      listFilePaths(config.spaceId, refresh)
+        .then((response) => {
+          if (openFileRequestIdRef.current !== requestId) return;
+          const files = normalizeOpenFileEntries(response.files, response.paths);
+          setOpenFile((state) => ({
+            ...state,
+            loading: false,
+            loaded: true,
+            error: '',
+            files,
+            total: Number(response.total || files.length),
+            truncated: !!response.truncated,
+            cacheHit: !!response.cache?.hit,
+            selectedIndex: files.length ? 0 : -1,
+          }));
+        })
+        .catch((err) => {
+          if (openFileRequestIdRef.current !== requestId) return;
+          setOpenFile((state) => ({
+            ...state,
+            loading: false,
+            loaded: true,
+            error: `Open File failed: ${err instanceof Error ? err.message : String(err)}`,
+            files: [],
+            total: 0,
+            truncated: false,
+            cacheHit: false,
+            selectedIndex: -1,
+          }));
+        });
+    },
+    [config.spaceId],
+  );
+
+  const openOpenFile = useCallback(() => {
+    setOpenFile((state) => ({ ...state, open: true, query: '', selectedIndex: state.files.length ? 0 : -1 }));
+    fetchOpenFileList(false);
+    window.setTimeout(() => openFileInputRef.current?.focus(), 0);
+  }, [fetchOpenFileList]);
+
+  const closeOpenFile = useCallback(() => {
+    openFileRequestIdRef.current += 1;
+    setOpenFile((state) => ({ ...state, open: false, loading: false }));
   }, []);
 
   const openFindInFiles = useCallback(() => {
@@ -1013,6 +1102,15 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       if (opened && closeAfterOpen) closeSearchEverywhere();
     },
     [closeSearchEverywhere, openPreview],
+  );
+
+  const activateOpenFileResult = useCallback(
+    async (result: typeof openFileResults[number] | null | undefined) => {
+      const opened = await openAgentSpaceFileMatch(result, openPreview);
+      if (opened) closeOpenFile();
+      return opened;
+    },
+    [closeOpenFile, openPreview],
   );
 
   const activateFindResult = useCallback(
@@ -1243,6 +1341,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   }, [config.spaceId, searchEverywhere.open, searchEverywhere.query]);
 
   useEffect(() => {
+    if (!openFile.open) return;
+    setOpenFile((state) => ({
+      ...state,
+      selectedIndex: openFileResults.length ? clamp(state.selectedIndex, 0, openFileResults.length - 1) : -1,
+    }));
+  }, [openFile.open, openFile.query, openFileResults.length]);
+
+  useEffect(() => {
     if (!findInFiles.open) return;
     const query = findInFiles.query.trim();
     if (!shouldRunCodeSearchQuery(query)) {
@@ -1466,6 +1572,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         openSearchEverywhere();
         return;
       }
+      if (command === 'open_file') {
+        openOpenFile();
+        return;
+      }
       if (command === 'find_in_files') {
         openFindInFiles();
         return;
@@ -1499,7 +1609,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         return;
       }
     },
-    [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openSearchEverywhere, runFindUsages, runGoToDefinition],
+    [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openOpenFile, openSearchEverywhere, runFindUsages, runGoToDefinition],
   );
 
   const hasPreviewTextSelection = useCallback((): boolean => {
@@ -1540,6 +1650,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       };
       const isGoToDefinitionShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_definition');
       const isFindUsagesShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'find_usages');
+      const isOpenFileShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'open_file');
 
       if (isGoToDefinitionShortcut) {
         if (!shouldRunPreviewGoToDefinitionShortcut(guardOptions)) return;
@@ -1554,6 +1665,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         event.preventDefault();
         event.stopPropagation();
         runShortcutCommand('find_usages');
+        return;
+      }
+
+      if (isOpenFileShortcut) {
+        if (isTerminalShortcutTarget(event.target, terminalRef.current) || isTerminalShortcutTarget(document.activeElement, terminalRef.current)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        runShortcutCommand('open_file');
         return;
       }
 
@@ -1836,6 +1955,15 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     loading: searchEverywhere.loading,
     resultCount: searchResults.length,
   });
+  const openFileStatusText = openFileOverlayStatusText({
+    error: openFile.error,
+    loading: openFile.loading,
+    filesLoaded: openFile.loaded,
+    resultCount: openFileResults.length,
+    total: openFile.total,
+    truncated: openFile.truncated,
+    cacheHit: openFile.cacheHit,
+  });
   const findBackendText = !findInFiles.error && findInFiles.completed && !findInFiles.loading
     ? codeSearchBackendLabel(findInFiles.backend)
     : '';
@@ -1946,6 +2074,16 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                         <span aria-hidden="true">{markdownSourceMode ? '#' : '</>'}</span>
                       </button>
                     ) : null}
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      title="Open File"
+                      aria-label="Open File"
+                      style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 16, lineHeight: 1 }}
+                      onClick={openOpenFile}
+                    >
+                      <span aria-hidden="true">⌘</span>
+                    </button>
                     <button
                       type="button"
                       className="btn-ghost"
@@ -2145,6 +2283,137 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                   </div>
                 ));
               })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {openFile.open ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Open File"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.46)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '8vh 16px 16px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeOpenFile();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeOpenFile();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setOpenFile((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, openFileResults.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = openFileResults[openFile.selectedIndex] || null;
+              void activateOpenFileResult(selected);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(760px, 100%)',
+              maxHeight: '78vh',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: 10, borderBottom: '1px solid rgba(0, 229, 255, 0.14)', display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                ref={openFileInputRef}
+                value={openFile.query}
+                placeholder="Open file by path"
+                aria-label="Open file path"
+                style={{
+                  minWidth: 0,
+                  flex: '1 1 auto',
+                  boxSizing: 'border-box',
+                  border: '1px solid rgba(0, 229, 255, 0.24)',
+                  borderRadius: 6,
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  color: 'var(--text)',
+                  padding: '9px 10px',
+                  font: 'inherit',
+                  outline: 'none',
+                }}
+                onChange={(event) => setOpenFile((state) => ({ ...state, query: event.target.value, selectedIndex: 0 }))}
+              />
+              <button
+                type="button"
+                className="btn-ghost"
+                title="Rescan files"
+                aria-label="Rescan files"
+                disabled={openFile.loading}
+                style={{ flex: '0 0 auto', margin: 0, height: 36 }}
+                onClick={() => fetchOpenFileList(true)}
+              >
+                Rescan
+              </button>
+            </div>
+            {openFileStatusText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: openFileResults.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {openFile.loading ? <><span className="spin" /> </> : null}
+                  {openFileStatusText}
+                </span>
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: openFileResults.length ? '6px 0' : 0 }}>
+              {openFileResults.map((result, index) => {
+                const selected = index === openFile.selectedIndex;
+                return (
+                  <button
+                    key={`${result.file.path}:${index}`}
+                    type="button"
+                    style={{
+                      width: '100%',
+                      display: 'block',
+                      textAlign: 'left',
+                      border: 0,
+                      borderRadius: 0,
+                      background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                      color: 'var(--text)',
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={() => setOpenFile((state) => ({ ...state, selectedIndex: index }))}
+                    onClick={() => activateOpenFileResult(result)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {result.file.name}
+                      </span>
+                      <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                        {result.file.size === undefined ? '' : `${Math.ceil(result.file.size / 1024)} KB`}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {result.file.path}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

@@ -127,6 +127,7 @@ const tests: TestCase[] = [
         AGENT_SPACE_SHORTCUT_COMMANDS.map((command) => command.id),
         [
           'search_everywhere',
+          'open_file',
           'find_in_files',
           'go_to_definition',
           'find_usages',
@@ -138,6 +139,8 @@ const tests: TestCase[] = [
         ],
       );
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'search_everywhere', 'mac'), 'mac'), 'Double Shift');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'open_file', 'mac'), 'mac'), 'Cmd+O');
+      assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'open_file', 'other'), 'other'), 'Ctrl+O');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_in_files', 'mac'), 'mac'), 'Cmd+Shift+F');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_in_files', 'other'), 'other'), 'Ctrl+Shift+F');
       assertEqual(formatShortcutBinding(resolveShortcutBinding(DEFAULT_AGENT_SPACE_SHORTCUTS, 'find_usages', 'mac'), 'mac'), 'Option+F7');

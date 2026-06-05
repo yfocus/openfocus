@@ -11,6 +11,7 @@ import {
 
 export const AGENT_SPACE_IMPLEMENTED_COMMANDS: AgentSpaceShortcutCommandId[] = [
   'search_everywhere',
+  'open_file',
   'find_in_files',
   'go_to_definition',
   'find_usages',
