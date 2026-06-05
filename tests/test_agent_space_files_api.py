@@ -263,6 +263,34 @@ def test_agent_space_files_list_read_and_raw_preview_via_grpc(tmp_path):
                 assert r.status_code == 200
                 assert r.headers.get("content-type", "").startswith("image/png")
                 assert r.content[:8] == _PNG_1x1[:8]
+
+                r = await client.get(f"/api/agent_spaces/{space_id}/files/paths")
+                assert r.status_code == 200
+                body = r.json()
+                assert body["ok"] is True
+                assert {"README.md", "hello.py", "img.png", "sub/a.txt"}.issubset(
+                    set(body["paths"])
+                )
+                assert body["total"] >= 4
+                assert body["truncated"] is False
+                assert body["cache"]["hit"] is False
+
+                (ws / "later.txt").write_text("new", encoding="utf-8")
+                r = await client.get(f"/api/agent_spaces/{space_id}/files/paths")
+                assert r.status_code == 200
+                cached_body = r.json()
+                assert cached_body["cache"]["hit"] is True
+                assert "later.txt" not in set(cached_body["paths"])
+
+                r = await client.get(
+                    f"/api/agent_spaces/{space_id}/files/paths",
+                    params={"refresh": "true"},
+                )
+                assert r.status_code == 200
+                refreshed_body = r.json()
+                assert refreshed_body["cache"]["hit"] is False
+                assert refreshed_body["cache"]["refresh"] is True
+                assert "later.txt" in set(refreshed_body["paths"])
         finally:
             stop.set()
             await asyncio.wait_for(comp_task, timeout=5.0)

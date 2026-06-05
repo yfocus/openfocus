@@ -23,6 +23,8 @@ ownership state:
 - AgentSpace prompt catalog list, management ordering, create/update, enabled
   toggles, auto-enabled toggles, deletion, normalization, validation, and stable
   web-adapter payloads
+- AgentSpace web/API adapters expose workspace file list/read/raw and file path
+  list endpoints through the Companion domain file helpers
 
 ## Boundaries
 
@@ -40,6 +42,9 @@ ownership state:
 - Companion gRPC calls remain infrastructure glue. Routes pass a runtime resolver
   into the workspace release use case; the domain does not know the global
   Companion registry.
+- AgentSpace file path cache traversal and cache invalidation belong to the
+  Companion domain. AgentSpace routes only parse HTTP query parameters and map
+  Companion domain errors to HTTP responses.
 - AgentSession start/terminate use cases receive a small runtime port with
   `request_agent_start(...)` and `request_agent_terminate(...)`. The domain does
   not know `COMPANION_GRPC`, Companion registry lookup, HTTP status codes,

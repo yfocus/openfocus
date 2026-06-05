@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,14 +36,57 @@ class _FakeCommandPort:
         *,
         choose_path: str = "/tmp/workspace",
         files_error: str | None = None,
+        files: dict[str, str | bytes] | None = None,
+        list_errors: set[str] | None = None,
+        extra_entries_by_dir: dict[str, list[Any]] | None = None,
     ) -> None:
         self.choose_path = choose_path
         self.files_error = files_error
+        self.files = {_clean_rel(path): value for path, value in (files or {}).items()}
+        self.list_errors = {_clean_rel(path) for path in (list_errors or set())}
+        self.extra_entries_by_dir = {
+            _clean_rel(path): list(entries)
+            for path, entries in (extra_entries_by_dir or {}).items()
+        }
         self.calls: list[str] = []
 
     async def request_choose_directory(self, *, timeout_seconds: float = 30.0) -> str:
         self.calls.append(f"choose_directory:{timeout_seconds}")
         return self.choose_path
+
+    async def request_files_list(
+        self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0
+    ) -> Any:
+        rel = _clean_rel(rel_path)
+        self.calls.append(f"files_list:{root_path}:{rel}:{timeout_seconds}")
+        if self.files_error is not None:
+            raise CompanionGrpcError(self.files_error)
+        if rel in self.list_errors:
+            raise CompanionGrpcError("not a directory")
+        prefix = f"{rel}/" if rel else ""
+        names: set[tuple[str, str]] = set()
+        for path in self.files:
+            if prefix and not path.startswith(prefix):
+                continue
+            rest = path[len(prefix) :]
+            if not rest:
+                continue
+            head = rest.split("/", 1)[0]
+            child = f"{prefix}{head}" if prefix else head
+            kind = "directory" if "/" in rest else "file"
+            names.add((child, kind))
+        entries = [
+            SimpleNamespace(
+                name=PurePosixPath(child).name,
+                rel_path=child,
+                kind=kind,
+                size=len(self.files.get(child, b"")),
+                mtime=0.0,
+            )
+            for child, kind in sorted(names)
+        ]
+        entries.extend(self.extra_entries_by_dir.get(rel, []))
+        return SimpleNamespace(path=rel, entries=entries)
 
     async def request_files_read(
         self, *, root_path: str, rel_path: str, max_bytes: int
@@ -53,6 +97,25 @@ class _FakeCommandPort:
         return SimpleNamespace(
             path=rel_path, content="", truncated=False, mime="text/plain"
         )
+
+
+def _clean_rel(path: str) -> str:
+    raw = str(path or "").replace("\\", "/").strip()
+    if raw.startswith("/") or raw.startswith("../") or "/../" in raw or raw == "..":
+        raise CompanionGrpcError("path traversal rejected")
+    return raw.strip("/")
+
+
+def _fake_entry(
+    rel_path: str, *, kind: str = "file", size: int = 0, mtime: float = 0.0
+) -> Any:
+    return SimpleNamespace(
+        name=PurePosixPath(rel_path).name,
+        rel_path=rel_path,
+        kind=kind,
+        size=size,
+        mtime=mtime,
+    )
 
 
 def _read_audit_text(memory_root):
@@ -345,6 +408,143 @@ def test_read_space_file_maps_command_port_file_errors_to_domain_errors(
     assert exc_info.value.detail == expected_detail
     assert len(port.calls) == 1
     assert port.calls[0].startswith(f"files_read:{tmp_path}:README.md:")
+
+
+def test_list_space_file_paths_recurses_caches_and_refreshes(tmp_path) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeCommandPort(
+            files={
+                "README.md": "hello",
+                "src/app.py": "print('hi')",
+                "src/nested/util.py": "VALUE = 1",
+            }
+        )
+        server = _GrpcServer({companion_id: port})
+
+        first = await companion_service.list_space_file_paths(
+            server, space_id=space_id
+        )
+        assert first["ok"] is True
+        assert first["paths"] == [
+            "README.md",
+            "src/app.py",
+            "src/nested/util.py",
+        ]
+        assert first["files"][0]["name"] == "README.md"
+        assert first["total"] == 3
+        assert first["truncated"] is False
+        assert first["cache"]["hit"] is False
+
+        calls_after_first = list(port.calls)
+        port.files["later.py"] = "new"
+
+        cached = await companion_service.list_space_file_paths(
+            server, space_id=space_id
+        )
+        assert cached["paths"] == first["paths"]
+        assert cached["cache"]["hit"] is True
+        assert port.calls == calls_after_first
+
+        refreshed = await companion_service.list_space_file_paths(
+            server, space_id=space_id, refresh=True
+        )
+        assert refreshed["cache"]["hit"] is False
+        assert refreshed["cache"]["refresh"] is True
+        assert "later.py" in refreshed["paths"]
+
+    asyncio.run(_run())
+
+
+def test_list_space_file_paths_skips_unlistable_dirs_and_unsafe_entries(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeCommandPort(
+            files={"ok.py": "ok"},
+            list_errors={"broken"},
+            extra_entries_by_dir={
+                "": [
+                    _fake_entry("../outside.py"),
+                    _fake_entry("/abs.py"),
+                    _fake_entry("C:/secret.py"),
+                    _fake_entry("broken", kind="directory"),
+                    _fake_entry("pipe", kind="socket"),
+                ]
+            },
+        )
+
+        result = await companion_service.list_space_file_paths(
+            _GrpcServer({companion_id: port}), space_id=space_id
+        )
+
+        assert result["paths"] == ["ok.py"]
+        assert result["truncated"] is False
+        assert result["cache"]["skipped_dirs"] >= 1
+        assert result["cache"]["skipped_entries"] >= 4
+
+    asyncio.run(_run())
+
+
+def test_list_space_file_paths_skips_entries_with_missing_or_empty_kind(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeCommandPort(
+            files={"ok.py": "ok"},
+            extra_entries_by_dir={
+                "": [
+                    _fake_entry("empty-kind.py", kind=""),
+                    SimpleNamespace(
+                        name="missing-kind.py",
+                        rel_path="missing-kind.py",
+                        size=0,
+                        mtime=0.0,
+                    ),
+                ]
+            },
+        )
+
+        result = await companion_service.list_space_file_paths(
+            _GrpcServer({companion_id: port}), space_id=space_id
+        )
+
+        assert result["paths"] == ["ok.py"]
+        assert result["cache"]["skipped_entries"] == 2
+
+    asyncio.run(_run())
+
+
+def test_list_space_file_paths_truncates_without_scanning_remaining_dirs(
+    monkeypatch, tmp_path
+) -> None:
+    async def _run() -> None:
+        monkeypatch.setattr(companion_service, "FILE_PATH_LIST_CACHE_MAX_FILES", 1)
+        monkeypatch.setattr(companion_service, "FILE_PATH_LIST_CACHE_MAX_DIRS", 100)
+        monkeypatch.setattr(
+            companion_service, "FILE_PATH_LIST_CACHE_MAX_ENTRIES", 100
+        )
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeCommandPort(
+            files={
+                "a/one.py": "one",
+                "b/two.py": "two",
+                "c/three.py": "three",
+            }
+        )
+
+        result = await companion_service.list_space_file_paths(
+            _GrpcServer({companion_id: port}), space_id=space_id, refresh=True
+        )
+
+        assert result["total"] == 1
+        assert result["truncated"] is True
+        rels = [call.rsplit(":", 2)[1] for call in port.calls]
+        assert rels == ["", "a"]
+
+    asyncio.run(_run())
 
 
 @pytest.mark.parametrize(

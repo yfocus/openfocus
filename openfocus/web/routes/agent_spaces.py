@@ -364,6 +364,15 @@ def create_router(
         except companion_service.CompanionUseCaseError as exc:
             raise _companion_http_error(exc) from exc
 
+    @router.get("/api/agent_spaces/{space_id}/files/paths")
+    async def agent_space_files_paths(space_id: int, refresh: bool = False) -> dict:
+        try:
+            return await companion_service.list_space_file_paths(
+                grpc_server, space_id=space_id, refresh=refresh
+            )
+        except companion_service.CompanionUseCaseError as exc:
+            raise _companion_http_error(exc) from exc
+
     @router.get("/api/agent_spaces/{space_id}/files/read")
     async def agent_space_files_read(space_id: int, path: str) -> dict:
         try:

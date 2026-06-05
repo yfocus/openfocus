@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from threading import RLock
 from typing import Any, NoReturn, Protocol
 
 from ...companion.grpc import CompanionGrpcError
@@ -21,6 +24,12 @@ COMPANION_STATUSES = frozenset(
         COMPANION_STATUS_OFFLINE,
     }
 )
+
+FILE_PATH_LIST_CACHE_TTL_SECONDS = 30.0
+FILE_PATH_LIST_CACHE_MAX_FILES = 5000
+FILE_PATH_LIST_CACHE_MAX_DIRS = 1000
+FILE_PATH_LIST_CACHE_MAX_ENTRIES = 20000
+FILE_PATH_LIST_CACHE_MAX_CACHE_ENTRIES = 128
 
 
 class CompanionUseCaseError(Exception):
@@ -80,6 +89,33 @@ class SelectedCompanion:
 class CompanionRawFileResult:
     data: bytes
     mime: str
+
+
+@dataclass(frozen=True)
+class _FilePathCacheItem:
+    path: str
+    name: str
+    size: int
+    mtime: float
+
+
+@dataclass(frozen=True)
+class _FilePathCacheEntry:
+    files: tuple[_FilePathCacheItem, ...]
+    truncated: bool
+    generated_at: dt.datetime
+    monotonic_created_at: float
+    max_files: int
+    max_dirs: int
+    max_entries: int
+    scanned_dirs: int
+    scanned_entries: int
+    skipped_dirs: int
+    skipped_entries: int
+
+
+_FILE_PATH_LIST_CACHE: dict[tuple[int, int, str], _FilePathCacheEntry] = {}
+_FILE_PATH_LIST_CACHE_LOCK = RLock()
 
 
 class CompanionCommandPort(Protocol):
@@ -493,6 +529,43 @@ async def list_space_files(grpc_server: Any, *, space_id: int, path: str = "") -
     return {"ok": True, "path": res.path, "entries": entries}
 
 
+async def list_space_file_paths(
+    grpc_server: Any, *, space_id: int, refresh: bool = False
+) -> dict:
+    space, companion = load_space_and_optional_companion(space_id)
+    conn = require_online(grpc_server, companion=companion)
+    root_path = str(space.root_path or "")
+    companion_id = int(getattr(companion, "id", 0) or 0)
+    key = (int(space_id), companion_id, root_path)
+    now = time.monotonic()
+
+    if not refresh:
+        with _FILE_PATH_LIST_CACHE_LOCK:
+            _evict_expired_file_path_cache_locked(now)
+            cached = _FILE_PATH_LIST_CACHE.get(key)
+        if cached is not None and _file_path_cache_is_fresh(cached, now):
+            return _file_path_cache_response(
+                cached, cache_hit=True, refresh=False, now=now
+            )
+
+    scanned = await _scan_space_file_paths(conn, root_path=root_path)
+    cache_now = time.monotonic()
+    max_cache_entries = max(1, int(FILE_PATH_LIST_CACHE_MAX_CACHE_ENTRIES))
+    with _FILE_PATH_LIST_CACHE_LOCK:
+        _evict_expired_file_path_cache_locked(cache_now)
+        if len(_FILE_PATH_LIST_CACHE) >= max_cache_entries:
+            oldest_key = min(
+                _FILE_PATH_LIST_CACHE,
+                key=lambda item: _FILE_PATH_LIST_CACHE[item].monotonic_created_at,
+            )
+            _FILE_PATH_LIST_CACHE.pop(oldest_key, None)
+        _FILE_PATH_LIST_CACHE[key] = scanned
+
+    return _file_path_cache_response(
+        scanned, cache_hit=False, refresh=bool(refresh), now=cache_now
+    )
+
+
 async def read_space_file(grpc_server: Any, *, space_id: int, path: str) -> dict:
     space, companion = load_space_and_optional_companion(space_id)
     conn = require_online(grpc_server, companion=companion)
@@ -531,3 +604,172 @@ async def raw_space_file(
     return CompanionRawFileResult(
         data=bytes(res.data), mime=(res.mime or "application/octet-stream")
     )
+
+
+def _file_path_cache_is_fresh(entry: _FilePathCacheEntry, now: float) -> bool:
+    age = max(0.0, float(now) - float(entry.monotonic_created_at))
+    return age <= float(FILE_PATH_LIST_CACHE_TTL_SECONDS)
+
+
+def _evict_expired_file_path_cache_locked(now: float) -> None:
+    expired = [
+        key
+        for key, entry in _FILE_PATH_LIST_CACHE.items()
+        if not _file_path_cache_is_fresh(entry, now)
+    ]
+    for key in expired:
+        _FILE_PATH_LIST_CACHE.pop(key, None)
+
+
+def _file_path_cache_response(
+    entry: _FilePathCacheEntry, *, cache_hit: bool, refresh: bool, now: float
+) -> dict:
+    age = max(0.0, float(now) - float(entry.monotonic_created_at))
+    files = [
+        {
+            "path": item.path,
+            "name": item.name,
+            "size": item.size,
+            "mtime": item.mtime,
+        }
+        for item in entry.files
+    ]
+    return {
+        "ok": True,
+        "files": files,
+        "paths": [item["path"] for item in files],
+        "total": len(files),
+        "truncated": bool(entry.truncated),
+        "cache": {
+            "hit": bool(cache_hit),
+            "refresh": bool(refresh),
+            "ttl_seconds": float(FILE_PATH_LIST_CACHE_TTL_SECONDS),
+            "age_seconds": round(age, 3),
+            "generated_at": entry.generated_at.isoformat(),
+            "max_files": int(entry.max_files),
+            "max_dirs": int(entry.max_dirs),
+            "max_entries": int(entry.max_entries),
+            "scanned_dirs": int(entry.scanned_dirs),
+            "scanned_entries": int(entry.scanned_entries),
+            "skipped_dirs": int(entry.skipped_dirs),
+            "skipped_entries": int(entry.skipped_entries),
+        },
+    }
+
+
+async def _scan_space_file_paths(conn: Any, *, root_path: str) -> _FilePathCacheEntry:
+    max_files = max(1, int(FILE_PATH_LIST_CACHE_MAX_FILES))
+    max_dirs = max(1, int(FILE_PATH_LIST_CACHE_MAX_DIRS))
+    max_entries = max(1, int(FILE_PATH_LIST_CACHE_MAX_ENTRIES))
+    stack = [""]
+    seen_dirs = {""}
+    seen_files: set[str] = set()
+    files: list[_FilePathCacheItem] = []
+    scanned_dirs = 0
+    scanned_entries = 0
+    skipped_dirs = 0
+    skipped_entries = 0
+    truncated = False
+
+    while stack and not truncated:
+        current = stack.pop()
+        if scanned_dirs >= max_dirs:
+            truncated = True
+            break
+        scanned_dirs += 1
+
+        try:
+            listed = await conn.request_files_list(
+                root_path=root_path,
+                rel_path=current,
+                timeout_seconds=10.0,
+            )
+        except CompanionGrpcError as exc:
+            if current == "":
+                raise_file_error(exc)
+            skipped_dirs += 1
+            continue
+
+        dir_candidates: list[str] = []
+        entries = sorted(
+            list(getattr(listed, "entries", []) or []),
+            key=lambda item: str(getattr(item, "rel_path", "") or ""),
+        )
+        for item in entries:
+            if scanned_entries >= max_entries:
+                truncated = True
+                break
+            scanned_entries += 1
+
+            rel_path = _safe_file_list_rel_path(
+                str(getattr(item, "rel_path", "") or "")
+            )
+            if not rel_path or rel_path == current:
+                skipped_entries += 1
+                continue
+
+            kind = str(getattr(item, "kind", "") or "").strip().lower()
+            if kind in {"dir", "directory", "folder"}:
+                if rel_path in seen_dirs:
+                    continue
+                if len(seen_dirs) >= max_dirs:
+                    truncated = True
+                    break
+                seen_dirs.add(rel_path)
+                dir_candidates.append(rel_path)
+                continue
+
+            if kind not in {"file", "regular"}:
+                skipped_entries += 1
+                continue
+
+            if rel_path in seen_files:
+                continue
+            seen_files.add(rel_path)
+            files.append(
+                _FilePathCacheItem(
+                    path=rel_path,
+                    name=PurePosixPath(rel_path).name,
+                    size=max(0, int(getattr(item, "size", 0) or 0)),
+                    mtime=float(getattr(item, "mtime", 0.0) or 0.0),
+                )
+            )
+            if len(files) >= max_files:
+                truncated = True
+                break
+
+        stack.extend(reversed(dir_candidates))
+
+    files.sort(key=lambda item: item.path)
+    return _FilePathCacheEntry(
+        files=tuple(files),
+        truncated=bool(truncated),
+        generated_at=utcnow(),
+        monotonic_created_at=time.monotonic(),
+        max_files=max_files,
+        max_dirs=max_dirs,
+        max_entries=max_entries,
+        scanned_dirs=scanned_dirs,
+        scanned_entries=scanned_entries,
+        skipped_dirs=skipped_dirs,
+        skipped_entries=skipped_entries,
+    )
+
+
+def _safe_file_list_rel_path(value: str) -> str:
+    raw = str(value or "").replace("\\", "/").strip()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if (
+        not raw
+        or "\x00" in raw
+        or raw.startswith("/")
+        or raw == "."
+        or raw == ".."
+        or (len(raw) >= 2 and raw[1] == ":")
+    ):
+        return ""
+    parts = [part for part in raw.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
