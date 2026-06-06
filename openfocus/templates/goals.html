@@ -118,6 +118,30 @@
       #dashboard .detail-inline-form{ display:flex; flex-direction:column; gap: 10px; }
       #dashboard .detail-inline-form[hidden]{ display:none !important; }
       #dashboard .detail-inline-view[hidden]{ display:none !important; }
+      #dashboard .dashboard-markdown{ color: var(--foreground); line-height:1.56; overflow-wrap:anywhere; }
+      #dashboard .dashboard-markdown :first-child{ margin-top:0; }
+      #dashboard .dashboard-markdown :last-child{ margin-bottom:0; }
+      #dashboard .dashboard-markdown h1,
+      #dashboard .dashboard-markdown h2,
+      #dashboard .dashboard-markdown h3,
+      #dashboard .dashboard-markdown h4,
+      #dashboard .dashboard-markdown h5,
+      #dashboard .dashboard-markdown h6{ color: var(--foreground); line-height:1.25; margin:1em 0 0.45em; }
+      #dashboard .dashboard-markdown h1{ font-size:1.5em; }
+      #dashboard .dashboard-markdown h2{ font-size:1.28em; }
+      #dashboard .dashboard-markdown h3{ font-size:1.12em; }
+      #dashboard .dashboard-markdown p,
+      #dashboard .dashboard-markdown ul,
+      #dashboard .dashboard-markdown ol,
+      #dashboard .dashboard-markdown pre{ margin:0.72em 0; }
+      #dashboard .dashboard-markdown ul,
+      #dashboard .dashboard-markdown ol{ padding-left:1.35em; }
+      #dashboard .dashboard-markdown li + li{ margin-top:0.28em; }
+      #dashboard .dashboard-markdown code{ font-family:var(--mono); font-size:0.92em; color:#e4e4e7; background:color-mix(in srgb, var(--muted-surface) 86%, transparent); border:1px solid var(--border); border-radius:5px; padding:0.06em 0.32em; }
+      #dashboard .dashboard-markdown pre{ padding:10px 12px; overflow:auto; border-radius:var(--radius); border:1px solid rgba(0,229,255,0.14); background:rgba(0,0,0,0.22); }
+      #dashboard .dashboard-markdown pre code{ display:block; padding:0; border:0; background:transparent; color:var(--text); white-space:pre; }
+      #dashboard .dashboard-markdown a{ color:#67e8f9; text-decoration:underline; text-underline-offset:3px; }
+      #dashboard .dashboard-markdown a:visited{ color:#a5b4fc; }
       #dashboard .detail-inline-form textarea,
       #dashboard .detail-inline-form input{ width:100%; }
       #dashboard .detail-inline-form textarea,
@@ -451,7 +475,7 @@
                     <div class="detail-sec" data-sec="basic">
                       <div class="sec-title">Basic</div>
                       <div class="sec-body">
-                        <div class="detail-inline-view" data-goal-basic-view style="white-space: pre-wrap;">{{ g.content or '—' }}</div>
+                        <div class="detail-inline-view dashboard-markdown" data-goal-basic-view>{{ g.content|dashboard_markdown }}</div>
                         <form method="post" action="/goals/{{ g.id }}/edit" id="inline-goal-edit-form-{{ g.id }}" class="detail-inline-form" data-inline-goal-form hidden>
                           <div class="detail-inline-field">
                             <label class="detail-inline-label" for="inline-goal-title-{{ g.id }}">Title</label>
@@ -632,7 +656,7 @@
                       <div class="detail-sec" data-sec="basic">
                         <div class="sec-title">Basic</div>
                         <div class="sec-body">
-                          <div class="detail-inline-view" data-task-basic-view style="white-space: pre-wrap;">{{ t.content or '—' }}</div>
+                          <div class="detail-inline-view dashboard-markdown" data-task-basic-view>{{ t.content|dashboard_markdown }}</div>
                           <form method="post" action="/tasks/{{ t.id }}/edit" id="inline-task-edit-form-{{ t.id }}" class="detail-inline-form" data-inline-task-form hidden>
                             <div class="detail-inline-field">
                               <label class="detail-inline-label" for="inline-task-title-{{ t.id }}">Title</label>

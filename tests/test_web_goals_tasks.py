@@ -316,6 +316,122 @@ async def test_goals_crud_and_task_flow(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_dashboard_basic_sections_render_markdown_safely_and_keep_edit_source():
+    from openfocus.app import app
+    from openfocus.db import session_scope
+    from openfocus.models import Goal, Task
+
+    goal_content = (
+        "## Goal Basic\n\n"
+        "- **Ship** dashboard Markdown\n"
+        "- Escape `<script>alert(1)</script>`"
+    )
+    task_content = (
+        "### Task Basic\n\n"
+        "1. Render *Markdown* safely\n\n"
+        "<script>alert(2)</script>"
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/goals",
+            data={
+                "title": "markdown goal",
+                "content": goal_content,
+                "due_date": (dt.date.today() + dt.timedelta(days=7)).isoformat(),
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        with session_scope() as s:
+            goal = s.query(Goal).order_by(Goal.id.desc()).first()
+            assert goal is not None
+            goal_id = int(goal.id)
+
+        r = await client.post(
+            f"/goals/{goal_id}/tasks",
+            data={"title": "markdown task", "content": task_content},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+        with session_scope() as s:
+            task = (
+                s.query(Task)
+                .filter(Task.goal_id == goal_id)
+                .order_by(Task.id.desc())
+                .first()
+            )
+            assert task is not None
+            task_public_id = task.public_id
+
+        r = await client.get(f"/goals?task={task_public_id}&goal={goal_id}")
+        assert r.status_code == 200
+
+        matched_goal = re.search(
+            rf'<template id="detail-goal-{goal_id}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
+        assert matched_goal is not None
+        goal_html = matched_goal.group("html")
+        matched_goal_basic = re.search(
+            r'<div class="detail-inline-view dashboard-markdown" data-goal-basic-view>(?P<html>.*?)</div>\s*<form',
+            goal_html,
+            re.S,
+        )
+        assert matched_goal_basic is not None
+        goal_basic = matched_goal_basic.group("html")
+        assert "<h2>Goal Basic</h2>" in goal_basic
+        assert "<li><strong>Ship</strong> dashboard Markdown</li>" in goal_basic
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in goal_basic
+        assert "<script>alert(1)</script>" not in goal_basic
+
+        goal_textarea = re.search(
+            r'<textarea id="inline-goal-content-[^"]+"[^>]*data-inline-goal-content>(?P<text>.*?)</textarea>',
+            goal_html,
+            re.S,
+        )
+        assert goal_textarea is not None
+        assert "## Goal Basic" in goal_textarea.group("text")
+        assert "- **Ship** dashboard Markdown" in goal_textarea.group("text")
+        assert "<h2>Goal Basic</h2>" not in goal_textarea.group("text")
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in goal_textarea.group("text")
+
+        matched_task = re.search(
+            rf'<template id="detail-task-{re.escape(task_public_id)}">(?P<html>.*?)</template>',
+            r.text,
+            re.S,
+        )
+        assert matched_task is not None
+        task_html = matched_task.group("html")
+        matched_task_basic = re.search(
+            r'<div class="detail-inline-view dashboard-markdown" data-task-basic-view>(?P<html>.*?)</div>\s*<form',
+            task_html,
+            re.S,
+        )
+        assert matched_task_basic is not None
+        task_basic = matched_task_basic.group("html")
+        assert "<h3>Task Basic</h3>" in task_basic
+        assert "<li>Render <em>Markdown</em> safely</li>" in task_basic
+        assert "&lt;script&gt;alert(2)&lt;/script&gt;" in task_basic
+        assert "<script>alert(2)</script>" not in task_basic
+
+        task_textarea = re.search(
+            r'<textarea id="inline-task-content-[^"]+"[^>]*data-inline-task-content>(?P<text>.*?)</textarea>',
+            task_html,
+            re.S,
+        )
+        assert task_textarea is not None
+        assert "### Task Basic" in task_textarea.group("text")
+        assert "1. Render *Markdown* safely" in task_textarea.group("text")
+        assert "<h3>Task Basic</h3>" not in task_textarea.group("text")
+        assert "&lt;script&gt;alert(2)&lt;/script&gt;" in task_textarea.group("text")
+
+
+@pytest.mark.anyio
 async def test_agent_space_view_embeds_full_agent_prefix():
     from openfocus.app import app
     from openfocus.db import session_scope

@@ -12,11 +12,13 @@ from fastapi.templating import Jinja2Templates
 from ...db import session_scope
 from ...domains.dashboard import read_model as dashboard_read_model
 from ...domains.goals import service as goal_service
+from ..markdown import register_dashboard_markdown_filter
 
 
 def create_router(
     *, templates: Jinja2Templates, release_agent_space: Callable[[str], Awaitable[dict]]
 ) -> APIRouter:
+    register_dashboard_markdown_filter(templates)
     router = APIRouter()
 
     @router.get("/", include_in_schema=False)
