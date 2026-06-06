@@ -24,6 +24,7 @@ import { listFilePaths, listFiles, rawFileUrl, readFile } from '../api/agentSpac
 import {
   findCodeDefinition,
   findCodeReferences,
+  getCodeSymbols,
   searchCode,
   type CodeNavigationBackend,
   type CodeReferenceResult,
@@ -72,6 +73,12 @@ import {
   openCodeSearchResult,
   shouldRunCodeSearchQuery,
 } from '../lib/agentSpaceSearch';
+import {
+  openWorkspaceSymbolResult,
+  symbolResultMetaLabel,
+  symbolResultPrimaryLabel,
+  workspaceSymbolOverlayStatusText,
+} from '../lib/agentSpaceSymbols';
 import {
   filterOpenFileEntries,
   normalizeOpenFileEntries,
@@ -228,6 +235,18 @@ type OpenFileState = {
   total: number;
   truncated: boolean;
   cacheHit: boolean;
+  selectedIndex: number;
+};
+
+type GoToSymbolState = {
+  open: boolean;
+  query: string;
+  loading: boolean;
+  completed: boolean;
+  status: string;
+  error: string;
+  backend: CodeNavigationBackend | '';
+  results: CodeSymbolResult[];
   selectedIndex: number;
 };
 
@@ -876,6 +895,17 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     cacheHit: false,
     selectedIndex: -1,
   }));
+  const [goToSymbol, setGoToSymbol] = useState<GoToSymbolState>(() => ({
+    open: false,
+    query: '',
+    loading: false,
+    completed: false,
+    status: '',
+    error: '',
+    backend: '',
+    results: [],
+    selectedIndex: -1,
+  }));
   const [findInFiles, setFindInFiles] = useState<FindInFilesState>(() => ({
     open: false,
     query: '',
@@ -911,11 +941,13 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   }));
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const openFileInputRef = useRef<HTMLInputElement | null>(null);
+  const symbolInputRef = useRef<HTMLInputElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const definitionDialogRef = useRef<HTMLDivElement | null>(null);
   const referencesDialogRef = useRef<HTMLDivElement | null>(null);
   const searchRequestIdRef = useRef(0);
   const openFileRequestIdRef = useRef(0);
+  const symbolRequestIdRef = useRef(0);
   const findRequestIdRef = useRef(0);
   const definitionRequestIdRef = useRef(0);
   const referencesRequestIdRef = useRef(0);
@@ -1023,6 +1055,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     () => filterOpenFileEntries(openFile.files, openFile.query, 100),
     [openFile.files, openFile.query],
   );
+  const symbolResults = useMemo(() => goToSymbol.results, [goToSymbol.results]);
   const findResults = useMemo(() => flattenCodeSearchGroups(findInFiles.groups), [findInFiles.groups]);
   const referenceResults = useMemo(() => flattenCodeReferenceGroups(referencesDrawer.groups), [referencesDrawer.groups]);
 
@@ -1086,6 +1119,16 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     setOpenFile((state) => ({ ...state, open: false, loading: false }));
   }, []);
 
+  const openGoToSymbol = useCallback(() => {
+    setGoToSymbol((state) => ({ ...state, open: true, query: '', completed: false, status: '', error: '', results: [], selectedIndex: -1 }));
+    window.setTimeout(() => symbolInputRef.current?.focus(), 0);
+  }, []);
+
+  const closeGoToSymbol = useCallback(() => {
+    symbolRequestIdRef.current += 1;
+    setGoToSymbol((state) => ({ ...state, open: false, loading: false }));
+  }, []);
+
   const openFindInFiles = useCallback(() => {
     setFindInFiles((state) => ({ ...state, open: true }));
     window.setTimeout(() => findInputRef.current?.focus(), 0);
@@ -1111,6 +1154,15 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       return opened;
     },
     [closeOpenFile, openPreview],
+  );
+
+  const activateSymbolResult = useCallback(
+    async (result: CodeSymbolResult | null | undefined) => {
+      const opened = await openWorkspaceSymbolResult(result, openPreview);
+      if (opened) closeGoToSymbol();
+      return opened;
+    },
+    [closeGoToSymbol, openPreview],
   );
 
   const activateFindResult = useCallback(
@@ -1349,6 +1401,49 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
   }, [openFile.open, openFile.query, openFileResults.length]);
 
   useEffect(() => {
+    if (!goToSymbol.open) return;
+    const query = goToSymbol.query.trim();
+    const requestId = symbolRequestIdRef.current + 1;
+    symbolRequestIdRef.current = requestId;
+    setGoToSymbol((state) => ({ ...state, loading: true, completed: false, status: '', error: '', backend: '' }));
+    const timer = window.setTimeout(() => {
+      getCodeSymbols(config.spaceId, { q: query, limit: 100 })
+        .then((response) => {
+          setGoToSymbol((state) => {
+            if (symbolRequestIdRef.current !== requestId) return state;
+            const results = Array.isArray(response.results) ? response.results : [];
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: response.truncated ? 'Partial results' : '',
+              error: '',
+              backend: response.backend || '',
+              results,
+              selectedIndex: results.length ? 0 : -1,
+            };
+          });
+        })
+        .catch((err) => {
+          setGoToSymbol((state) => {
+            if (symbolRequestIdRef.current !== requestId) return state;
+            return {
+              ...state,
+              loading: false,
+              completed: true,
+              status: '',
+              error: isCompanionOfflineSearchError(err) ? 'Companion offline' : `Symbol search failed: ${err instanceof Error ? err.message : String(err)}`,
+              backend: '',
+              results: [],
+              selectedIndex: -1,
+            };
+          });
+        });
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [config.spaceId, goToSymbol.open, goToSymbol.query]);
+
+  useEffect(() => {
     if (!findInFiles.open) return;
     const query = findInFiles.query.trim();
     if (!shouldRunCodeSearchQuery(query)) {
@@ -1576,6 +1671,10 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         openOpenFile();
         return;
       }
+      if (command === 'go_to_symbol') {
+        openGoToSymbol();
+        return;
+      }
       if (command === 'find_in_files') {
         openFindInFiles();
         return;
@@ -1609,7 +1708,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         return;
       }
     },
-    [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openOpenFile, openSearchEverywhere, runFindUsages, runGoToDefinition],
+    [focusAgentSpacePane, navigatePreviewBack, navigatePreviewForward, openFindInFiles, openGoToSymbol, openOpenFile, openSearchEverywhere, runFindUsages, runGoToDefinition],
   );
 
   const hasPreviewTextSelection = useCallback((): boolean => {
@@ -1651,6 +1750,7 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
       const isGoToDefinitionShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_definition');
       const isFindUsagesShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'find_usages');
       const isOpenFileShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'open_file');
+      const isGoToSymbolShortcut = shortcutEventMatchesCommand(event, shortcuts, shortcutPlatform, 'go_to_symbol');
 
       if (isGoToDefinitionShortcut) {
         if (!shouldRunPreviewGoToDefinitionShortcut(guardOptions)) return;
@@ -1673,6 +1773,14 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
         event.preventDefault();
         event.stopPropagation();
         runShortcutCommand('open_file');
+        return;
+      }
+
+      if (isGoToSymbolShortcut) {
+        if (isTerminalShortcutTarget(event.target, terminalRef.current) || isTerminalShortcutTarget(document.activeElement, terminalRef.current)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        runShortcutCommand('go_to_symbol');
         return;
       }
 
@@ -1964,6 +2072,16 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
     truncated: openFile.truncated,
     cacheHit: openFile.cacheHit,
   });
+  const symbolBackendText = !goToSymbol.error && goToSymbol.completed && !goToSymbol.loading
+    ? codeSearchBackendLabel(goToSymbol.backend)
+    : '';
+  const symbolStatusText = workspaceSymbolOverlayStatusText({
+    error: goToSymbol.error,
+    status: goToSymbol.status,
+    completed: goToSymbol.completed,
+    loading: goToSymbol.loading,
+    resultCount: symbolResults.length,
+  });
   const findBackendText = !findInFiles.error && findInFiles.completed && !findInFiles.loading
     ? codeSearchBackendLabel(findInFiles.backend)
     : '';
@@ -2083,6 +2201,16 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                       onClick={openOpenFile}
                     >
                       <span aria-hidden="true">⌘</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      title="Go to Symbol"
+                      aria-label="Go to Symbol"
+                      style={{ flex: '0 0 auto', width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0, fontSize: 15, lineHeight: 1 }}
+                      onClick={openGoToSymbol}
+                    >
+                      <span aria-hidden="true">#</span>
                     </button>
                     <button
                       type="button"
@@ -2410,6 +2538,130 @@ function AgentSpaceApp({ config }: { config: AgentSpaceConfig }) {
                     </div>
                     <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {result.file.path}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {goToSymbol.open ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Go to Symbol in Workspace"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(1, 6, 12, 0.46)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '8vh 16px 16px',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeGoToSymbol();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeGoToSymbol();
+              return;
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              const delta = event.key === 'ArrowDown' ? 1 : -1;
+              setGoToSymbol((state) => ({ ...state, selectedIndex: moveSearchSelection(state.selectedIndex, symbolResults.length, delta) }));
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              const selected = symbolResults[goToSymbol.selectedIndex] || null;
+              void activateSymbolResult(selected);
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 'min(760px, 100%)',
+              maxHeight: '78vh',
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(0, 229, 255, 0.28)',
+              borderRadius: 8,
+              background: 'rgba(5, 10, 18, 0.98)',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.46)',
+              overflow: 'hidden',
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={{ padding: 10, borderBottom: '1px solid rgba(0, 229, 255, 0.14)' }}>
+              <input
+                ref={symbolInputRef}
+                value={goToSymbol.query}
+                placeholder="Go to symbol"
+                aria-label="Symbol query"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  border: '1px solid rgba(0, 229, 255, 0.24)',
+                  borderRadius: 6,
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  color: 'var(--text)',
+                  padding: '9px 10px',
+                  font: 'inherit',
+                  outline: 'none',
+                }}
+                onChange={(event) => setGoToSymbol((state) => ({ ...state, query: event.target.value, selectedIndex: 0 }))}
+              />
+            </div>
+            {symbolStatusText || symbolBackendText ? (
+              <div className="muted" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', fontSize: 12, borderBottom: symbolResults.length ? '1px solid rgba(0, 229, 255, 0.10)' : undefined }}>
+                <span>
+                  {goToSymbol.loading ? <><span className="spin" /> </> : null}
+                  {symbolStatusText}
+                </span>
+                {symbolBackendText ? (
+                  <span style={{ flex: '0 0 auto', fontSize: 11, opacity: 0.8 }}>
+                    {symbolBackendText}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="col-scroll" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: symbolResults.length ? '6px 0' : 0 }}>
+              {symbolResults.map((result, index) => {
+                const selected = index === goToSymbol.selectedIndex;
+                return (
+                  <button
+                    key={`${result.path}:${result.line}:${result.column}:${result.name}:${index}`}
+                    type="button"
+                    style={{
+                      width: '100%',
+                      display: 'block',
+                      textAlign: 'left',
+                      border: 0,
+                      borderRadius: 0,
+                      background: selected ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+                      color: 'var(--text)',
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={() => setGoToSymbol((state) => ({ ...state, selectedIndex: index }))}
+                    onClick={() => activateSymbolResult(result)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {symbolResultPrimaryLabel(result)}
+                      </span>
+                      <span className="muted" style={{ flex: '0 0 auto', fontSize: 11 }}>
+                        {result.line ? `L${result.line}` : ''}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {symbolResultMetaLabel(result)}
                     </div>
                   </button>
                 );

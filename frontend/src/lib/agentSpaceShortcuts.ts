@@ -5,6 +5,7 @@ export type ShortcutPlatform = 'all' | 'mac' | 'other';
 export type AgentSpaceShortcutCommandId =
   | 'search_everywhere'
   | 'open_file'
+  | 'go_to_symbol'
   | 'find_in_files'
   | 'go_to_definition'
   | 'find_usages'
@@ -75,6 +76,15 @@ export const AGENT_SPACE_SHORTCUT_COMMANDS: AgentSpaceShortcutCommand[] = [
     defaults: [
       { keys: ['Meta', 'O'], platform: 'mac' },
       { keys: ['Ctrl', 'O'], platform: 'other' },
+    ],
+  },
+  {
+    id: 'go_to_symbol',
+    label: 'Go to Symbol',
+    scope: 'global except active terminal input',
+    defaults: [
+      { keys: ['Meta', 'Shift', 'O'], platform: 'mac' },
+      { keys: ['Ctrl', 'Shift', 'O'], platform: 'other' },
     ],
   },
   {
