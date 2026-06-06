@@ -113,6 +113,13 @@ class _SymbolIndexKey:
 
 
 @dataclass(frozen=True)
+class _SymbolIndexContext:
+    key: _SymbolIndexKey
+    path_items: tuple[_WorkspacePathItem, ...]
+    paths_truncated: bool
+
+
+@dataclass(frozen=True)
 class _SymbolIndexItem:
     kind: str
     name: str
@@ -328,10 +335,110 @@ async def search(
         clean_query, case_sensitive=bool(case_sensitive), regex=False
     )
     workspace = _workspace(grpc_server, space_id, include=include, exclude=exclude)
+
+    if clean_kind == "symbol":
+        try:
+            return await _search_symbols_from_index(
+                workspace,
+                matcher=matcher,
+                clean_query=clean_query,
+                clean_kind=clean_kind,
+                clean_limit=clean_limit,
+            )
+        except Exception:
+            return await _search_scan(
+                workspace,
+                matcher=matcher,
+                clean_query=clean_query,
+                clean_kind=clean_kind,
+                clean_limit=clean_limit,
+            )
+
+    indexed_symbol_results_by_path: dict[str, list[dict]] | None = None
+    indexed_symbol_truncated = False
+    path_items: tuple[_WorkspacePathItem, ...] | None = None
+    paths_truncated = False
+    if clean_kind == "all":
+        try:
+            entry, context = await _cached_symbol_index_entry(workspace)
+            path_items = context.path_items
+            paths_truncated = context.paths_truncated
+        except Exception:
+            entry = None
+
+        if entry is not None:
+            try:
+                indexed_symbol_results, indexed_symbol_truncated = (
+                    _symbol_index_search_results(
+                        entry,
+                        matcher=matcher,
+                        clean_query=clean_query,
+                        clean_limit=clean_limit,
+                    )
+                )
+                indexed_symbol_results_by_path = _symbols_by_path(
+                    indexed_symbol_results
+                )
+            except Exception:
+                indexed_symbol_results_by_path = None
+                indexed_symbol_truncated = False
+
+    return await _search_scan(
+        workspace,
+        matcher=matcher,
+        clean_query=clean_query,
+        clean_kind=clean_kind,
+        clean_limit=clean_limit,
+        indexed_symbol_results_by_path=indexed_symbol_results_by_path,
+        indexed_symbol_truncated=indexed_symbol_truncated,
+        path_items=path_items,
+        paths_truncated=paths_truncated,
+    )
+
+
+async def _search_symbols_from_index(
+    workspace: _WorkspaceFiles,
+    *,
+    matcher: _SearchMatcher,
+    clean_query: str,
+    clean_kind: str,
+    clean_limit: int,
+) -> dict:
+    entry = await _symbol_index_entry(workspace)
+    results, truncated = _symbol_index_search_results(
+        entry,
+        matcher=matcher,
+        clean_query=clean_query,
+        clean_limit=clean_limit,
+    )
+    return _search_response(
+        clean_query=clean_query,
+        clean_kind=clean_kind,
+        truncated=truncated,
+        results=results,
+    )
+
+
+async def _search_scan(
+    workspace: _WorkspaceFiles,
+    *,
+    matcher: _SearchMatcher,
+    clean_query: str,
+    clean_kind: str,
+    clean_limit: int,
+    indexed_symbol_results_by_path: dict[str, list[dict]] | None = None,
+    indexed_symbol_truncated: bool = False,
+    path_items: Iterable[_WorkspacePathItem] | None = None,
+    paths_truncated: bool = False,
+) -> dict:
     budget = _new_traversal_budget()
     collector = _ResultCollector(limit=clean_limit, results=[])
+    uses_indexed_symbols = indexed_symbol_results_by_path is not None
 
-    async for path in workspace.iter_paths(budget):
+    async for path_item in _iter_search_path_items(
+        workspace, budget=budget, path_items=path_items
+    ):
+        path = path_item.path
         if clean_kind in {"all", "file"}:
             match = matcher.search(path)
             if match is not None and not collector.add(
@@ -348,23 +455,40 @@ async def search(
                 break
 
         needs_text = clean_kind in {"all", "text"}
-        needs_symbol = clean_kind in {"all", "symbol"}
-        if not needs_text and not needs_symbol:
+        needs_symbol_scan = clean_kind == "symbol" or (
+            clean_kind == "all" and not uses_indexed_symbols
+        )
+        indexed_symbols_for_path = (
+            indexed_symbol_results_by_path.pop(path, [])
+            if indexed_symbol_results_by_path is not None
+            else []
+        )
+        if not needs_text and not needs_symbol_scan:
+            for result in indexed_symbols_for_path:
+                if not collector.add(result):
+                    break
+            if collector.truncated:
+                break
             continue
+
         item = await workspace.read_text(path, budget)
         if budget.truncated:
             break
-        if item is None:
-            continue
 
-        if needs_text:
+        if item is not None and needs_text:
             for result in _text_results(item, matcher, backend=SEARCH_BACKEND):
                 if not collector.add(result):
                     break
             if collector.truncated:
                 break
 
-        if needs_symbol:
+        for result in indexed_symbols_for_path:
+            if not collector.add(result):
+                break
+        if collector.truncated:
+            break
+
+        if item is not None and needs_symbol_scan:
             for result in _symbol_results_for_file(
                 item.path, item.content, backend=SYMBOL_BACKEND
             ):
@@ -378,15 +502,17 @@ async def search(
             if collector.truncated:
                 break
 
-    return {
-        "ok": True,
-        "query": clean_query,
-        "kind": clean_kind,
-        "backend": SEARCH_BACKEND,
-        "truncated": collector.truncated or budget.truncated,
-        "results": collector.results,
-        "groups": _group_search_results(collector.results),
-    }
+    return _search_response(
+        clean_query=clean_query,
+        clean_kind=clean_kind,
+        truncated=(
+            collector.truncated
+            or budget.truncated
+            or paths_truncated
+            or indexed_symbol_truncated
+        ),
+        results=collector.results,
+    )
 
 
 async def symbols(
@@ -448,22 +574,7 @@ async def _symbols_fallback(
 async def _symbols_from_index(
     workspace: _WorkspaceFiles, *, clean_query: str, clean_limit: int
 ) -> dict:
-    path_budget = _new_traversal_budget()
-    path_items = [item async for item in workspace.iter_path_items(path_budget)]
-    key = _symbol_index_key(
-        workspace,
-        path_items=path_items,
-        paths_truncated=path_budget.truncated,
-    )
-    now = time.monotonic()
-    cached = _get_symbol_index_cache_entry(key, now=now)
-    if cached is None:
-        cached = await _build_symbol_index(
-            workspace,
-            path_items=path_items,
-            paths_truncated=path_budget.truncated,
-        )
-        _store_symbol_index_cache_entry(key, cached)
+    cached = await _symbol_index_entry(workspace)
     return _symbol_index_response(
         cached, clean_query=clean_query, clean_limit=clean_limit
     )
@@ -514,23 +625,7 @@ async def _definition_fallback(
 async def _definition_from_index(
     workspace: _WorkspaceFiles, *, symbol_name: str
 ) -> dict | None:
-    path_budget = _new_traversal_budget()
-    path_items = [item async for item in workspace.iter_path_items(path_budget)]
-    key = _symbol_index_key(
-        workspace,
-        path_items=path_items,
-        paths_truncated=path_budget.truncated,
-    )
-    now = time.monotonic()
-    cached = _get_symbol_index_cache_entry(key, now=now)
-    if cached is None:
-        cached = await _build_symbol_index(
-            workspace,
-            path_items=path_items,
-            paths_truncated=path_budget.truncated,
-        )
-        _store_symbol_index_cache_entry(key, cached)
-
+    cached = await _symbol_index_entry(workspace)
     if cached.truncated:
         return None
     return await _definition_index_response(workspace, cached, symbol_name=symbol_name)
@@ -677,6 +772,24 @@ def _definition_results_for_file(
             yield result
 
 
+def _search_response(
+    *,
+    clean_query: str,
+    clean_kind: str,
+    truncated: bool,
+    results: list[dict],
+) -> dict:
+    return {
+        "ok": True,
+        "query": clean_query,
+        "kind": clean_kind,
+        "backend": SEARCH_BACKEND,
+        "truncated": truncated,
+        "results": results,
+        "groups": _group_search_results(results),
+    }
+
+
 def _group_search_results(results: Iterable[dict]) -> list[dict]:
     groups: list[dict] = []
     by_path: dict[str, dict] = {}
@@ -689,6 +802,62 @@ def _group_search_results(results: Iterable[dict]) -> list[dict]:
             groups.append(group)
         group["results"].append(result)
     return groups
+
+
+async def _iter_search_path_items(
+    workspace: _WorkspaceFiles,
+    *,
+    budget: _TraversalBudget,
+    path_items: Iterable[_WorkspacePathItem] | None,
+) -> AsyncIterator[_WorkspacePathItem]:
+    if path_items is not None:
+        for item in path_items:
+            yield item
+        return
+
+    async for item in workspace.iter_path_items(budget):
+        yield item
+
+
+async def _symbol_index_entry(workspace: _WorkspaceFiles) -> _SymbolIndexCacheEntry:
+    context = await _symbol_index_context(workspace)
+    now = time.monotonic()
+    cached = _get_symbol_index_cache_entry(context.key, now=now)
+    if cached is None:
+        cached = await _build_symbol_index(
+            workspace,
+            path_items=context.path_items,
+            paths_truncated=context.paths_truncated,
+        )
+        _store_symbol_index_cache_entry(context.key, cached)
+    return cached
+
+
+async def _cached_symbol_index_entry(
+    workspace: _WorkspaceFiles,
+) -> tuple[_SymbolIndexCacheEntry | None, _SymbolIndexContext]:
+    context = await _symbol_index_context(workspace)
+    return (
+        _get_symbol_index_cache_entry(context.key, now=time.monotonic()),
+        context,
+    )
+
+
+async def _symbol_index_context(workspace: _WorkspaceFiles) -> _SymbolIndexContext:
+    path_budget = _new_traversal_budget()
+    listed_path_items = [
+        item async for item in workspace.iter_path_items(path_budget)
+    ]
+    path_items = tuple(listed_path_items)
+    return _SymbolIndexContext(
+        key=_symbol_index_key(
+            workspace,
+            path_items=path_items,
+            paths_truncated=path_budget.truncated,
+        ),
+        path_items=path_items,
+        paths_truncated=path_budget.truncated,
+    )
 
 
 async def _build_symbol_index(
@@ -745,6 +914,32 @@ def _symbol_index_response(
         "truncated": collector.truncated or entry.truncated,
         "results": collector.results,
     }
+
+
+def _symbol_index_search_results(
+    entry: _SymbolIndexCacheEntry,
+    *,
+    matcher: _SearchMatcher,
+    clean_query: str,
+    clean_limit: int,
+) -> tuple[list[dict], bool]:
+    collector = _ResultCollector(limit=clean_limit, results=[])
+    for item in entry.items:
+        if clean_query and matcher.search(item.name) is None:
+            continue
+        if not collector.add(_symbol_index_item_to_result(item)):
+            break
+    return collector.results, collector.truncated or entry.truncated
+
+
+def _symbols_by_path(results: Iterable[dict]) -> dict[str, list[dict]]:
+    by_path: dict[str, list[dict]] = {}
+    for result in results:
+        path = _safe_rel_path(str(result.get("path") or ""))
+        if not path:
+            continue
+        by_path.setdefault(path, []).append(result)
+    return by_path
 
 
 def _symbol_index_key(

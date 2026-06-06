@@ -205,6 +205,210 @@ def test_code_search_returns_text_file_and_symbol_results(tmp_path) -> None:
     asyncio.run(_run())
 
 
+def test_code_search_all_cold_cache_reads_workspace_once(tmp_path) -> None:
+    async def _run() -> None:
+        with code_navigation_service._SYMBOL_INDEX_CACHE_LOCK:
+            code_navigation_service._SYMBOL_INDEX_CACHE.clear()
+
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "README.md": "Focus notes\n",
+                "src/focus.py": (
+                    "class FocusRunner:\n"
+                    "    def run(self):\n"
+                    "        return 'Focus text'\n"
+                ),
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            response = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Focus", "kind": "all"},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["kind"] == "all"
+        assert payload["groups"] == _group_by_path(payload["results"])
+        assert any(
+            item["kind"] == "file" and item["path"] == "src/focus.py"
+            for item in payload["results"]
+        )
+        assert any(
+            item["kind"] == "text" and item["preview"] == "return 'Focus text'"
+            for item in payload["results"]
+        )
+        assert any(
+            item["kind"] == "class" and item["name"] == "FocusRunner"
+            for item in payload["results"]
+        )
+        assert port.list_calls == ["", "src"]
+        assert port.read_calls == ["README.md", "src/focus.py"]
+
+    asyncio.run(_run())
+
+
+def test_code_search_symbol_kind_uses_cached_stale_symbol_index(tmp_path) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/service.py": "class AlphaSymbol:\n    pass\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            first = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Alpha", "kind": "symbol"},
+            )
+            port.update_file(
+                "src/service.py",
+                "class DeltaSymbol:\n    pass\n",
+            )
+            stale_delta = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Delta", "kind": "symbol"},
+            )
+            cached_alpha = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Alpha", "kind": "symbol"},
+            )
+
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert first_payload["ok"] is True
+        assert first_payload["kind"] == "symbol"
+        assert first_payload["groups"] == _group_by_path(first_payload["results"])
+        assert any(
+            item["name"] == "AlphaSymbol" for item in first_payload["results"]
+        )
+        assert all("preview" not in item for item in first_payload["results"])
+
+        assert stale_delta.status_code == 200
+        assert stale_delta.json()["results"] == []
+
+        assert cached_alpha.status_code == 200
+        cached_alpha_payload = cached_alpha.json()
+        assert any(
+            item["name"] == "AlphaSymbol"
+            for item in cached_alpha_payload["results"]
+        )
+        assert cached_alpha_payload["groups"] == _group_by_path(
+            cached_alpha_payload["results"]
+        )
+
+    asyncio.run(_run())
+
+
+def test_code_search_all_uses_cached_symbols_but_reads_current_text(tmp_path) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/service.py": "def FocusCached():\n    return 'ignore it'\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            seed = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Focus", "kind": "symbol"},
+            )
+            port.update_file(
+                "src/service.py",
+                "def OtherSymbol():\n    return 'Focus now'\n",
+            )
+            response = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Focus", "kind": "all"},
+            )
+
+        assert seed.status_code == 200
+        assert any(item["name"] == "FocusCached" for item in seed.json()["results"])
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["kind"] == "all"
+        assert payload["groups"] == _group_by_path(payload["results"])
+        assert any(
+            item["kind"] == "function"
+            and item["name"] == "FocusCached"
+            and "preview" not in item
+            for item in payload["results"]
+        )
+        assert any(
+            item["kind"] == "text" and item["preview"] == "return 'Focus now'"
+            for item in payload["results"]
+        )
+        assert not any(
+            item.get("name") == "OtherSymbol" for item in payload["results"]
+        )
+
+    asyncio.run(_run())
+
+
+def test_code_search_symbol_kind_falls_back_to_scan_when_index_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _run() -> None:
+        async def _raise_index_error(*args, **kwargs):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(
+            code_navigation_service, "_build_symbol_index", _raise_index_error
+        )
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/service.py": "def RescannedSymbol():\n    return 1\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            response = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "Rescanned", "kind": "symbol"},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["kind"] == "symbol"
+        assert payload["groups"] == _group_by_path(payload["results"])
+        assert payload["results"] == [
+            {
+                "kind": "function",
+                "name": "RescannedSymbol",
+                "container": "",
+                "path": "src/service.py",
+                "line": 1,
+                "column": 5,
+                "preview": "def RescannedSymbol():",
+                "backend": "symbol_fallback",
+            }
+        ]
+
+    asyncio.run(_run())
+
+
 def test_code_symbols_definition_and_references_use_fallback_backends(
     tmp_path,
 ) -> None:

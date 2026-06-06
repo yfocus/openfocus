@@ -64,5 +64,17 @@ previous preview-bearing result shape. If the index path is unavailable, fails,
 or is truncated, definition lookup degrades to the existing scan-based fallback
 so bounded indexes do not create partial definition results.
 
+`text_fallback` search reuses the lightweight symbol index for the symbol branch
+of `/code/search`. `kind=symbol` first answers from the cached index and returns
+normal search-shaped responses with `groups`; if the index path is unavailable
+or fails, it degrades to the existing scan-based symbol extraction. `kind=all`
+uses only an already-built symbol index whose current path/metadata fingerprint
+is still fresh; it must not build the index on a cold cache. When no fresh cache
+entry exists, the same Companion traversal/read pass returns file, text, and
+scan-derived symbol matches. When a fresh cache entry exists, the path/metadata
+listing used to validate the cache is reused by the current file/text scan so
+the request avoids a second file listing. The combined result set is bounded by
+the request limit.
+
 Future semantic/LSP support must degrade to these fallback backends when
 unavailable or failing.
