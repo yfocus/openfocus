@@ -56,5 +56,13 @@ than can be cached, `/code/symbols` returns the bounded result set with
 `truncated=true`. If the index path is unavailable or fails, symbols must
 degrade to the same scan-based fallback behavior.
 
+`definition_fallback` uses the same lightweight symbol index for exact symbol
+name matching when it can do so safely. Indexed definition matches are converted
+back to definition-shaped results with `backend=definition_fallback`, and
+candidate files are re-read through the Companion file seam to preserve the
+previous preview-bearing result shape. If the index path is unavailable, fails,
+or is truncated, definition lookup degrades to the existing scan-based fallback
+so bounded indexes do not create partial definition results.
+
 Future semantic/LSP support must degrade to these fallback backends when
 unavailable or failing.

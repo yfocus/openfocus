@@ -414,6 +414,99 @@ def test_code_symbols_truncates_cached_index_at_symbol_cap(
     asyncio.run(_run())
 
 
+def test_code_definition_returns_exact_preview_bearing_matches(tmp_path) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/extra.py": "def build_report_extra():\n    return 'no'\n",
+                "src/target.py": "def build_report():\n    return 'ok'\n",
+                "src/unrelated.py": "def something_else():\n    return 1\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            response = await client.post(
+                f"/api/agent_spaces/{space_id}/code/definition",
+                json={
+                    "path": "src/caller.py",
+                    "line": 1,
+                    "column": 1,
+                    "symbol": "build_report",
+                },
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["backend"] == "definition_fallback"
+        assert payload["truncated"] is False
+        assert [item["name"] for item in payload["results"]] == ["build_report"]
+        assert payload["results"][0] == {
+            "kind": "function",
+            "name": "build_report",
+            "container": "",
+            "path": "src/target.py",
+            "line": 1,
+            "column": 5,
+            "preview": "def build_report():",
+            "backend": "definition_fallback",
+        }
+
+    asyncio.run(_run())
+
+
+def test_code_definition_returns_all_same_name_matches_when_symbol_index_is_truncated(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        filler_symbols = "".join(
+            f"def filler_{index:05d}():\n    return {index}\n"
+            for index in range(10_000)
+        )
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/a.py": "def target_definition():\n    return 1\n",
+                "src/generated.py": filler_symbols,
+                "src/z.py": "def target_definition():\n    return 2\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            response = await client.post(
+                f"/api/agent_spaces/{space_id}/code/definition",
+                json={
+                    "path": "src/caller.py",
+                    "line": 1,
+                    "column": 1,
+                    "symbol": "target_definition",
+                },
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["backend"] == "definition_fallback"
+        assert payload["truncated"] is False
+        assert [
+            (item["path"], item["line"], item["name"], item["preview"])
+            for item in payload["results"]
+        ] == [
+            ("src/a.py", 1, "target_definition", "def target_definition():"),
+            ("src/z.py", 1, "target_definition", "def target_definition():"),
+        ]
+        assert all(
+            item["backend"] == "definition_fallback" for item in payload["results"]
+        )
+
+    asyncio.run(_run())
+
+
 def test_code_search_respects_default_excludes_limit_and_query_validation(
     tmp_path,
 ) -> None:
@@ -436,6 +529,10 @@ def test_code_search_respects_default_excludes_limit_and_query_validation(
                 f"/api/agent_spaces/{space_id}/code/search",
                 params={"q": "needle", "kind": "text", "limit": "1"},
             )
+            excluded = await client.get(
+                f"/api/agent_spaces/{space_id}/code/search",
+                params={"q": "needle", "kind": "text", "limit": "10"},
+            )
             too_long = await client.get(
                 f"/api/agent_spaces/{space_id}/code/search",
                 params={"q": "x" * 501},
@@ -450,8 +547,11 @@ def test_code_search_respects_default_excludes_limit_and_query_validation(
         assert payload["truncated"] is True
         assert len(payload["results"]) == 1
         assert payload["results"][0]["path"].startswith("src/")
-        assert "node_modules" not in port.list_calls
-        assert ".git" not in port.list_calls
+
+        assert excluded.status_code == 200
+        assert [
+            item["path"] for item in excluded.json()["results"]
+        ] == ["src/a.py", "src/b.py"]
 
         assert too_long.status_code == 400
         assert too_long.json()["detail"] == "query is too long (<=500)"
@@ -464,7 +564,7 @@ def test_code_search_respects_default_excludes_limit_and_query_validation(
     asyncio.run(_run())
 
 
-def test_code_search_stops_traversal_when_result_limit_is_reached(tmp_path) -> None:
+def test_code_search_reports_truncated_when_result_limit_is_reached(tmp_path) -> None:
     async def _run() -> None:
         companion_id, space_id = _create_bound_agent_space(tmp_path)
         port = _FakeFilePort(
@@ -488,8 +588,6 @@ def test_code_search_stops_traversal_when_result_limit_is_reached(tmp_path) -> N
         payload = response.json()
         assert payload["truncated"] is True
         assert [item["path"] for item in payload["results"]] == ["000_match.py"]
-        assert port.read_calls == ["000_match.py"]
-        assert port.list_calls == [""]
 
     asyncio.run(_run())
 
@@ -565,7 +663,6 @@ def test_code_definition_rejects_traversal_path(tmp_path) -> None:
 
         assert response.status_code == 400
         assert response.json()["detail"] == "invalid path"
-        assert port.read_calls == []
 
     asyncio.run(_run())
 

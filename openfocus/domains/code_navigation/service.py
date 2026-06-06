@@ -473,6 +473,20 @@ async def definition(grpc_server: Any, *, space_id: int, payload: Any) -> dict:
     _clean_location_payload(payload)
     symbol_name = _clean_symbol(_payload_value(payload, "symbol"))
     workspace = _workspace(grpc_server, space_id, include=None, exclude=None)
+    try:
+        indexed_response = await _definition_from_index(
+            workspace, symbol_name=symbol_name
+        )
+    except Exception:
+        indexed_response = None
+    if indexed_response is not None:
+        return indexed_response
+    return await _definition_fallback(workspace, symbol_name=symbol_name)
+
+
+async def _definition_fallback(
+    workspace: _WorkspaceFiles, *, symbol_name: str
+) -> dict:
     budget = _new_traversal_budget()
     collector = _ResultCollector(limit=DEFAULT_LIMIT, results=[])
 
@@ -482,11 +496,7 @@ async def definition(grpc_server: Any, *, space_id: int, payload: Any) -> dict:
             break
         if item is None:
             continue
-        for result in _symbol_results_for_file(
-            item.path, item.content, backend=DEFINITION_BACKEND
-        ):
-            if str(result.get("name") or "") != symbol_name:
-                continue
+        for result in _definition_results_for_file(item, symbol_name=symbol_name):
             if not collector.add(result):
                 break
         if collector.truncated:
@@ -497,6 +507,66 @@ async def definition(grpc_server: Any, *, space_id: int, payload: Any) -> dict:
         "symbol": symbol_name,
         "backend": DEFINITION_BACKEND,
         "truncated": collector.truncated or budget.truncated,
+        "results": collector.results,
+    }
+
+
+async def _definition_from_index(
+    workspace: _WorkspaceFiles, *, symbol_name: str
+) -> dict | None:
+    path_budget = _new_traversal_budget()
+    path_items = [item async for item in workspace.iter_path_items(path_budget)]
+    key = _symbol_index_key(
+        workspace,
+        path_items=path_items,
+        paths_truncated=path_budget.truncated,
+    )
+    now = time.monotonic()
+    cached = _get_symbol_index_cache_entry(key, now=now)
+    if cached is None:
+        cached = await _build_symbol_index(
+            workspace,
+            path_items=path_items,
+            paths_truncated=path_budget.truncated,
+        )
+        _store_symbol_index_cache_entry(key, cached)
+
+    if cached.truncated:
+        return None
+    return await _definition_index_response(workspace, cached, symbol_name=symbol_name)
+
+
+async def _definition_index_response(
+    workspace: _WorkspaceFiles,
+    entry: _SymbolIndexCacheEntry,
+    *,
+    symbol_name: str,
+) -> dict:
+    budget = _new_traversal_budget()
+    collector = _ResultCollector(limit=DEFAULT_LIMIT, results=[])
+    seen_paths: set[str] = set()
+    for index_item in entry.items:
+        if index_item.name != symbol_name:
+            continue
+        if index_item.path in seen_paths:
+            continue
+        seen_paths.add(index_item.path)
+        item = await workspace.read_text(index_item.path, budget)
+        if budget.truncated:
+            break
+        if item is None:
+            continue
+        for result in _definition_results_for_file(item, symbol_name=symbol_name):
+            if not collector.add(result):
+                break
+        if collector.truncated:
+            break
+
+    return {
+        "ok": True,
+        "symbol": symbol_name,
+        "backend": DEFINITION_BACKEND,
+        "truncated": collector.truncated or budget.truncated or entry.truncated,
         "results": collector.results,
     }
 
@@ -595,6 +665,16 @@ def _text_results(
             "preview": _preview(line),
             "backend": backend,
         }
+
+
+def _definition_results_for_file(
+    item: _FileItem, *, symbol_name: str
+) -> Iterable[dict]:
+    for result in _symbol_results_for_file(
+        item.path, item.content, backend=DEFINITION_BACKEND
+    ):
+        if str(result.get("name") or "") == symbol_name:
+            yield result
 
 
 def _group_search_results(results: Iterable[dict]) -> list[dict]:
