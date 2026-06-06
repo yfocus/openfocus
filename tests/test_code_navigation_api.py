@@ -31,8 +31,17 @@ class _GrpcServer:
 class _FakeFilePort:
     def __init__(self, files: dict[str, str | bytes]) -> None:
         self.files = {_clean_rel(path): value for path, value in files.items()}
+        self.mtimes = {path: 0.0 for path in self.files}
         self.read_calls: list[str] = []
         self.list_calls: list[str] = []
+
+    def update_file(
+        self, path: str, content: str | bytes, *, mtime: float | None = None
+    ) -> None:
+        rel = _clean_rel(path)
+        self.files[rel] = content
+        if mtime is not None:
+            self.mtimes[rel] = mtime
 
     async def request_files_list(
         self, *, root_path: str, rel_path: str, timeout_seconds: float = 10.0
@@ -58,12 +67,17 @@ class _FakeFilePort:
                     name=PurePosixPath(child).name,
                     rel_path=child,
                     kind=kind,
-                    size=len(self.files.get(child, b"")),
-                    mtime=0.0,
+                    size=self._entry_size(child, kind),
+                    mtime=self.mtimes.get(child, 0.0),
                 )
                 for child, kind in sorted(names)
             ],
         )
+
+    def _entry_size(self, child: str, kind: str) -> int:
+        if kind != "file" or child not in self.files:
+            return 0
+        return _content_size(self.files[child])
 
     async def request_files_read(
         self, *, root_path: str, rel_path: str, max_bytes: int
@@ -95,6 +109,12 @@ def _clean_rel(path: str) -> str:
     if raw.startswith("/"):
         raise CompanionGrpcError("invalid path")
     return raw
+
+
+def _content_size(value: str | bytes) -> int:
+    if isinstance(value, bytes):
+        return len(value)
+    return len(value.encode("utf-8"))
 
 
 def _group_by_path(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -248,6 +268,148 @@ def test_code_symbols_definition_and_references_use_fallback_backends(
         assert reference_payload["backend"] == "reference_fallback"
         assert len(reference_payload["results"]) >= 4
         assert all(item["kind"] == "reference" for item in reference_payload["results"])
+
+    asyncio.run(_run())
+
+
+def test_code_symbols_can_return_cached_stale_symbols_until_context_changes(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/service.py": "class AlphaService:\n    pass\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            first = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Alpha"},
+            )
+            port.update_file(
+                "src/service.py",
+                "class DeltaService:\n    pass\n",
+            )
+            second = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Delta"},
+            )
+            cached_alpha = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Alpha"},
+            )
+            context_changed = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Delta", "include": "src/*.py"},
+            )
+
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert any(item["name"] == "AlphaService" for item in first_payload["results"])
+        assert all("preview" not in item for item in first_payload["results"])
+
+        assert second.status_code == 200
+        assert second.json()["results"] == []
+
+        assert cached_alpha.status_code == 200
+        assert any(
+            item["name"] == "AlphaService" for item in cached_alpha.json()["results"]
+        )
+
+        assert context_changed.status_code == 200
+        assert any(
+            item["name"] == "DeltaService" for item in context_changed.json()["results"]
+        )
+
+    asyncio.run(_run())
+
+
+def test_code_symbols_refreshes_index_when_companion_metadata_changes(
+    tmp_path,
+) -> None:
+    async def _run() -> None:
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/service.py": "class AlphaService:\n    pass\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            first = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Alpha"},
+            )
+            port.update_file(
+                "src/service.py",
+                "class DeltaService:\n    pass\n",
+                mtime=1.0,
+            )
+            second = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Delta"},
+            )
+            port.update_file(
+                "src/service.py",
+                "class EpsilonService:\n    pass\n",
+            )
+            third = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"q": "Epsilon"},
+            )
+
+        assert first.status_code == 200
+        assert any(item["name"] == "AlphaService" for item in first.json()["results"])
+        assert second.status_code == 200
+        assert any(item["name"] == "DeltaService" for item in second.json()["results"])
+        assert third.status_code == 200
+        assert any(item["name"] == "EpsilonService" for item in third.json()["results"])
+
+    asyncio.run(_run())
+
+
+def test_code_symbols_truncates_cached_index_at_symbol_cap(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _run() -> None:
+        monkeypatch.setattr(
+            code_navigation_service, "SYMBOL_INDEX_MAX_CACHED_SYMBOLS", 2
+        )
+        companion_id, space_id = _create_bound_agent_space(tmp_path)
+        port = _FakeFilePort(
+            {
+                "src/a.py": "class AlphaService:\n    pass\n",
+                "src/b.py": "class BetaService:\n    pass\n",
+                "src/c.py": "class GammaService:\n    pass\n",
+            }
+        )
+        client = AsyncClient(
+            transport=ASGITransport(app=_app(_GrpcServer({companion_id: port}))),
+            base_url="http://test",
+        )
+        async with client:
+            response = await client.get(
+                f"/api/agent_spaces/{space_id}/code/symbols",
+                params={"limit": "10"},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["truncated"] is True
+        assert len(payload["results"]) == 2
+        assert [item["name"] for item in payload["results"]] == [
+            "AlphaService",
+            "BetaService",
+        ]
 
     asyncio.run(_run())
 

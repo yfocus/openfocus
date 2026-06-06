@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from threading import RLock
 from typing import Any, AsyncIterator, Iterable
 
 from ...companion.grpc import CompanionGrpcError
@@ -23,6 +26,9 @@ MAX_SYMBOL_LENGTH = 200
 MAX_TEXT_FILE_BYTES = 1024 * 1024
 MAX_WORKSPACE_VISITED_PATHS = 5000
 MAX_WORKSPACE_READ_FILES = 1000
+SYMBOL_INDEX_TTL_SECONDS = 30.0
+SYMBOL_INDEX_MAX_CACHE_ENTRIES = 64
+SYMBOL_INDEX_MAX_CACHED_SYMBOLS = 10000
 
 DEFAULT_EXCLUDES = (
     ".git",
@@ -87,6 +93,40 @@ class _FileItem:
     path: str
     content: str
     truncated: bool
+
+
+@dataclass(frozen=True)
+class _WorkspacePathItem:
+    path: str
+    size: str
+    mtime: str
+
+
+@dataclass(frozen=True)
+class _SymbolIndexKey:
+    space_id: int
+    companion_id: int
+    root_path: str
+    include_patterns: tuple[str, ...]
+    exclude_patterns: tuple[str, ...]
+    file_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _SymbolIndexItem:
+    kind: str
+    name: str
+    path: str
+    line: int
+    column: int
+    container: str
+
+
+@dataclass(frozen=True)
+class _SymbolIndexCacheEntry:
+    items: tuple[_SymbolIndexItem, ...]
+    truncated: bool
+    monotonic_created_at: float
 
 
 @dataclass
@@ -172,17 +212,27 @@ class _WorkspaceFiles:
     def __init__(
         self,
         *,
+        space_id: int,
+        companion_id: int,
         conn: Any,
         root_path: str,
         include: str | None,
         exclude: str | None,
     ) -> None:
+        self.space_id = int(space_id)
+        self.companion_id = int(companion_id)
         self.conn = conn
         self.root_path = str(root_path or "")
         self.include_patterns = _split_patterns(include)
         self.exclude_patterns = (*DEFAULT_EXCLUDES, *_split_patterns(exclude))
 
     async def iter_paths(self, budget: _TraversalBudget) -> AsyncIterator[str]:
+        async for item in self.iter_path_items(budget):
+            yield item.path
+
+    async def iter_path_items(
+        self, budget: _TraversalBudget
+    ) -> AsyncIterator[_WorkspacePathItem]:
         stack = [""]
         while stack and not budget.truncated:
             current = stack.pop()
@@ -219,7 +269,11 @@ class _WorkspaceFiles:
                     rel_path, self.include_patterns
                 ):
                     continue
-                yield rel_path
+                yield _WorkspacePathItem(
+                    path=rel_path,
+                    size=_entry_metadata_value(entry, "size"),
+                    mtime=_entry_metadata_value(entry, "mtime"),
+                )
 
     async def read_text(
         self, rel_path: str, budget: _TraversalBudget
@@ -245,6 +299,10 @@ class _WorkspaceFiles:
             content=content,
             truncated=bool(getattr(result, "truncated", False)),
         )
+
+
+_SYMBOL_INDEX_CACHE: dict[_SymbolIndexKey, _SymbolIndexCacheEntry] = {}
+_SYMBOL_INDEX_CACHE_LOCK = RLock()
 
 
 async def search(
@@ -343,6 +401,19 @@ async def symbols(
     clean_query = _clean_query(q)
     clean_limit = _clean_limit(limit)
     workspace = _workspace(grpc_server, space_id, include=include, exclude=exclude)
+    try:
+        return await _symbols_from_index(
+            workspace, clean_query=clean_query, clean_limit=clean_limit
+        )
+    except Exception:
+        return await _symbols_fallback(
+            workspace, clean_query=clean_query, clean_limit=clean_limit
+        )
+
+
+async def _symbols_fallback(
+    workspace: _WorkspaceFiles, *, clean_query: str, clean_limit: int
+) -> dict:
     budget = _new_traversal_budget()
     collector = _ResultCollector(limit=clean_limit, results=[])
 
@@ -372,6 +443,30 @@ async def symbols(
         "truncated": collector.truncated or budget.truncated,
         "results": collector.results,
     }
+
+
+async def _symbols_from_index(
+    workspace: _WorkspaceFiles, *, clean_query: str, clean_limit: int
+) -> dict:
+    path_budget = _new_traversal_budget()
+    path_items = [item async for item in workspace.iter_path_items(path_budget)]
+    key = _symbol_index_key(
+        workspace,
+        path_items=path_items,
+        paths_truncated=path_budget.truncated,
+    )
+    now = time.monotonic()
+    cached = _get_symbol_index_cache_entry(key, now=now)
+    if cached is None:
+        cached = await _build_symbol_index(
+            workspace,
+            path_items=path_items,
+            paths_truncated=path_budget.truncated,
+        )
+        _store_symbol_index_cache_entry(key, cached)
+    return _symbol_index_response(
+        cached, clean_query=clean_query, clean_limit=clean_limit
+    )
 
 
 async def definition(grpc_server: Any, *, space_id: int, payload: Any) -> dict:
@@ -469,6 +564,8 @@ def _workspace(
     space, companion = companion_service.load_space_and_optional_companion(space_id)
     conn = companion_service.require_online(grpc_server, companion=companion)
     return _WorkspaceFiles(
+        space_id=int(getattr(space, "id", space_id) or space_id),
+        companion_id=int(getattr(companion, "id", 0) or 0),
         conn=conn,
         root_path=str(space.root_path or ""),
         include=include,
@@ -512,6 +609,175 @@ def _group_search_results(results: Iterable[dict]) -> list[dict]:
             groups.append(group)
         group["results"].append(result)
     return groups
+
+
+async def _build_symbol_index(
+    workspace: _WorkspaceFiles,
+    *,
+    path_items: Iterable[_WorkspacePathItem],
+    paths_truncated: bool,
+) -> _SymbolIndexCacheEntry:
+    budget = _new_traversal_budget()
+    items: list[_SymbolIndexItem] = []
+    max_cached_symbols = max(1, int(SYMBOL_INDEX_MAX_CACHED_SYMBOLS))
+    symbols_truncated = False
+    for path_item in path_items:
+        item = await workspace.read_text(path_item.path, budget)
+        if budget.truncated:
+            break
+        if item is None:
+            continue
+        for result in _symbol_results_for_file(
+            item.path, item.content, backend=SYMBOL_BACKEND
+        ):
+            index_item = _symbol_index_item_from_result(result)
+            if index_item is None:
+                continue
+            if len(items) >= max_cached_symbols:
+                symbols_truncated = True
+                break
+            items.append(index_item)
+        if symbols_truncated:
+            break
+
+    return _SymbolIndexCacheEntry(
+        items=tuple(items),
+        truncated=bool(paths_truncated or budget.truncated or symbols_truncated),
+        monotonic_created_at=time.monotonic(),
+    )
+
+
+def _symbol_index_response(
+    entry: _SymbolIndexCacheEntry, *, clean_query: str, clean_limit: int
+) -> dict:
+    collector = _ResultCollector(limit=clean_limit, results=[])
+    query = clean_query.lower()
+    for item in entry.items:
+        if query and query not in item.name.lower():
+            continue
+        if not collector.add(_symbol_index_item_to_result(item)):
+            break
+
+    return {
+        "ok": True,
+        "query": clean_query,
+        "backend": SYMBOL_BACKEND,
+        "truncated": collector.truncated or entry.truncated,
+        "results": collector.results,
+    }
+
+
+def _symbol_index_key(
+    workspace: _WorkspaceFiles,
+    *,
+    path_items: Iterable[_WorkspacePathItem],
+    paths_truncated: bool,
+) -> _SymbolIndexKey:
+    return _SymbolIndexKey(
+        space_id=workspace.space_id,
+        companion_id=workspace.companion_id,
+        root_path=workspace.root_path,
+        include_patterns=tuple(workspace.include_patterns),
+        exclude_patterns=tuple(workspace.exclude_patterns),
+        file_fingerprint=_symbol_index_file_fingerprint(
+            path_items, paths_truncated=paths_truncated
+        ),
+    )
+
+
+def _symbol_index_file_fingerprint(
+    path_items: Iterable[_WorkspacePathItem], *, paths_truncated: bool
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"truncated=")
+    digest.update(b"1" if paths_truncated else b"0")
+    digest.update(b"\0")
+    for item in path_items:
+        digest.update(item.path.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+        digest.update(item.size.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+        digest.update(item.mtime.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _get_symbol_index_cache_entry(
+    key: _SymbolIndexKey, *, now: float
+) -> _SymbolIndexCacheEntry | None:
+    with _SYMBOL_INDEX_CACHE_LOCK:
+        _evict_expired_symbol_index_cache_entries_locked(now)
+        cached = _SYMBOL_INDEX_CACHE.get(key)
+        if cached is not None and _symbol_index_cache_entry_is_fresh(cached, now):
+            return cached
+    return None
+
+
+def _store_symbol_index_cache_entry(
+    key: _SymbolIndexKey, entry: _SymbolIndexCacheEntry
+) -> None:
+    now = time.monotonic()
+    max_cache_entries = max(1, int(SYMBOL_INDEX_MAX_CACHE_ENTRIES))
+    with _SYMBOL_INDEX_CACHE_LOCK:
+        _evict_expired_symbol_index_cache_entries_locked(now)
+        if len(_SYMBOL_INDEX_CACHE) >= max_cache_entries:
+            oldest_key = min(
+                _SYMBOL_INDEX_CACHE,
+                key=lambda item: _SYMBOL_INDEX_CACHE[item].monotonic_created_at,
+            )
+            _SYMBOL_INDEX_CACHE.pop(oldest_key, None)
+        _SYMBOL_INDEX_CACHE[key] = entry
+
+
+def _symbol_index_cache_entry_is_fresh(
+    entry: _SymbolIndexCacheEntry, now: float
+) -> bool:
+    age = max(0.0, float(now) - float(entry.monotonic_created_at))
+    return age <= float(SYMBOL_INDEX_TTL_SECONDS)
+
+
+def _evict_expired_symbol_index_cache_entries_locked(now: float) -> None:
+    expired = [
+        key
+        for key, entry in _SYMBOL_INDEX_CACHE.items()
+        if not _symbol_index_cache_entry_is_fresh(entry, now)
+    ]
+    for key in expired:
+        _SYMBOL_INDEX_CACHE.pop(key, None)
+
+
+def _symbol_index_item_from_result(result: dict) -> _SymbolIndexItem | None:
+    raw_path = str(result.get("path") or "")
+    path = _safe_rel_path(raw_path)
+    if not path:
+        return None
+    try:
+        line = int(result.get("line") or 0)
+        column = int(result.get("column") or 0)
+    except (TypeError, ValueError):
+        return None
+    if line < 1 or column < 1:
+        return None
+    return _SymbolIndexItem(
+        kind=str(result.get("kind") or ""),
+        name=str(result.get("name") or ""),
+        path=path,
+        line=line,
+        column=column,
+        container=str(result.get("container") or ""),
+    )
+
+
+def _symbol_index_item_to_result(item: _SymbolIndexItem) -> dict:
+    return {
+        "kind": item.kind,
+        "name": item.name,
+        "container": item.container,
+        "path": item.path,
+        "line": item.line,
+        "column": item.column,
+        "backend": SYMBOL_BACKEND,
+    }
 
 
 def _symbol_results_for_file(path: str, content: str, *, backend: str) -> list[dict]:
@@ -676,6 +942,15 @@ def _split_patterns(value: str | None) -> tuple[str, ...]:
         for part in re.split(r"[,;\n]", str(value))
         if part.strip()
     )
+
+
+def _entry_metadata_value(entry: Any, name: str) -> str:
+    if not hasattr(entry, name):
+        return ""
+    value = getattr(entry, name)
+    if value is None:
+        return ""
+    return str(value)
 
 
 def _safe_rel_path(value: str) -> str:
