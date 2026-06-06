@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -378,6 +380,122 @@ def test_coco_install_removes_legacy_block_without_instance(tmp_path: Path) -> N
     assert "openfocus:coco-hook BEGIN instance=dev" in text
 
 
+def test_claude_install_adds_instance_specific_hook_commands(tmp_path: Path) -> None:
+    installer = _load_installer()
+    settings_path = tmp_path / "settings.json"
+    hook_sock = tmp_path / "hooks-dev.sock"
+    hook_spool_dir = tmp_path / "spool-dev"
+
+    assert (
+        installer.install_claude(
+            settings_path,
+            instance_id="dev",
+            hook_sock=hook_sock,
+            hook_spool_dir=hook_spool_dir,
+            dry_run=False,
+        )
+        is True
+    )
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    hook = data["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    command = hook["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in command
+    assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in command
+    assert f"OPENFOCUS_HOOK_SPOOL_DIR={hook_spool_dir}" in command
+    assert "openfocus-claude-hook.sh" in command
+    assert "user-prompt-submit" in command
+    assert hook["timeout"] == 5
+    permission_hook = data["hooks"]["PermissionRequest"][0]["hooks"][0]
+    permission_command = permission_hook["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in permission_command
+    assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in permission_command
+    assert f"OPENFOCUS_HOOK_SPOOL_DIR={hook_spool_dir}" in permission_command
+    assert " permission-request" in permission_command
+    assert permission_hook["timeout"] == 600
+    stop_command = data["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in stop_command
+    assert f"OPENFOCUS_HOOK_SOCK={hook_sock}" in stop_command
+    assert f"OPENFOCUS_HOOK_SPOOL_DIR={hook_spool_dir}" in stop_command
+    assert " stop" in stop_command
+
+    assert (
+        installer.install_claude(
+            settings_path,
+            instance_id="dev",
+            hook_sock=hook_sock,
+            hook_spool_dir=hook_spool_dir,
+            dry_run=False,
+        )
+        is False
+    )
+
+    second_sock = tmp_path / "hooks-debug.sock"
+    assert (
+        installer.install_claude(
+            settings_path,
+            instance_id="debug",
+            hook_sock=second_sock,
+            hook_spool_dir=tmp_path / "spool-debug",
+            dry_run=False,
+        )
+        is True
+    )
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    commands = [
+        hook["command"]
+        for entry in data["hooks"]["UserPromptSubmit"]
+        for hook in entry["hooks"]
+    ]
+    assert any(f"OPENFOCUS_HOOK_SOCK={hook_sock}" in c for c in commands)
+    assert any(f"OPENFOCUS_HOOK_SOCK={second_sock}" in c for c in commands)
+
+
+def test_claude_hook_writes_claude_code_envelope_to_spool(tmp_path: Path) -> None:
+    installer = _load_installer()
+    hook = installer.CLAUDE_HOOK
+    spool = tmp_path / "spool-dev"
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENFOCUS_REGISTERED_INSTANCE_ID": "dev",
+            "OPENFOCUS_INSTANCE_ID": "dev",
+            "OPENFOCUS_HOOK_SOCK": str(tmp_path / "missing.sock"),
+            "OPENFOCUS_HOOK_SPOOL_DIR": str(spool),
+            "OPENFOCUS_TASK_ID": "task-public-id",
+            "OPENFOCUS_TERMINAL_ID": "term-1",
+        }
+    )
+
+    result = subprocess.run(
+        ["sh", str(hook), "user-prompt-submit"],
+        input=json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "sess-claude",
+                "prompt": "hello",
+            }
+        ),
+        text=True,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    files = list(spool.glob("*.json"))
+    assert len(files) == 1
+    envelope = json.loads(files[0].read_text(encoding="utf-8"))
+    assert envelope["agent_runtime"] == "claude-code"
+    assert envelope["hook_kind"] == "user-prompt-submit"
+    assert envelope["runtime"]["openfocus_instance_id"] == "dev"
+    assert envelope["runtime"]["openfocus_task_id"] == "task-public-id"
+    assert envelope["runtime"]["openfocus_terminal_id"] == "term-1"
+    assert envelope["payload"]["session_id"] == "sess-claude"
+    assert envelope["payload"]["prompt"] == "hello"
+
+
 def test_installer_main_loads_instance_id_from_env_file(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
@@ -386,6 +504,7 @@ def test_installer_main_loads_instance_id_from_env_file(
     env_path.write_text("OPENFOCUS_INSTANCE_ID=dev\n", encoding="utf-8")
     coco_config = tmp_path / "traecli.yaml"
     codex_hooks = tmp_path / "hooks.json"
+    claude_settings = tmp_path / "settings.json"
 
     monkeypatch.delenv("OPENFOCUS_INSTANCE_ID", raising=False)
     monkeypatch.delenv("OPENFOCUS_HOOK_SOCK", raising=False)
@@ -401,6 +520,8 @@ def test_installer_main_loads_instance_id_from_env_file(
             str(coco_config),
             "--codex-hooks",
             str(codex_hooks),
+            "--claude-settings",
+            str(claude_settings),
         ],
     )
 
@@ -418,3 +539,8 @@ def test_installer_main_loads_instance_id_from_env_file(
     coco_text = coco_config.read_text(encoding="utf-8")
     assert "openfocus:coco-hook BEGIN instance=dev" in coco_text
     assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in coco_text
+
+    claude_data = json.loads(claude_settings.read_text(encoding="utf-8"))
+    command = claude_data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert "OPENFOCUS_REGISTERED_INSTANCE_ID=dev" in command
+    assert ".openfocus/hooks-dev.sock" in command

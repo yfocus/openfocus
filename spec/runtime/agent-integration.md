@@ -135,7 +135,7 @@ OpenFocus 将外部 Agent 报告和本机 runtime 状态分开处理：
 
 ### Runtime Activity 派生规则
 
-悬浮球不展示所有 events，只展示 runtime activity read model，并显示“进入当前状态已有多久”。当前实现的主要信号来源是 Companion runtime hooks（Codex/Coco hook shim -> Companion `AgentRuntimeSignal` -> Core），而不是 `/api/agent/events`：
+悬浮球不展示所有 events，只展示 runtime activity read model，并显示“进入当前状态已有多久”。当前实现的主要信号来源是 Companion runtime hooks（Codex/Coco/Claude Code hook shim -> Companion `AgentRuntimeSignal` -> Core），而不是 `/api/agent/events`：
 
 1. Running：`runtime.turn.submitted` / `runtime.turn.started` / `runtime.turn.resumed` / `runtime.turn.activity` → `task_agent_activity.state = running`。其中 `runtime.turn.activity` 通常来自 `PreToolUse` / `PostToolUse`，用于用户 approval 后恢复 running。
 2. Waiting：`runtime.turn.waiting_for_approval` / `runtime.turn.waiting_for_input` / `runtime.turn.waiting_for_confirmation` → `state = waiting`。

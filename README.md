@@ -201,8 +201,9 @@ http://127.0.0.1:8001/companions
 
 **Install agent runtime hooks**
 
-OpenFocus tracks Coco and Codex turns through local hooks. The installer backs up
-existing Coco/Codex hook configuration before writing changes:
+OpenFocus tracks Coco, Codex, and Claude Code turns through local hooks. The
+installer backs up existing Coco/Codex/Claude hook configuration before writing
+changes:
 
 ```shell
 sh scripts/install_agent_hooks.py
@@ -307,6 +308,26 @@ The OpenFocus Coco block registers these events:
 - `post_compact`
 - `notification`
 - `permission_request`
+
+**Claude Code hook registration**
+
+Claude Code hooks are installed into `~/.claude/settings.json`; override the
+path with `--claude-settings` if needed. OpenFocus appends command hook matcher
+groups and preserves existing Claude Code settings.
+
+The OpenFocus Claude Code entries register these events:
+
+- `SessionStart`
+- `UserPromptSubmit`
+- `PermissionRequest`
+- `PreToolUse`
+- `PostToolUse`
+- `PostToolUseFailure`
+- `Stop`
+- `Notification`
+- `SessionEnd`
+
+Run `/hooks` in Claude Code to inspect the loaded OpenFocus entries.
 
 ## Development
 

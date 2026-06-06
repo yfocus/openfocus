@@ -46,7 +46,7 @@ Companion 是运行在本机（或远端工作机）上的常驻桥接进程，�
 - 结果/事件回传（Companion -> OpenFocus）：
   - 命令结果：`request_id` 对应的 `response`（ok/error + payload）。
   - 过程事件：stdout/stderr、阶段进度、会话状态变更等（可映射为 `/api/agent/events` 落库）。
-  - runtime signal：Codex/Coco hooks、turn lifecycle、approval/input waiting、turn completed 等本机信号，通过 `AgentRuntimeSignal` 回传 Core，由 Core 更新 `agent_turns` / `task_agent_activity`。
+  - runtime signal：Codex/Coco/Claude Code hooks、turn lifecycle、approval/input waiting、turn completed 等本机信号，通过 `AgentRuntimeSignal` 回传 Core，由 Core 更新 `agent_turns` / `task_agent_activity`。
 - 断线重连：指数退避；重连后重新发送 `hello`；OpenFocus 以 `device_id` 关联同一设备。
 - 任一侧崩溃或主动断开时，OpenFocus 必须及时关闭服务端内存连接、停止 ping/outgoing
   循环并清理在线 registry；Companion 侧重连日志必须限流，避免 server 或 Companion
@@ -219,10 +219,11 @@ hook shim 会把 `OPENFOCUS_INSTANCE_ID` 写入 envelope。Companion 收到 sign
 这允许多个 OpenFocus 实例都注册 hook，但只有启动该 agent 的实例会接受 runtime
 activity。
 
-该 socket 只用于本机 hook 回调，不暴露 HTTP 端口。OpenFocus 提供 Codex/Coco hook shim：
+该 socket 只用于本机 hook 回调，不暴露 HTTP 端口。OpenFocus 提供 Codex/Coco/Claude Code hook shim：
 
 - `openfocus/hooks/openfocus-codex-hook.sh`
 - `openfocus/hooks/openfocus-coco-hook.sh`
+- `openfocus/hooks/openfocus-claude-hook.sh`
 
 Codex `~/.codex/hooks.json` installation must use Codex CLI config event keys:
 `SessionStart`、`UserPromptSubmit`、`PermissionRequest`、`PreToolUse`、
@@ -236,6 +237,12 @@ TUI 不会按预期执行 default OpenFocus hook。`PreToolUse` / `PostToolUse`
 Codex 安装 hook 后还必须由用户在 Codex TUI 中运行 `/hooks`，并显式 trust
 OpenFocus default hook entries；未 trust 前 Codex 不会把 hook events 发送给
 OpenFocus。
+
+Claude Code `~/.claude/settings.json` installation must use Claude Code hook
+event keys such as `SessionStart`、`UserPromptSubmit`、`PermissionRequest`、
+`PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`Stop`、`Notification`
+and `SessionEnd`。Claude Code `/hooks` 可用于检查 OpenFocus entries 是否已经
+被 settings 加载。
 
 hook shim 行为：
 

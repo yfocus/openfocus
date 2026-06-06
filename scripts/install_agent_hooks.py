@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from openfocus.infrastructure import env as env_config  # noqa: E402
 
 CODEX_HOOK = REPO_ROOT / "openfocus" / "hooks" / "openfocus-codex-hook.sh"
 COCO_HOOK = REPO_ROOT / "openfocus" / "hooks" / "openfocus-coco-hook.sh"
+CLAUDE_HOOK = REPO_ROOT / "openfocus" / "hooks" / "openfocus-claude-hook.sh"
 CODEX_EVENTS = {
     "SessionStart": ("session-start", 5),
     "UserPromptSubmit": ("user-prompt-submit", 5),
@@ -31,6 +33,17 @@ CODEX_EVENTS = {
     "PreToolUse": ("pre-tool-use", 5),
     "PostToolUse": ("post-tool-use", 5),
     "Stop": ("stop", 5),
+}
+CLAUDE_EVENTS = {
+    "SessionStart": ("session-start", 5),
+    "UserPromptSubmit": ("user-prompt-submit", 5),
+    "PermissionRequest": ("permission-request", 600),
+    "PreToolUse": ("pre-tool-use", 5),
+    "PostToolUse": ("post-tool-use", 5),
+    "PostToolUseFailure": ("post-tool-use-failure", 5),
+    "Stop": ("stop", 5),
+    "Notification": ("notification", 5),
+    "SessionEnd": ("session-end", 5),
 }
 NON_CANONICAL_CODEX_EVENTS = {
     "sessionStart",
@@ -82,16 +95,37 @@ def _default_hook_spool_dir(instance_id: str) -> Path:
 def _codex_command(
     kind: str, *, instance_id: str, hook_sock: Path, hook_spool_dir: Path
 ) -> str:
+    return _agent_hook_command(
+        CODEX_HOOK,
+        kind,
+        instance_id=instance_id,
+        hook_sock=hook_sock,
+        hook_spool_dir=hook_spool_dir,
+    )
+
+
+def _agent_hook_command(
+    hook_path: Path,
+    kind: str,
+    *,
+    instance_id: str,
+    hook_sock: Path,
+    hook_spool_dir: Path,
+) -> str:
     return (
         f"OPENFOCUS_REGISTERED_INSTANCE_ID={shlex.quote(_safe_instance_id(instance_id))} "
         f"OPENFOCUS_HOOK_SOCK={shlex.quote(str(hook_sock))} "
         f"OPENFOCUS_HOOK_SPOOL_DIR={shlex.quote(str(hook_spool_dir))} "
-        f"sh {shlex.quote(str(CODEX_HOOK))} {shlex.quote(kind)}"
+        f"sh {shlex.quote(str(hook_path))} {shlex.quote(kind)}"
     )
 
 
 def _is_openfocus_codex_command(command: str) -> bool:
     return str(CODEX_HOOK) in command
+
+
+def _is_openfocus_claude_command(command: str) -> bool:
+    return str(CLAUDE_HOOK) in command
 
 
 def _command_targets_hook_sock(command: str, hook_sock: Path) -> bool:
@@ -108,14 +142,42 @@ def _ensure_codex_hook_entry(
     hook_sock: Path,
     hook_spool_dir: Path,
 ) -> bool:
-    hooks = data.setdefault("hooks", {})
-    entries = hooks.setdefault(event, [])
     command = _codex_command(
         kind,
         instance_id=instance_id,
         hook_sock=hook_sock,
         hook_spool_dir=hook_spool_dir,
     )
+    return _ensure_json_hook_entry(
+        data,
+        event=event,
+        command=command,
+        timeout=timeout,
+        is_openfocus_command=_is_openfocus_codex_command,
+    )
+
+
+def _prune_legacy_codex_openfocus_hooks(
+    data: dict[str, Any], *, hook_sock: Path
+) -> bool:
+    return _prune_legacy_json_openfocus_hooks(
+        data,
+        hook_sock=hook_sock,
+        is_openfocus_command=_is_openfocus_codex_command,
+        noncanonical_events=NON_CANONICAL_CODEX_EVENTS,
+    )
+
+
+def _ensure_json_hook_entry(
+    data: dict[str, Any],
+    *,
+    event: str,
+    command: str,
+    timeout: int,
+    is_openfocus_command: Callable[[str], bool],
+) -> bool:
+    hooks = data.setdefault("hooks", {})
+    entries = hooks.setdefault(event, [])
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -134,7 +196,7 @@ def _ensure_codex_hook_entry(
         if not isinstance(raw_hooks, list):
             continue
         if any(
-            _is_openfocus_codex_command(str(hook.get("command") or ""))
+            is_openfocus_command(str(hook.get("command") or ""))
             for hook in raw_hooks
             if isinstance(hook, dict)
         ):
@@ -144,9 +206,14 @@ def _ensure_codex_hook_entry(
     return True
 
 
-def _prune_legacy_codex_openfocus_hooks(
-    data: dict[str, Any], *, hook_sock: Path
+def _prune_legacy_json_openfocus_hooks(
+    data: dict[str, Any],
+    *,
+    hook_sock: Path,
+    is_openfocus_command: Callable[[str], bool],
+    noncanonical_events: set[str] | None = None,
 ) -> bool:
+    noncanonical = noncanonical_events or set()
     changed = False
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
@@ -168,7 +235,7 @@ def _prune_legacy_codex_openfocus_hooks(
                 command = (
                     str(hook.get("command") or "") if isinstance(hook, dict) else ""
                 )
-                if not _is_openfocus_codex_command(command):
+                if not is_openfocus_command(command):
                     kept.append(hook)
                     continue
                 is_legacy_without_socket = "OPENFOCUS_HOOK_SOCK=" not in command
@@ -177,7 +244,7 @@ def _prune_legacy_codex_openfocus_hooks(
                 if (
                     is_legacy_without_socket
                     or (is_same_instance and is_legacy_without_spool)
-                    or (event in NON_CANONICAL_CODEX_EVENTS and is_same_instance)
+                    or (event in noncanonical and is_same_instance)
                 ):
                     changed = True
                     continue
@@ -219,6 +286,89 @@ def install_codex(
         if backup is not None:
             verb = "would back up" if dry_run else "backed up"
             print(f"{verb} Codex config: {backup}")
+        if not dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+    return changed
+
+
+def _claude_command(
+    kind: str, *, instance_id: str, hook_sock: Path, hook_spool_dir: Path
+) -> str:
+    return _agent_hook_command(
+        CLAUDE_HOOK,
+        kind,
+        instance_id=instance_id,
+        hook_sock=hook_sock,
+        hook_spool_dir=hook_spool_dir,
+    )
+
+
+def _ensure_claude_hook_entry(
+    data: dict[str, Any],
+    event: str,
+    kind: str,
+    timeout: int,
+    *,
+    instance_id: str,
+    hook_sock: Path,
+    hook_spool_dir: Path,
+) -> bool:
+    command = _claude_command(
+        kind,
+        instance_id=instance_id,
+        hook_sock=hook_sock,
+        hook_spool_dir=hook_spool_dir,
+    )
+    return _ensure_json_hook_entry(
+        data,
+        event=event,
+        command=command,
+        timeout=timeout,
+        is_openfocus_command=_is_openfocus_claude_command,
+    )
+
+
+def _prune_legacy_claude_openfocus_hooks(
+    data: dict[str, Any], *, hook_sock: Path
+) -> bool:
+    return _prune_legacy_json_openfocus_hooks(
+        data,
+        hook_sock=hook_sock,
+        is_openfocus_command=_is_openfocus_claude_command,
+    )
+
+
+def install_claude(
+    path: Path,
+    *,
+    instance_id: str = "default",
+    hook_sock: Path,
+    hook_spool_dir: Path,
+    dry_run: bool,
+) -> bool:
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = {"hooks": {}}
+    changed = _prune_legacy_claude_openfocus_hooks(data, hook_sock=hook_sock)
+    for event, (kind, timeout) in CLAUDE_EVENTS.items():
+        changed |= _ensure_claude_hook_entry(
+            data,
+            event,
+            kind,
+            timeout,
+            instance_id=instance_id,
+            hook_sock=hook_sock,
+            hook_spool_dir=hook_spool_dir,
+        )
+    if changed:
+        backup = _backup(path, dry_run=dry_run)
+        if backup is not None:
+            verb = "would back up" if dry_run else "backed up"
+            print(f"{verb} Claude Code config: {backup}")
         if not dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -329,10 +479,11 @@ def install_coco(
 def main() -> int:
     env_config.load_dotenv_once(repo_root=REPO_ROOT)
     parser = argparse.ArgumentParser(
-        description="Install OpenFocus hooks for Coco/Trae and Codex."
+        description="Install OpenFocus hooks for Coco/Trae, Codex, and Claude Code."
     )
     parser.add_argument("--coco-config", default="~/.trae/traecli.yaml")
     parser.add_argument("--codex-hooks", default="~/.codex/hooks.json")
+    parser.add_argument("--claude-settings", default="~/.claude/settings.json")
     parser.add_argument(
         "--instance-id",
         default=os.environ.get("OPENFOCUS_INSTANCE_ID") or "default",
@@ -376,8 +527,16 @@ def main() -> int:
         hook_spool_dir=hook_spool_dir,
         dry_run=args.dry_run,
     )
+    claude_changed = install_claude(
+        Path(args.claude_settings).expanduser(),
+        instance_id=instance_id,
+        hook_sock=hook_sock,
+        hook_spool_dir=hook_spool_dir,
+        dry_run=args.dry_run,
+    )
     print(f"coco changed: {coco_changed}")
     print(f"codex changed: {codex_changed}")
+    print(f"claude changed: {claude_changed}")
     print(f"instance id: {instance_id}")
     print(f"hook socket: {hook_sock}")
     print(f"hook spool dir: {hook_spool_dir}")
@@ -386,6 +545,8 @@ def main() -> int:
             "Codex will ask you to trust the new OpenFocus hook on next matching hook run; "
             "if the TUI only shows a startup notice, open /hooks and approve the OpenFocus entries."
         )
+    if claude_changed:
+        print("Claude Code hook entries can be inspected with /hooks.")
     if args.dry_run:
         print("dry run: no files were modified")
     return 0

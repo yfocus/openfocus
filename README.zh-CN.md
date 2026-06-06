@@ -188,8 +188,8 @@ http://127.0.0.1:8001/companions
 
 **安装 Agent runtime hooks**
 
-OpenFocus 通过本地 hook 跟踪 Coco 和 Codex turn。安装脚本会在写入前备份已有的
-Coco/Codex hook 配置：
+OpenFocus 通过本地 hook 跟踪 Coco、Codex 和 Claude Code turn。安装脚本会在写入前备份已有的
+Coco/Codex/Claude hook 配置：
 
 ```shell
 sh scripts/install_agent_hooks.py
@@ -289,6 +289,26 @@ OpenFocus Coco block 会注册这些事件：
 - `post_compact`
 - `notification`
 - `permission_request`
+
+**Claude Code hook 注册**
+
+Claude Code hooks 会安装到 `~/.claude/settings.json`；如需覆盖路径，使用
+`--claude-settings`。OpenFocus 会追加 command hook matcher groups，并保留已有
+Claude Code settings。
+
+OpenFocus Claude Code entries 会注册这些事件：
+
+- `SessionStart`
+- `UserPromptSubmit`
+- `PermissionRequest`
+- `PreToolUse`
+- `PostToolUse`
+- `PostToolUseFailure`
+- `Stop`
+- `Notification`
+- `SessionEnd`
+
+在 Claude Code 中运行 `/hooks` 可以检查已加载的 OpenFocus entries。
 
 ## 开发命令
 
