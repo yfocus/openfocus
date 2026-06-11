@@ -153,6 +153,7 @@ AgentSpace is the task workspace. It binds one task to one workdir on one Compan
    - The prompt zone is below the settings area. If the `TERMINAL` pane is closed, the prompt zone disappears while the settings area remains visible.
    - `prompt zone` 提供 `send basic`，点击后把当前 Task 的 `Basic` 内容注入当前 terminal 输入区，但不得自动发送 Enter；其 `auto` 开启后，每次 terminal input submit 都会拼接 Task `Basic` 内容。
    - `prompt zone` 中的每个 prompt 都可以手动注入当前 terminal；每个 prompt 还有独立 `auto` 开关。`auto` 开启后，用户每次在 AgentSpace terminal 中提交消息时，OpenFocus 会在回车提交前把该 prompt 拼接进同一次输入。
+   - AgentSpace 右侧固定列支持 `Prompt Master` 模式：用户在文本框中输入草稿 prompt，点击 `Optimize` 后由 OpenFocus 内建 agent 结合当前 Task/Goal 上下文调用 LLM 优化文本，并把优化后的 prompt 返回到该文本框/结果区。该动作只返回优化文本，不自动注入或发送到 terminal，也不创建或持久化 prompt catalog 条目。
    - AgentSpace 不再提供 terminal 级 `Agent Mode` 开关；agent 当前运行态与提醒由 Companion runtime hooks 驱动。
    - 创建 AgentSpace 时，如果用户配置了 `Start Agent command`，页面自动创建的默认 terminal 必须直接执行该命令；用户后续点击 `+` 新建 terminal 时只创建空 terminal，不自动执行该命令。
    - The Start Agent edit button in the settings area opens AgentSpace layout settings modal, where users can edit Start Agent command, adjust three-pane font sizes, and choose each pane's open/close state.

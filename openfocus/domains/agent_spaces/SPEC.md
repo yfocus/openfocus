@@ -23,6 +23,9 @@ ownership state:
 - AgentSpace prompt catalog list, management ordering, create/update, enabled
   toggles, auto-enabled toggles, deletion, normalization, validation, and stable
   web-adapter payloads
+- AgentSpace Prompt Master optimize use case, which loads task/goal context for
+  an existing AgentSpace, calls the configured OpenFocus LLM provider, and
+  returns optimized prompt text without mutating prompt catalog state
 - AgentSpace web/API adapters expose workspace file list/read/raw and file path
   list endpoints through the Companion domain file helpers
 
@@ -71,6 +74,9 @@ ownership state:
   both after trim, limits title to 160 characters and content to 20000
   characters, reports missing prompts as a domain error for update/toggle, and
   treats deleting a missing prompt as idempotent success.
+- Prompt Master optimize trims input, requires a non-empty `prompt`, limits it
+  to 20000 characters, maps missing AgentSpace/task to not found, and maps LLM
+  provider/config/call failures to adapter-level upstream errors.
 - Built-in `send basic` injects the current Task `content` into the active terminal without submitting Enter and can participate in built-in auto prompt injection.
 - When an AgentSpace is created with `start_agent_command`, only the automatically created default terminal should submit that command; user-created terminals must remain blank.
 - AgentSpace UI settings are client-side presentation state. They may control files/preview/terminal font sizes and pane visibility without changing domain ownership or terminal lifecycle records.
@@ -84,6 +90,10 @@ ownership state:
 - Terminal names are unique per owner.
 - Closing/releasing a terminal removes its output rows as well as its session row.
 - Auto prompts are applied only to active AgentSpace terminal input. They do not apply to Agent Session `/send` or Inspiration terminal `Summary` / `Create Goal` flows.
+- Prompt Master optimize must not inject text into a terminal, submit Enter,
+  start an AgentSession, write terminal input history, or create/update/delete
+  `AgentSpacePrompt` records. It is a pure request/response optimization action
+  from the user's perspective.
 - Hiding an AgentSpace pane is layout-only and must not close terminals, release the AgentSpace, or mutate workspace files.
 - The settings column cannot be hidden. When the terminal pane is hidden, prompt-zone controls are hidden but settings controls remain available.
 - AgentSpace creation is an upsert by `Task.public_id`; creating a space for a

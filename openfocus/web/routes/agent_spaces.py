@@ -4,11 +4,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from ...agent.agents import prompt_master as prompt_master_agent
 from ...companion.grpc import CompanionGrpcError, CompanionGrpcServer
 from ...domains.agent_spaces import agent_sessions as agent_session_service
 from ...domains.agent_spaces import prompts as agent_space_prompts
@@ -185,6 +188,7 @@ def create_router(
     *,
     grpc_server: CompanionGrpcServer,
     templates: Jinja2Templates,
+    provider_factory: Callable[[], tuple[Any | None, str | None]],
     ttyd_auto_prompts: dict[str, dict[str, object]],
     agent_sse_subscribe,
     agent_sse_unsubscribe,
@@ -349,6 +353,34 @@ def create_router(
             result = agent_space_workspace.update_start_agent_command(space_id, raw)
         except agent_space_workspace.AgentSpaceUseCaseError as exc:
             raise _agent_space_workspace_http_error(exc) from exc
+        return result.to_dict()
+
+    @router.post("/api/agent_spaces/{space_id}/prompt_master/optimize")
+    def optimize_prompt_master(space_id: int, payload: dict) -> dict:
+        raw_prompt = str((payload or {}).get("prompt") or "")
+        try:
+            prompt_master_agent.clean_prompt_master_input(raw_prompt)
+            task_context = prompt_master_agent.load_agent_space_task_context(space_id)
+        except prompt_master_agent.PromptMasterSpaceNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except prompt_master_agent.PromptMasterValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        provider, provider_error = provider_factory()
+        if provider is None:
+            raise HTTPException(
+                status_code=502,
+                detail=provider_error or "LLM provider is unavailable",
+            )
+        try:
+            result = prompt_master_agent.PromptMasterAgent(
+                provider=provider,
+                task_context=task_context,
+            ).optimize(raw_prompt)
+        except prompt_master_agent.PromptMasterValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except prompt_master_agent.PromptMasterLLMError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         return result.to_dict()
 
     @router.delete("/api/tasks/{task_public_id}/agent_space")

@@ -144,6 +144,7 @@ def _agent_spaces_app(grpc_server: _GrpcServer) -> FastAPI:
         agent_spaces_routes.create_router(
             grpc_server=grpc_server,
             templates=Jinja2Templates(directory="openfocus/templates"),
+            provider_factory=lambda: (None, "Missing LLM configuration"),
             ttyd_auto_prompts={},
             agent_sse_subscribe=_subscribe,
             agent_sse_unsubscribe=lambda _session_id: None,

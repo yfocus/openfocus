@@ -8,6 +8,34 @@ import re
 from httpx import ASGITransport, AsyncClient
 
 
+def _create_agent_space_for_prompt_master() -> tuple[int, str]:
+    import datetime as dt
+
+    from openfocus.db import session_scope
+    from openfocus.models import AgentSpace, Goal, Task
+
+    with session_scope() as s:
+        goal = Goal(
+            title="Ship Prompt Master",
+            content="Add backend support for prompt optimization.",
+            due_date=dt.date.today(),
+        )
+        s.add(goal)
+        s.flush()
+        task = Task(
+            goal_id=goal.id,
+            title="Implement optimize endpoint",
+            content="Create an API that improves a textarea prompt with LLM context.",
+            status="todo",
+        )
+        s.add(task)
+        s.flush()
+        space = AgentSpace(task_public_id=task.public_id, root_path="/tmp/work")
+        s.add(space)
+        s.flush()
+        return int(space.id), str(task.public_id)
+
+
 def test_terminal_prompt_zone_loads_custom_prompts():
     from pathlib import Path
 
@@ -148,6 +176,178 @@ def test_agent_space_prompt_crud_and_page_render():
             )
             assert r.status_code == 200
             assert r.json()["items"] == []
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_optimize_returns_llm_prompt(monkeypatch):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.agent.llm.types import LLMCallResult
+        from openfocus.app import app
+        from openfocus.db import session_scope
+        from openfocus.models import AgentSpacePrompt
+
+        space_id, _task_public_id = _create_agent_space_for_prompt_master()
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = []
+
+            def chat_completions(self, **kwargs):
+                self.calls.append(kwargs)
+                user_text = str((kwargs["messages"][1] or {}).get("content") or "")
+                assert "Implement optimize endpoint" in user_text
+                assert "improves a textarea prompt" in user_text
+                assert "make this better" in user_text
+                return LLMCallResult(
+                    content="Review the current backend/spec/test changes and propose a concise implementation plan.",
+                    finish_reason="stop",
+                    usage={"total_tokens": 37},
+                    tool_calls=None,
+                )
+
+        provider = FakeProvider()
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (provider, None),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/agent_spaces/{space_id}/prompt_master/optimize",
+                json={"prompt": "make this better"},
+            )
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "ok": True,
+            "prompt": "Review the current backend/spec/test changes and propose a concise implementation plan.",
+            "usage": {"total_tokens": 37},
+        }
+        assert len(provider.calls) == 1
+        assert provider.calls[0]["temperature"] == 0.2
+
+        with session_scope() as s:
+            assert s.query(AgentSpacePrompt).count() == 0
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_optimize_rejects_empty_prompt(monkeypatch):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.app import app
+
+        space_id, _task_public_id = _create_agent_space_for_prompt_master()
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (_ for _ in ()).throw(AssertionError("provider not needed")),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/agent_spaces/{space_id}/prompt_master/optimize",
+                json={"prompt": "   "},
+            )
+
+        assert r.status_code == 400
+        assert r.json()["detail"] == "prompt is required"
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_optimize_maps_missing_space_to_404(monkeypatch):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.app import app
+
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (_ for _ in ()).throw(AssertionError("provider not needed")),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/agent_spaces/99999/prompt_master/optimize",
+                json={"prompt": "Improve this prompt"},
+            )
+
+        assert r.status_code == 404
+        assert r.json()["detail"] == "AgentSpace not found"
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_optimize_maps_llm_failure_to_502(monkeypatch):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.app import app
+
+        space_id, _task_public_id = _create_agent_space_for_prompt_master()
+
+        class FailingProvider:
+            def chat_completions(self, **kwargs):
+                raise RuntimeError("upstream unavailable")
+
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (FailingProvider(), None),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/agent_spaces/{space_id}/prompt_master/optimize",
+                json={"prompt": "Improve this prompt"},
+            )
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == "upstream unavailable"
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_optimize_maps_missing_llm_config_to_502(
+    monkeypatch,
+):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.app import app
+
+        space_id, _task_public_id = _create_agent_space_for_prompt_master()
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (None, "Missing LLM configuration"),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/agent_spaces/{space_id}/prompt_master/optimize",
+                json={"prompt": "Improve this prompt"},
+            )
+
+        assert r.status_code == 502
+        assert r.json()["detail"] == "Missing LLM configuration"
 
     import asyncio
 

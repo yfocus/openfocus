@@ -272,6 +272,7 @@ app.include_router(
     agent_spaces_routes.create_router(
         grpc_server=COMPANION_GRPC,
         templates=templates,
+        provider_factory=lambda: _get_llm_provider_or_error(),
         ttyd_auto_prompts=streaming.terminal_event_hub.ttyd_auto_prompts,
         agent_sse_subscribe=streaming.agent_sse_hub.subscribe,
         agent_sse_unsubscribe=streaming.agent_sse_hub.unsubscribe,

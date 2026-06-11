@@ -19,6 +19,10 @@ OpenFocus 的规范由一组文档共同定义。本目录是规范入口；本�
 - [Agent Integration](./runtime/agent-integration.md): 外部 Agent/Skill 接入、人类确认闭环与 Agent Session。
 - [Companion](./runtime/companion.md): Companion 控制面/数据面、gRPC、配对、安全与远程终端。
 
+## Domain Specs
+
+- [Agent Spaces](../openfocus/domains/agent_spaces/SPEC.md): AgentSpace workspace lifecycle, terminals, prompt zone, and Prompt Master backend boundaries.
+
 ## Planning
 
 - [Roadmap and Decisions](./roadmap.md): MVP 里程碑、验收标准与关键决策记录。
