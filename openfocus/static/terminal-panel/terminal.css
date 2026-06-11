@@ -412,6 +412,83 @@ a.rt-task-title:hover{
   color:var(--primary);
 }
 
+.rt-prompt-master-open{
+  text-align:center !important;
+}
+
+.rt-side.rt-prompt-master-mode .rt-task-panel,
+.rt-side.rt-prompt-master-mode .rt-prompt-zone{
+  display:none;
+}
+
+.rt-prompt-master-panel{
+  display:flex;
+  flex:1 1 auto;
+  min-height:0;
+  flex-direction:column;
+  gap:8px;
+}
+
+.rt-prompt-master-panel[hidden]{
+  display:none;
+}
+
+.rt-prompt-master-field{
+  display:flex;
+  flex:1 1 auto;
+  min-height:0;
+  flex-direction:column;
+  gap:8px;
+}
+
+.rt-prompt-master-field textarea{
+  width:100%;
+  flex:1 1 auto;
+  min-height:180px;
+  box-sizing:border-box;
+  resize:none;
+  padding:8px;
+  border:1px solid var(--input);
+  border-radius:calc(var(--radius) - 2px);
+  background:var(--background);
+  color:var(--foreground);
+  font-family:var(--mono);
+  font-size:12px;
+  line-height:1.35;
+  overflow:auto;
+}
+
+.rt-prompt-master-field textarea::placeholder{
+  color:var(--muted-foreground);
+}
+
+.rt-prompt-master-actions{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:6px;
+  width:100%;
+}
+
+.rt-prompt-master-actions button{
+  min-width:0;
+  padding:6px 4px;
+  text-align:center;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.rt-prompt-master-status{
+  min-height:15px;
+  color:var(--muted-foreground);
+  font-size:11px;
+  line-height:1.25;
+  overflow-wrap:anywhere;
+}
+
+.rt-prompt-master-status.error{
+  color:var(--danger);
+}
+
 .rt-goal-picker{
   display:flex;
   flex-direction:column;

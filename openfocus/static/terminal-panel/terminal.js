@@ -281,6 +281,7 @@
     const isInspiration = mode === 'inspiration';
     const commandApi = String(opts && opts.commandApi ? opts.commandApi : `/api/agent_spaces/${spaceId}/start_agent_command`).replace(/\/+$/, '');
     const promptApi = String(opts && opts.promptApi ? opts.promptApi : '/api/agent_space_prompts').replace(/\/+$/, '');
+    const promptMasterOptimizeApi = String(opts && opts.promptMasterOptimizeApi ? opts.promptMasterOptimizeApi : `/api/agent_spaces/${spaceId}/prompt_master/optimize`).replace(/\/+$/, '');
     const taskBasic = String(opts && opts.taskBasic ? opts.taskBasic : '');
     const taskTitle = String(opts && opts.taskTitle ? opts.taskTitle : 'Untitled task').trim() || 'Untitled task';
     const taskUrl = String(opts && opts.taskUrl ? opts.taskUrl : (taskPublicId ? `/goals?task=${encodeURIComponent(taskPublicId)}` : '')).trim();
@@ -378,6 +379,19 @@
               <button type="button" class="btn-ghost rt-start-agent-edit" id="rt-start-agent-edit" title="edit start agent command" aria-label="edit start agent command">✏</button>
             </div>
           </div>`;
+    const promptMasterHtml = isInspiration ? '' : `
+          <div class="rt-prompt-master-panel" id="rt-prompt-master-panel" hidden>
+            <label class="rt-prompt-master-field" for="rt-prompt-master-text">
+              <span class="rt-side-title">prompt master</span>
+              <textarea id="rt-prompt-master-text" rows="10" placeholder="Draft a prompt..."></textarea>
+            </label>
+            <div class="rt-prompt-master-actions">
+              <button type="button" class="btn-ghost" id="rt-prompt-master-optimize">optimize</button>
+              <button type="button" class="btn-primary" id="rt-prompt-master-send">send</button>
+              <button type="button" class="btn-ghost" id="rt-prompt-master-cancel">cancel</button>
+            </div>
+            <div class="rt-prompt-master-status" id="rt-prompt-master-status" aria-live="polite"></div>
+          </div>`;
     const taskDetailsModalHtml = isInspiration ? '' : `
         <div class="rt-modal-backdrop" id="rt-task-details-modal" hidden>
           <div class="rt-modal-card rt-task-modal-card">
@@ -458,8 +472,9 @@
           <div class="rt-prompt-zone" id="rt-prompt-zone">
             <div class="rt-side-title">prompt zone</div>
             <label class="rt-agent-switch rt-mouse-switch" title="scroll: wheel scrolls tmux history. copy: browser drag-copy friendly."><input type="checkbox" id="rt-mouse-switch" /><span class="rt-agent-slider" aria-hidden="true"></span><span class="rt-agent-text" id="rt-mouse-text">scroll</span></label>
-            ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-send-basic" title="send the task Basic content into the active terminal without pressing enter.">send basic</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="task_basic" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-report-progress">report progress</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="report_progress" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="pua" /><span>auto</span></label></div></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal.">start agent</button></div>'}
+            ${isInspiration ? '<button type="button" class="btn-ghost" id="rt-draft-summary" title="send the summary instructions as plain text into this terminal without pressing enter.">summary</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal" style="margin-top:auto;" title="choose a resource and generate a reviewable goal/tasks draft from it.">create goal</button>' : '<div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-send-basic" title="send the task Basic content into the active terminal without pressing enter.">send basic</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="task_basic" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-report-progress">report progress</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="report_progress" /><span>auto</span></label></div><div class="rt-prompt-row"><button type="button" class="btn-ghost rt-prompt-main" id="rt-pua" title="inject a proactivity escalation prompt into the active terminal.">pua</button><label class="rt-auto-switch" title="append this prompt whenever a message is submitted"><input type="checkbox" data-auto-builtin="pua" /><span>auto</span></label></div></div><div class="rt-zone-divider" aria-hidden="true"></div><div class="rt-zone-section"><div class="rt-prompt-list" id="rt-custom-prompts"><div class="rt-prompt-empty">loading prompts...</div></div></div><button type="button" class="btn-ghost rt-prompt-master-open" id="rt-prompt-master-open" title="open Prompt Master for this AgentSpace.">Prompt Master</button><div class="rt-start-agent-row"><button type="button" class="btn-primary rt-start-agent-btn" id="rt-start-agent" title="run the configured agent command in a new terminal.">start agent</button></div>'}
           </div>
+          ${promptMasterHtml}
         </div>`;
     const modalHtml = `
         ${isInspiration ? '<div class="rt-modal-backdrop" id="rt-create-goal-modal" hidden><div class="rt-modal-card"><div class="rt-modal-head"><strong>Create Goal</strong><button type="button" class="btn-ghost" id="rt-create-goal-modal-x">×</button></div><div class="rt-modal-body"><label for="rt-create-goal-select">Resource</label><select id="rt-create-goal-select">' + goalSelectOptionsHtml + '</select><div class="rt-goal-hint">Choose one resource file to generate a reviewable draft for Publish.</div></div><div class="rt-modal-actions"><button type="button" class="btn-ghost" id="rt-create-goal-cancel">Cancel</button><button type="button" class="btn-primary insp-create-btn" id="rt-create-goal-confirm">Create Goal</button></div></div></div>' : ''}
@@ -489,6 +504,13 @@
     const btnReportProgress = q('#rt-report-progress');
     const btnPua = q('#rt-pua');
     const customPromptsEl = q('#rt-custom-prompts');
+    const btnPromptMasterOpen = q('#rt-prompt-master-open');
+    const promptMasterPanel = q('#rt-prompt-master-panel');
+    const promptMasterText = q('#rt-prompt-master-text');
+    const promptMasterStatusEl = q('#rt-prompt-master-status');
+    const btnPromptMasterOptimize = q('#rt-prompt-master-optimize');
+    const btnPromptMasterSend = q('#rt-prompt-master-send');
+    const btnPromptMasterCancel = q('#rt-prompt-master-cancel');
     const btnStartAgent = q('#rt-start-agent');
     const btnStartAgentEdit = q('#rt-start-agent-edit');
     const btnDraftSummary = q('#rt-draft-summary');
@@ -941,6 +963,97 @@
       });
     }
 
+    function promptMasterTextValue(){
+      return String(promptMasterText && 'value' in promptMasterText ? promptMasterText.value : '');
+    }
+
+    function setPromptMasterStatus(text, isError){
+      if(!promptMasterStatusEl) return;
+      promptMasterStatusEl.textContent = String(text || '');
+      promptMasterStatusEl.classList.toggle('error', !!isError);
+    }
+
+    function setPromptMasterBusy(busy){
+      [btnPromptMasterOptimize, btnPromptMasterSend, btnPromptMasterCancel].forEach((btn)=> {
+        if(btn instanceof HTMLButtonElement) btn.disabled = !!busy;
+      });
+    }
+
+    function openPromptMasterMode(){
+      if(isInspiration || !promptMasterPanel) return;
+      qq('.rt-side').forEach((el)=> {
+        if(el instanceof HTMLElement) el.classList.add('rt-prompt-master-mode');
+      });
+      promptMasterPanel.hidden = false;
+      setPromptMasterStatus('', false);
+      try{ promptMasterText && promptMasterText.focus && promptMasterText.focus(); }catch(_){ }
+    }
+
+    function closePromptMasterMode(){
+      if(!promptMasterPanel) return;
+      promptMasterPanel.hidden = true;
+      setPromptMasterStatus('', false);
+      setPromptMasterBusy(false);
+      qq('.rt-side').forEach((el)=> {
+        if(el instanceof HTMLElement) el.classList.remove('rt-prompt-master-mode');
+      });
+      focusActive();
+    }
+
+    async function optimizePromptMaster(){
+      const text = promptMasterTextValue();
+      if(!text.trim()){
+        setPromptMasterStatus('Enter a prompt first.', true);
+        toast('Enter a prompt first');
+        try{ promptMasterText && promptMasterText.focus && promptMasterText.focus(); }catch(_){ }
+        return;
+      }
+      setPromptMasterBusy(true);
+      setPromptMasterStatus('Optimizing...', false);
+      try{
+        const data = await fetchJson(promptMasterOptimizeApi, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: text }),
+        });
+        const next = String(data && typeof data.prompt !== 'undefined' ? data.prompt : '');
+        if(!next.trim()) throw new Error('optimized prompt missing');
+        if(promptMasterText && 'value' in promptMasterText) promptMasterText.value = next;
+        setPromptMasterStatus('Optimized.', false);
+        toast('Prompt optimized');
+      }catch(err){
+        const message = String(err && err.message ? err.message : err || 'optimize failed');
+        setPromptMasterStatus(message, true);
+        toast(message);
+      }finally{
+        setPromptMasterBusy(false);
+      }
+    }
+
+    async function sendPromptMaster(){
+      const text = promptMasterTextValue();
+      if(!text.trim()){
+        setPromptMasterStatus('Enter a prompt first.', true);
+        toast('Enter a prompt first');
+        try{ promptMasterText && promptMasterText.focus && promptMasterText.focus(); }catch(_){ }
+        return;
+      }
+      try{
+        const ok = await injectPromptToTerminal(activeTerminal(), text, { bracketedPaste: true, submit: false, focus: true });
+        if(!ok){
+          setPromptMasterStatus('terminal unavailable', true);
+          toast('terminal unavailable');
+          return;
+        }
+        closePromptMasterMode();
+        toast('Prompt sent');
+      }catch(err){
+        const message = String(err && err.message ? err.message : err || 'send failed');
+        setPromptMasterStatus(message, true);
+        toast(message);
+      }
+    }
+
     function openCreateGoalModal(){
       if(!createGoalModal) return;
       createGoalModal.hidden = false;
@@ -1300,6 +1413,14 @@
     });
     btnReportProgress?.addEventListener('click', ()=> pasteToActive(buildPasteText('report_progress')));
     btnPua?.addEventListener('click', ()=> pasteToActive(buildPasteText('pua')));
+    btnPromptMasterOpen?.addEventListener('click', openPromptMasterMode);
+    btnPromptMasterOptimize?.addEventListener('click', ()=> {
+      void optimizePromptMaster();
+    });
+    btnPromptMasterSend?.addEventListener('click', ()=> {
+      void sendPromptMaster();
+    });
+    btnPromptMasterCancel?.addEventListener('click', closePromptMasterMode);
     qq('[data-auto-builtin]').forEach((el)=> {
       el.addEventListener('change', ()=>{
         if(!(el instanceof HTMLInputElement)) return;

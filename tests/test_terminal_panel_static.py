@@ -144,3 +144,47 @@ def test_agent_space_task_panel_and_layout_settings_are_exposed():
     assert 'id="system-dialog"' in base_template
     assert "system-files-font-size" in base_template
     assert "openfocus.agent_space.settings.v1" in base_template
+
+
+def test_agent_space_prompt_master_frontend_hooks_are_exposed():
+    source = open(
+        "openfocus/static/terminal-panel/terminal.js", encoding="utf-8"
+    ).read()
+    css = open("openfocus/static/terminal-panel/terminal.css", encoding="utf-8").read()
+
+    assert "const promptMasterHtml = isInspiration ? ''" in source
+    assert 'id="rt-prompt-master-open"' in source
+    assert ">Prompt Master</button>" in source
+    assert 'id="rt-prompt-master-panel"' in source
+    assert 'id="rt-prompt-master-text"' in source
+    assert 'id="rt-prompt-master-optimize">optimize</button>' in source
+    assert 'id="rt-prompt-master-send">send</button>' in source
+    assert 'id="rt-prompt-master-cancel">cancel</button>' in source
+    assert source.index('id="rt-prompt-master-open"') < source.index(
+        'id="rt-start-agent"'
+    )
+
+    assert (
+        "`/api/agent_spaces/${spaceId}/prompt_master/optimize`"
+        in source
+    )
+    assert "body: JSON.stringify({ prompt: text })" in source
+    assert "if(promptMasterText && 'value' in promptMasterText) promptMasterText.value = next" in source
+    assert "toast('Prompt optimized')" in source
+    assert (
+        "injectPromptToTerminal(activeTerminal(), text, { bracketedPaste: true, submit: false, focus: true })"
+        in source
+    )
+    assert "closePromptMasterMode();" in source
+    assert "btnPromptMasterCancel?.addEventListener('click', closePromptMasterMode)" in source
+    assert "Enter a prompt first" in source
+
+    assert ".rt-side.rt-prompt-master-mode .rt-task-panel" in css
+    assert ".rt-side.rt-prompt-master-mode .rt-prompt-zone" in css
+    assert ".rt-prompt-master-actions" in css
+    assert "grid-template-columns:repeat(3, minmax(0, 1fr))" in css
+    assert '.rt-side[data-terminal-open="0"] .rt-prompt-zone' in css
+    assert '.rt-side[data-terminal-open="0"] .rt-prompt-master-panel' not in css
+    assert "if(isInspiration || !promptMasterPanel) return;" in source
+    assert "el.classList.add('rt-prompt-master-mode')" in source
+    assert "promptMasterPanel.hidden = false;" in source
