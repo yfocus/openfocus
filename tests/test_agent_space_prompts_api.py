@@ -182,7 +182,9 @@ def test_agent_space_prompt_crud_and_page_render():
     asyncio.run(_run())
 
 
-def test_agent_space_prompt_master_optimize_returns_llm_prompt(monkeypatch):
+def test_agent_space_prompt_master_optimize_rewrites_user_draft_without_task_context(
+    monkeypatch,
+):
     async def _run() -> None:
         import openfocus.app as app_module
         from openfocus.agent.llm.types import LLMCallResult
@@ -198,12 +200,15 @@ def test_agent_space_prompt_master_optimize_returns_llm_prompt(monkeypatch):
 
             def chat_completions(self, **kwargs):
                 self.calls.append(kwargs)
+                system_text = str((kwargs["messages"][0] or {}).get("content") or "")
                 user_text = str((kwargs["messages"][1] or {}).get("content") or "")
-                assert "Implement optimize endpoint" in user_text
-                assert "improves a textarea prompt" in user_text
-                assert "make this better" in user_text
+                assert "return fluent natural Chinese" in system_text
+                assert "Do not add task, goal, repository" in system_text
+                assert "餐厅推荐，好吃的地方，尊贵的客人需要，中文我不好" in user_text
+                assert "Implement optimize endpoint" not in user_text
+                assert "improves a textarea prompt" not in user_text
                 return LLMCallResult(
-                    content="Review the current backend/spec/test changes and propose a concise implementation plan.",
+                    content="请推荐一些适合招待尊贵客人的好吃餐厅。我的中文不太好，请帮我把表达写得自然、得体一些。",
                     finish_reason="stop",
                     usage={"total_tokens": 37},
                     tool_calls=None,
@@ -220,13 +225,13 @@ def test_agent_space_prompt_master_optimize_returns_llm_prompt(monkeypatch):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
                 f"/api/agent_spaces/{space_id}/prompt_master/optimize",
-                json={"prompt": "make this better"},
+                json={"prompt": "餐厅推荐，好吃的地方，尊贵的客人需要，中文我不好"},
             )
 
         assert r.status_code == 200
         assert r.json() == {
             "ok": True,
-            "prompt": "Review the current backend/spec/test changes and propose a concise implementation plan.",
+            "prompt": "请推荐一些适合招待尊贵客人的好吃餐厅。我的中文不太好，请帮我把表达写得自然、得体一些。",
             "usage": {"total_tokens": 37},
         }
         assert len(provider.calls) == 1
@@ -234,6 +239,47 @@ def test_agent_space_prompt_master_optimize_returns_llm_prompt(monkeypatch):
 
         with session_scope() as s:
             assert s.query(AgentSpacePrompt).count() == 0
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_agent_space_prompt_master_strips_wrapping_code_fence(monkeypatch):
+    async def _run() -> None:
+        import openfocus.app as app_module
+        from openfocus.agent.llm.types import LLMCallResult
+        from openfocus.app import app
+
+        space_id, _task_public_id = _create_agent_space_for_prompt_master()
+
+        class FakeProvider:
+            def chat_completions(self, **kwargs):
+                return LLMCallResult(
+                    content="```text\nPlease write this request in clear English.\n```",
+                    finish_reason="stop",
+                    usage={},
+                    tool_calls=None,
+                )
+
+        monkeypatch.setattr(
+            app_module,
+            "_get_llm_provider_or_error",
+            lambda: (FakeProvider(), None),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/api/agent_spaces/{space_id}/prompt_master/optimize",
+                json={"prompt": "write clear english"},
+            )
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "ok": True,
+            "prompt": "Please write this request in clear English.",
+        }
 
     import asyncio
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,23 +86,30 @@ class PromptMasterAgent:
 
     def instructions(self) -> str:
         return (
-            "You are OpenFocus Prompt Master inside AgentSpace.\n"
-            "Optimize the user's draft prompt for a command-line coding agent that will work in the current task workspace.\n"
-            "Preserve the user's intent, constraints, and requested output. Make vague requests concrete, add relevant task context, and remove filler.\n"
-            "Do not create a prompt catalog item. Do not ask to send anything to a terminal. Do not include commentary.\n"
-            "Return only the optimized prompt text."
+            "You are OpenFocus Prompt Master.\n"
+            "Rewrite the user's draft into one clear, fluent prompt while preserving the user's original meaning.\n"
+            "Language policy:\n"
+            "- If the draft is mainly Chinese or broken Chinese, return fluent natural Chinese.\n"
+            "- If the draft is mainly English or broken English, return fluent natural English.\n"
+            "- If the draft mixes languages, use the language that best preserves the user's apparent intent.\n"
+            "Strict preservation rules:\n"
+            "- Do not add task, goal, repository, product, user, or AgentSpace context unless that information is explicitly present in the draft.\n"
+            "- Do not change the requested subject, audience, tone, constraints, or deliverable.\n"
+            "- Do not turn a general writing/translation request into a coding or implementation prompt.\n"
+            "- Do not invent numbered requirements, context blocks, IDs, file names, or project details.\n"
+            "Style rules:\n"
+            "- Make fragmented text grammatically complete and polite when appropriate.\n"
+            "- Remove filler and ambiguity only when it does not change meaning.\n"
+            "- Return only the rewritten prompt text. Do not use Markdown fences, labels, explanations, or commentary.\n"
+            "Examples:\n"
+            "Draft: 餐厅推荐，好吃的地方，尊贵的客人需要，中文我不好\n"
+            "Output: 请推荐一些适合招待尊贵客人的好吃餐厅。我的中文不太好，请帮我把表达写得自然、得体一些。\n"
+            "Draft: restaurant recommendation good place important guest my chinese not good\n"
+            "Output: Please recommend good restaurants suitable for hosting an important guest. My Chinese is not very good, so please help me phrase the request naturally and politely."
         )
 
     def optimize(self, prompt: str) -> PromptMasterResult:
         clean_prompt = clean_prompt_master_input(prompt)
-        context_payload = {
-            "task_public_id": self.task_context.task_public_id,
-            "task_title": self.task_context.task_title,
-            "task_content": self.task_context.task_content,
-            "goal_title": self.task_context.goal_title,
-            "goal_content": self.task_context.goal_content,
-            "draft_prompt": clean_prompt,
-        }
 
         try:
             result = self.provider.chat_completions(
@@ -111,8 +117,11 @@ class PromptMasterAgent:
                     {"role": "system", "content": self.instructions()},
                     {
                         "role": "user",
-                        "content": json.dumps(
-                            context_payload, ensure_ascii=False, indent=2
+                        "content": (
+                            "Rewrite this draft prompt. Preserve only the user's intent from inside the delimiters.\n"
+                            'Draft prompt:\n"""\n'
+                            f"{clean_prompt}\n"
+                            '"""'
                         ),
                     },
                 ],
@@ -124,7 +133,9 @@ class PromptMasterAgent:
         except Exception as exc:
             raise PromptMasterLLMError(str(exc) or "LLM call failed") from exc
 
-        optimized = str(getattr(result, "content", "") or "").strip()
+        optimized = _strip_wrapping_code_fence(
+            str(getattr(result, "content", "") or "")
+        )
         if not optimized:
             raise PromptMasterLLMError("LLM returned an empty prompt")
 
@@ -145,3 +156,15 @@ def optimize_agent_space_prompt(
     return PromptMasterAgent(provider=provider, task_context=task_context).optimize(
         clean_prompt
     )
+
+
+def _strip_wrapping_code_fence(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean.startswith("```") or not clean.endswith("```"):
+        return clean
+    lines = clean.splitlines()
+    if len(lines) < 2:
+        return clean
+    if not lines[0].startswith("```") or lines[-1].strip() != "```":
+        return clean
+    return "\n".join(lines[1:-1]).strip()

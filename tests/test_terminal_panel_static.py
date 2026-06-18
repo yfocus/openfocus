@@ -153,35 +153,59 @@ def test_agent_space_prompt_master_frontend_hooks_are_exposed():
     css = open("openfocus/static/terminal-panel/terminal.css", encoding="utf-8").read()
 
     assert "const promptMasterHtml = isInspiration ? ''" in source
-    assert 'id="rt-prompt-master-open"' in source
+    assert '<div class="rt-side-bottom-actions">' in source
+    assert 'class="btn-primary rt-side-action-btn" id="rt-prompt-master-open"' in source
+    assert 'class="btn-primary rt-side-action-btn" id="rt-start-agent"' in source
     assert ">Prompt Master</button>" in source
     assert 'id="rt-prompt-master-panel"' in source
     assert 'id="rt-prompt-master-text"' in source
-    assert 'id="rt-prompt-master-optimize">optimize</button>' in source
-    assert 'id="rt-prompt-master-send">send</button>' in source
-    assert 'id="rt-prompt-master-cancel">cancel</button>' in source
+    assert (
+        'class="btn-ghost rt-prompt-master-action" id="rt-prompt-master-optimize">optimize</button>'
+        in source
+    )
+    assert (
+        'class="btn-ghost rt-prompt-master-action" id="rt-prompt-master-send">send</button>'
+        in source
+    )
+    assert (
+        'class="btn-ghost rt-prompt-master-action" id="rt-prompt-master-cancel">cancel</button>'
+        in source
+    )
     assert source.index('id="rt-prompt-master-open"') < source.index(
         'id="rt-start-agent"'
     )
 
+    assert "`/api/agent_spaces/${spaceId}/prompt_master/optimize`" in source
+    assert "body: JSON.stringify({ prompt: text })" in source
     assert (
-        "`/api/agent_spaces/${spaceId}/prompt_master/optimize`"
+        "if(promptMasterText && 'value' in promptMasterText) promptMasterText.value = next"
         in source
     )
-    assert "body: JSON.stringify({ prompt: text })" in source
-    assert "if(promptMasterText && 'value' in promptMasterText) promptMasterText.value = next" in source
     assert "toast('Prompt optimized')" in source
     assert (
         "injectPromptToTerminal(activeTerminal(), text, { bracketedPaste: true, submit: false, focus: true })"
         in source
     )
     assert "closePromptMasterMode();" in source
-    assert "btnPromptMasterCancel?.addEventListener('click', closePromptMasterMode)" in source
+    assert (
+        "btnPromptMasterCancel?.addEventListener('click', closePromptMasterMode)"
+        in source
+    )
     assert "Enter a prompt first" in source
 
+    assert ".rt-side-bottom-actions" in css
+    assert ".rt-side-bottom-actions .rt-side-action-btn" in css
+    assert "flex-direction:column" in css
+    assert 'class="rt-zone-section rt-custom-prompt-section"' in source
+    assert ".rt-custom-prompt-section" in css
+    assert "margin-bottom:-8px" in css
+    assert ".rt-prompt-list" in css
+    assert "max-height:28vh" not in css
+    assert ".rt-start-agent-row" not in css
     assert ".rt-side.rt-prompt-master-mode .rt-task-panel" in css
     assert ".rt-side.rt-prompt-master-mode .rt-prompt-zone" in css
     assert ".rt-prompt-master-actions" in css
+    assert ".rt-prompt-master-actions .rt-prompt-master-action" in css
     assert "grid-template-columns:repeat(3, minmax(0, 1fr))" in css
     assert '.rt-side[data-terminal-open="0"] .rt-prompt-zone' in css
     assert '.rt-side[data-terminal-open="0"] .rt-prompt-master-panel' not in css

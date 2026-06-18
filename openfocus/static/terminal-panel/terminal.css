@@ -253,6 +253,12 @@ a.rt-task-title:hover{
   gap:6px;
 }
 
+.rt-custom-prompt-section{
+  flex:1 1 auto;
+  min-height:0;
+  margin-bottom:-8px;
+}
+
 .rt-zone-divider{
   height:1px;
   width:100%;
@@ -348,8 +354,8 @@ a.rt-task-title:hover{
   display:flex;
   flex-direction:column;
   gap:6px;
+  flex:1 1 auto;
   min-height:0;
-  max-height:28vh;
   overflow:auto;
   padding-right:2px;
 }
@@ -373,47 +379,24 @@ a.rt-task-title:hover{
   text-overflow:ellipsis;
 }
 
-.rt-start-agent-row{
+.rt-side-bottom-actions{
   margin-top:auto;
   display:flex;
+  flex-direction:column;
   align-items:stretch;
   gap:6px;
   width:100%;
 }
 
-.rt-start-agent-row .rt-start-agent-btn{
-  flex:1 1 auto;
+.rt-side-bottom-actions .rt-side-action-btn{
+  width:100%;
+  flex:0 0 auto;
   min-width:0;
   padding:6px 4px;
   font-size:12px;
   line-height:1.2;
   white-space:nowrap;
   text-align:center;
-}
-
-.rt-start-agent-row .rt-start-agent-edit{
-  flex:0 0 32px;
-  width:32px;
-  min-height:32px;
-  padding:6px 0;
-  border-color:color-mix(in srgb, var(--primary) 78%, var(--border));
-  background:color-mix(in srgb, var(--primary) 18%, transparent);
-  color:var(--primary);
-  font-size:15px;
-  font-weight:800;
-  line-height:1;
-  text-align:center;
-  box-shadow:0 0 0 1px color-mix(in srgb, var(--primary) 16%, transparent) inset;
-}
-
-.rt-start-agent-row .rt-start-agent-edit:hover{
-  border-color:var(--primary);
-  background:color-mix(in srgb, var(--primary) 28%, transparent);
-  color:var(--primary);
-}
-
-.rt-prompt-master-open{
-  text-align:center !important;
 }
 
 .rt-side.rt-prompt-master-mode .rt-task-panel,
@@ -469,7 +452,7 @@ a.rt-task-title:hover{
   width:100%;
 }
 
-.rt-prompt-master-actions button{
+.rt-prompt-master-actions .rt-prompt-master-action{
   min-width:0;
   padding:6px 4px;
   text-align:center;
