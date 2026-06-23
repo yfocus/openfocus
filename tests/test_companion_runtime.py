@@ -358,6 +358,118 @@ def test_terminal_manager_starts_ttyd_with_xterm_measured_font_options(
     assert "fontSize=13" in client_options
 
 
+def test_terminal_manager_stop_kills_tmux_session_without_memory_state(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("OPENFOCUS_TEST_TERMINAL_ECHO", raising=False)
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+
+    commands: list[tuple[str, ...]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        commands.append(tuple(str(item) for item in args))
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        rt.shutil,
+        "which",
+        lambda name: f"/fake/{name}" if name == "tmux" else None,
+    )
+    monkeypatch.setattr(
+        rt.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def _run() -> None:
+        manager = rt._TerminalManager()
+        await manager.stop(
+            terminal_id="term-after-restart",
+            out_q=asyncio.Queue(),
+        )
+
+    asyncio.run(_run())
+
+    assert any(
+        cmd[:4] == ("tmux", "kill-session", "-t", "of_term-after-restart")
+        for cmd in commands
+    )
+
+
+def test_terminal_manager_start_kills_tmux_session_when_ttyd_readiness_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("OPENFOCUS_TEST_TERMINAL_ECHO", raising=False)
+    rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")
+
+    commands: list[tuple[str, ...]] = []
+
+    class FakeProcess:
+        def __init__(self, *, returncode: int | None = 0) -> None:
+            self.returncode = returncode
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    ttyd_processes: list[FakeProcess] = []
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        cmd = tuple(str(item) for item in args)
+        commands.append(cmd)
+        if cmd[:2] == ("tmux", "has-session"):
+            return FakeProcess(returncode=1)
+        if cmd and cmd[0] == "ttyd":
+            proc = FakeProcess(returncode=None)
+            ttyd_processes.append(proc)
+            return proc
+        return FakeProcess(returncode=0)
+
+    async def fake_wait_tcp_ready(*_args, **_kwargs) -> None:
+        raise RuntimeError("ttyd did not become ready")
+
+    monkeypatch.setattr(rt.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(rt, "_find_free_port", lambda: 9877)
+    monkeypatch.setattr(rt, "_wait_tcp_ready", fake_wait_tcp_ready)
+    monkeypatch.setattr(
+        rt.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def _run() -> None:
+        manager = rt._TerminalManager()
+        with pytest.raises(RuntimeError, match="ttyd did not become ready"):
+            await manager.start(
+                terminal_id="term-ttyd-fail",
+                root_path=str(tmp_path),
+                base_path="/api/agent_spaces/1/terminals/term-ttyd-fail/ttyd/",
+                out_q=asyncio.Queue(),
+            )
+        assert await manager.list_sessions() == []
+
+    asyncio.run(_run())
+
+    assert ttyd_processes and ttyd_processes[0].terminated is True
+    assert any(
+        cmd[:4] == ("tmux", "kill-session", "-t", "of_term-ttyd-fail")
+        for cmd in commands
+    )
+
+
 def test_float_ball_backend_env_is_allowlisted(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("OPENFOCUS_SYSTEM_FLOAT_BALL_BACKEND", "test")
     rt = _load_runtime(monkeypatch, tmp_path / "companion_state.json")

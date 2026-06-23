@@ -827,6 +827,7 @@ class RemoteTerminalGateway:
 
         live_ids: set[str] = set()
         checked_ids: set[str] = set()
+        resolved_runtimes_by_companion: dict[int, TerminalRuntimePort] = {}
 
         if runtime_resolver is not None:
             by_companion: dict[int, list[str]] = {}
@@ -850,6 +851,7 @@ class RemoteTerminalGateway:
                     continue
                 checked_ids.update(terminal_ids)
                 live_ids.update(_terminal_ids_from_list_response(response))
+                resolved_runtimes_by_companion[int(companion_id)] = resolved_runtime
         elif runtime is not None:
             try:
                 response = await runtime.request_terminal_list_sessions(
@@ -881,6 +883,35 @@ class RemoteTerminalGateway:
                 and str(terminal.terminal_id or "").strip() not in live_ids
             ]
             if stale_ids:
+                terminal_companion_ids = {
+                    str(terminal.terminal_id or "").strip(): int(
+                        terminal.companion_id or 0
+                    )
+                    for terminal in terminals
+                    if str(terminal.terminal_id or "").strip()
+                }
+
+                async def _stop_stale_terminal(terminal_id: str) -> None:
+                    stop_runtime = runtime
+                    if runtime_resolver is not None:
+                        companion_id = terminal_companion_ids.get(terminal_id, 0)
+                        if not companion_id:
+                            return
+                        stop_runtime = resolved_runtimes_by_companion.get(
+                            int(companion_id)
+                        )
+                    if stop_runtime is None:
+                        return
+                    with contextlib.suppress(Exception):
+                        await stop_runtime.request_terminal_stop(
+                            terminal_id=terminal_id,
+                            timeout_seconds=timeout_seconds,
+                        )
+
+                await asyncio.gather(
+                    *[_stop_stale_terminal(terminal_id) for terminal_id in stale_ids],
+                    return_exceptions=True,
+                )
                 with self._session_factory() as s:
                     for terminal_id in stale_ids:
                         with contextlib.suppress(terminal_records.TerminalNotFound):

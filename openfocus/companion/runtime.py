@@ -1120,6 +1120,25 @@ async def _ensure_tmux_terminal_session(
         raise RuntimeError("tmux set-option mouse failed")
 
 
+async def _best_effort_kill_tmux_session(tmux_name: str) -> None:
+    tmux_name = str(tmux_name or "").strip()
+    if not tmux_name:
+        return
+    tmux_bin = str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
+    if shutil.which(tmux_bin) is None:
+        return
+    with contextlib.suppress(Exception):
+        proc = await asyncio.create_subprocess_exec(
+            tmux_bin,
+            "kill-session",
+            "-t",
+            tmux_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=2.0)
+
+
 class _TerminalManager:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -1240,6 +1259,7 @@ class _TerminalManager:
             with contextlib.suppress(Exception):
                 if proc.returncode is None:
                     proc.terminate()
+            await _best_effort_kill_tmux_session(tmux_name)
             async with self._lock:
                 self._sessions.pop(tid, None)
             raise
@@ -1276,10 +1296,35 @@ class _TerminalManager:
             pass
         async with self._lock:
             sess = self._sessions.pop(tid, None)
-        if sess is None:
-            return
 
         if (os.environ.get("OPENFOCUS_TEST_TERMINAL_ECHO") or "").strip() == "1":
+            if sess is not None:
+                await out_q.put(
+                    pb2.ClientToServer(
+                        terminal_output=pb2.TerminalOutput(
+                            terminal_id=tid, data=b"", closed=True
+                        )
+                    )
+                )
+            return
+
+        tmux_name = ""
+        if sess is not None:
+            try:
+                if sess.process is not None and sess.process.returncode is None:
+                    sess.process.terminate()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(sess.process.wait(), timeout=2.0)
+                    if sess.process.returncode is None:
+                        sess.process.kill()
+            except Exception:
+                pass
+            tmux_name = str(sess.tmux_session or "").strip()
+        if not tmux_name:
+            tmux_name = _safe_tmux_session_name(tid)
+        await _best_effort_kill_tmux_session(tmux_name)
+        if sess is not None:
+            sess.close()
             await out_q.put(
                 pb2.ClientToServer(
                     terminal_output=pb2.TerminalOutput(
@@ -1287,40 +1332,6 @@ class _TerminalManager:
                     )
                 )
             )
-            return
-
-        try:
-            if sess.process is not None and sess.process.returncode is None:
-                sess.process.terminate()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(sess.process.wait(), timeout=2.0)
-                if sess.process.returncode is None:
-                    sess.process.kill()
-        except Exception:
-            pass
-        if sess.tmux_session:
-            tmux_bin = (
-                str(os.environ.get("OPENFOCUS_TMUX_BIN") or "tmux").strip() or "tmux"
-            )
-            if shutil.which(tmux_bin) is not None:
-                with contextlib.suppress(Exception):
-                    proc = await asyncio.create_subprocess_exec(
-                        tmux_bin,
-                        "kill-session",
-                        "-t",
-                        sess.tmux_session,
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
-        sess.close()
-        await out_q.put(
-            pb2.ClientToServer(
-                terminal_output=pb2.TerminalOutput(
-                    terminal_id=tid, data=b"", closed=True
-                )
-            )
-        )
 
     async def input(
         self, *, terminal_id: str, data: bytes, out_q: asyncio.Queue[pb2.ClientToServer]

@@ -14,6 +14,7 @@ class FakeTerminalConn:
         live_terminal_ids=None,
         input_error: Exception | None = None,
         mouse_error: Exception | None = None,
+        stop_error: Exception | None = None,
     ) -> None:
         self.starts: list[dict] = []
         self.inputs: list[dict] = []
@@ -24,6 +25,7 @@ class FakeTerminalConn:
         self.live_terminal_ids = list(live_terminal_ids or [])
         self.input_error = input_error
         self.mouse_error = mouse_error
+        self.stop_error = stop_error
 
     async def request_terminal_start(self, **kwargs):
         self.starts.append(kwargs)
@@ -47,6 +49,8 @@ class FakeTerminalConn:
 
     async def request_terminal_stop(self, **kwargs):
         self.stops.append(kwargs)
+        if self.stop_error is not None:
+            raise self.stop_error
         return SimpleNamespace(ok=True)
 
     async def request_terminal_list_sessions(self, **kwargs):
@@ -266,10 +270,14 @@ def test_terminal_gateway_reconciles_live_terminals_with_companion():
                 )
 
         conn = FakeTerminalConn(live_terminal_ids=["live-term"])
-        terminals = await gateway.list_live_terminals(owner=owner, runtime=conn)
+        terminals = await gateway.list_live_terminals(
+            owner=owner, runtime=conn, prune_stale=True
+        )
 
         assert [t.terminal_id for t in terminals] == ["live-term"]
         assert conn.list_sessions[0]["timeout_seconds"] == 3.0
+        assert [item["terminal_id"] for item in conn.stops] == ["stale-term"]
+        assert conn.stops[0]["timeout_seconds"] == 3.0
         with session_scope() as s:
             assert (
                 s.query(RemoteTerminalSession)
@@ -286,6 +294,138 @@ def test_terminal_gateway_reconciles_live_terminals_with_companion():
             assert (
                 s.query(RemoteTerminalOutput)
                 .filter(RemoteTerminalOutput.terminal_id == "stale-term")
+                .count()
+                == 0
+            )
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_reconciles_live_terminals_with_runtime_resolver():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_inspiration_space(24)
+        with session_scope() as s:
+            for tid in ("resolver-live", "resolver-stale"):
+                terminal_records.create_terminal_record(
+                    s,
+                    owner=owner,
+                    task_public_id="",
+                    companion_id=8,
+                    root_path="/tmp/inspiration",
+                    terminal_id=tid,
+                    backend="ttyd",
+                    connect_url="http://127.0.0.1:7681",
+                )
+                s.add(
+                    RemoteTerminalOutput(
+                        space_id=owner.db_space_id,
+                        terminal_id=tid,
+                        data_b64=base64.b64encode(b"out").decode("ascii"),
+                        nbytes=3,
+                    )
+                )
+
+        conn = FakeTerminalConn(live_terminal_ids=["resolver-live"])
+        resolver_calls: list[int] = []
+
+        def resolver(companion_id: int):
+            resolver_calls.append(companion_id)
+            return conn
+
+        terminals = await gateway.list_live_terminals(
+            owner=owner,
+            runtime_resolver=resolver,
+            prune_stale=True,
+        )
+
+        assert [t.terminal_id for t in terminals] == ["resolver-live"]
+        assert resolver_calls == [8]
+        assert conn.list_sessions[0]["timeout_seconds"] == 3.0
+        assert [item["terminal_id"] for item in conn.stops] == ["resolver-stale"]
+        assert conn.stops[0]["timeout_seconds"] == 3.0
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "resolver-live")
+                .one_or_none()
+                is not None
+            )
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "resolver-stale")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "resolver-live")
+                .count()
+                == 1
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "resolver-stale")
+                .count()
+                == 0
+            )
+
+    asyncio.run(_run())
+
+
+def test_terminal_gateway_prunes_stale_terminal_when_stop_fails():
+    async def _run() -> None:
+        from openfocus.db import session_scope
+        from openfocus.domains.agent_spaces import terminals as terminal_records
+        from openfocus.domains.terminals import gateway as terminal_gateway
+        from openfocus.models import RemoteTerminalOutput, RemoteTerminalSession
+
+        gateway = terminal_gateway.RemoteTerminalGateway()
+        owner = terminal_records.owner_for_agent_space(25)
+        with session_scope() as s:
+            terminal_records.create_terminal_record(
+                s,
+                owner=owner,
+                task_public_id="TASK-25",
+                companion_id=3,
+                root_path="/tmp/ws",
+                terminal_id="stop-fails-stale",
+                backend="ttyd",
+                connect_url="http://127.0.0.1:7681",
+            )
+            s.add(
+                RemoteTerminalOutput(
+                    space_id=owner.db_space_id,
+                    terminal_id="stop-fails-stale",
+                    data_b64=base64.b64encode(b"out").decode("ascii"),
+                    nbytes=3,
+                )
+            )
+
+        conn = FakeTerminalConn(
+            live_terminal_ids=[], stop_error=RuntimeError("stop failed")
+        )
+        terminals = await gateway.list_live_terminals(
+            owner=owner, runtime=conn, prune_stale=True
+        )
+
+        assert terminals == []
+        assert [item["terminal_id"] for item in conn.stops] == ["stop-fails-stale"]
+        with session_scope() as s:
+            assert (
+                s.query(RemoteTerminalSession)
+                .filter(RemoteTerminalSession.terminal_id == "stop-fails-stale")
+                .one_or_none()
+                is None
+            )
+            assert (
+                s.query(RemoteTerminalOutput)
+                .filter(RemoteTerminalOutput.terminal_id == "stop-fails-stale")
                 .count()
                 == 0
             )
